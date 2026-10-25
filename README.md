@@ -1,80 +1,87 @@
 # Hindsight Memory
 
-通过自部署 Hindsight 为 AstrBot 提供私聊长期记忆：保存已核对用户原文与标准持久化历史中的最终助手正文，跨会话召回，并提供本人查看、导出、显式更正、模式切换和完整遗忘。
+让 AstrBot 在新会话中也能记得你。
 
-## 开始使用
+插件会把 QQ 私聊中的文字对话交给 Hindsight 整理成长期记忆。之后聊天时，机器人会自动查找相关记忆，用来理解你的偏好、经历和之前讨论过的事情。
 
-需要 AstrBot **4.29.1**、内置 `local` 执行器、OneBot v11 私聊，以及启用 API Key 的 Hindsight **1.1.0**。
+- **自动记忆**：正常聊天即可，保存和查找记忆都在后台进行。
+- **跨会话使用**：切换或新建会话后，仍可使用已经保存的记忆。
+- **自己管理**：随时查看、导出、更正或清空自己的记忆，也可以暂停记录。
+- **按用户分开**：每个用户拥有独立的记忆空间。
 
-首次安装 Hindsight，请先按 [从零安装](INSTALL.md#从零安装-hindsight) 部署后端，再安装插件。已有后端可直接进行以下步骤。
+## 安装前需要什么
 
-1. 在 AstrBot 插件管理中选择通过链接安装，粘贴下面的仓库地址；安装程序自动读取 `requirements.txt`。
-2. 填写 API 地址、Key、固定服务标识、时区和精确的平台实例—用户组合。
-3. 为独立控制目录提供持久存储，启用插件并重载。
-4. 在开放的私聊中发送 `/hindsight status`，确认连接、认证和执行器。
-5. 告诉机器人一项偏好，等待任务完成，使用 `/hindsight view` 查看，再新建会话询问。
-
-完整步骤、Docker 网络、文件传输和后端部署见 [安装说明](INSTALL.md)，配置样例见 [config.example.json](config.example.json)。
-
-```text
-https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
-```
-
-`main` 分支用于源码安装。正式版本以 GitHub Release 和对应标签分发。
-
-## 命令
-
-| 命令 | 作用 |
+| 需要的东西 | 说明 |
 | --- | --- |
-| `/hindsight help` | 常用操作和采集范围 |
-| `/hindsight status` | 连接、认证、模式、本人队列、错误原因和清空进度 |
-| `/hindsight view [页码]` | 查看本人记忆，每页 10 条 |
-| `/hindsight show 记忆ID` | 查看类型、时间、来源和显式更正 |
-| `/hindsight recall 问题` | 本人范围内的手动检索 |
-| `/hindsight export` | UTF-8 JSON 文件，包含事实、整合观察、源文档和更正 |
-| `/hindsight correct 记忆ID 更正原文` | 提交更正，最多 1,000 字符；保留来源关联 |
-| `/hindsight on` | 开启采集和自动召回，继续有效代次的原队列 |
-| `/hindsight readonly` | 停止采集，保留自动召回，冻结未提交队列 |
-| `/hindsight pause` | 停止采集和自动召回，冻结未提交队列 |
-| `/hindsight retry` | 登记本人失败任务的显式重试 |
-| `/hindsight cancel 任务编号` | 停止指定任务，继续核对迟到子任务；已形成的记忆保留 |
-| `/hindsight forget` | 展示完整清空范围并生成有效期 120 秒的确认码 |
-| `/hindsight forget 确认码` | 作废旧代次、清理旧 Bank，转入暂停的新代次 |
+| 已能正常聊天的 AstrBot | 使用 **4.29.1**，执行器选择 **内置 Agent**（`local`） |
+| 通过 OneBot v11 接入的 QQ | 支持 **QQ 私聊纯文字** |
+| Hindsight **1.1.0** 记忆服务 | 需要它的 API 地址和 API Key |
 
-查看、导出和手动召回在暂停模式下仍可使用；更正须先开启采集。管理命令不进入普通用户消息采集窗口。状态和诊断不展示聊天原文或凭据。
+**从链接安装只会安装 AstrBot 插件。** Hindsight 是另行部署的记忆服务，负责存储和整理记忆。
 
-更正示例：先用 `view` 取得记忆 ID，再发送 `/hindsight correct 记忆ID 周五改成下午看展，上午计划作废。`。更正使用新文档和操作身份，后台抽取期间也会作为显式更正提供给后续召回；旧事实保留来源，完整遗忘清除这些内容。
+已经有 Hindsight 地址和 Key，可以直接安装。还没有记忆服务，请先看 [部署 Hindsight](deploy/README.md)；这部分需要 Docker、模型服务和向量服务的配置。
 
-## 支持范围
+## 在 AstrBot 中安装
 
-官方 AstrBot **4.29.1**、内置 `local` 执行器、OneBot v11 / `aiocqhttp` 私聊纯文本，连接启用 API Key 的 Hindsight **1.1.0**。参考集成环境为 Linux AstrBot 和 Linux Docker 后端。
+1. 打开 AstrBot 管理面板，进入 **插件管理 → 安装 → 从链接安装**。
+2. 粘贴下面的地址，点击安装。所需的 Python 依赖会自动安装。
 
-用户消息沿用标准接收事件与原始载荷核对规则。助手正文取自标准 `conversation_manager` 的持久化 `history`，只采集与同一来源账号、代次和会话内已核对用户事件关联的最终纯文本。保存后独立入队，无需等待用户再次发消息。
+   ```text
+   https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
+   ```
 
-助手关联以成功读取的前置历史为基线，`history_baselines` 保存历史长度与前缀摘要。只有持久历史增长、原前缀不变且新增部分包含对应用户轮次及最终助手正文时才关联。读取失败不建立助手锚点；压缩、编辑或截断改变边界时拒绝误配，用户原文采集独立进行。
+3. 在已安装列表中找到 **Hindsight Memory**，打开 **配置**，填写以下内容。
 
-助手记录标明 `role=assistant`、`delivery=unknown`、`time_source=history_observed_at`，不声称 QQ 送达。发送回执仅作可选附加信息；普通、分段和流式发送接口的真实限制见 [支持矩阵](SUPPORT.md)，各路径的最终正文采集以实际验证记录为依据。
+| 配置项 | 怎么填 |
+| --- | --- |
+| Hindsight API 地址 | 填记忆服务的地址。与 AstrBot 在同一 Docker 网络时通常为 `http://hindsight:8888` |
+| Hindsight API Key | 填记忆服务提供的 API Key；使用仓库部署模板时，取 `.env` 中的 `HINDSIGHT_API_TENANT_API_KEY` |
+| 稳定服务标识 | 给这套记忆服务起一个固定名字，例如 `home-hindsight`，以后沿用 |
+| 消息时区 | 中国大陆填 `Asia/Shanghai`，香港填 `Asia/Hong_Kong` |
+| 允许使用记忆的平台账号 | 新增一项，填接入 QQ 的平台实例 ID 和你自己的 QQ 号 |
 
-不采集 system/tool/reasoning、工具调用中间消息、临时召回块、压缩摘要和未保存草稿。助手建议不能直接记成用户接受，承诺和自称操作完成均属于助手陈述；实际完成需独立来源佐证。
+在与机器人的 **QQ 私聊**中发送 AstrBot 自带的 `/sid`：回复中的 **Bot ID** 就是“平台实例 ID”，**UID** 就是“用户 ID”。填写时去掉外侧的 `「」`。允许账号列表为空时，所有人都不会启用记忆。
 
-## 数据与可靠性
+4. 在 AstrBot 的 **配置文件 → AI** 中，执行器选择 **内置 Agent**，并在“其他配置”中关闭 **现实世界时间感知**和 **用户识别**。具体位置见 [对话设置](docs/INSTALL.md#四设置-astrbot-对话选项)。
+5. 其余配置保持默认，打开配置中的 **启用记忆**，保存并重载插件。插件在列表中也应处于启用状态。
 
-每条新增用户消息沿用 `uw1` 文档身份；每条最终助手正文使用独立 `aw1` 文档和 operation UUID。新建双方材料为 `dialogue_window_v2`，附带同账号、代次、会话最近 30 分钟内最多 4 个已核对用户轮次及对应助手，双方历史正文合计最多 4,000 字符，超限按最旧完整轮次移除。窗口用于解释“第二个”等指代；旧 `uw1` 冻结请求保持原样，不补入后来正文。
+接下来直接正常聊天即可。新消息会在后台整理为记忆，相关内容会在后续聊天中自动提供给机器人。首次使用从启用后的对话开始积累记忆。
 
-先原子保存身份、正文、摘要和操作 UUID。用户任务在限时召回结束后放行，助手任务独立放行。提交重试使用同一操作和材料；明确失败通过 Operations retry 处理。
+具体配置和地址填写方式见 [安装指南](docs/INSTALL.md)。
 
-每个稳定逻辑用户使用独立 Bank，账号权限按平台实例—用户逐项检查。会话变化不改变长期归属。召回仅临时注入模型，不改写人格和持久聊天历史；召回超时后继续聊天。
+## 日常怎么用
 
-业务 SQLite 保存窗口、队列、去重和显式更正；schema 3→4 新增短期 `replies` 和 `history_baselines` 表，沿用既有身份、Bank 与操作 UUID。暂停、只读、清空和移除账号权限均切断窗口及未冻结助手关联。移除权限删除对应 `window`，外键级联删除 replies/baselines；恢复采集从新核对事件与成功读取的前置历史建立语境，迟到助手不能跨边界回填。
+日常聊天无需输入记忆命令。想管理记忆时，在与机器人的 QQ 私聊中发送：
 
-独立控制库保存身份、代次、模式、删除记录和操作接收凭据，不含聊天正文。恢复历史业务快照时保留最新控制库，清除旧窗口及失效 `replies`、`history_baselines`，完成旧范围清理后再开放读写；旧 history 不能复活已遗忘内容。备份、升级和恢复见 [数据维护](DATA-MAINTENANCE.md)。
+| 想做什么 | 发送 |
+| --- | --- |
+| 查看已经记住的内容 | `/hindsight view` |
+| 只使用已有记忆，停止记录新内容 | `/hindsight readonly` |
+| 暂停记录和自动使用记忆 | `/hindsight pause` |
+| 恢复自动记录和使用记忆 | `/hindsight on` |
+| 清空自己的全部记忆 | `/hindsight forget`，再按回复确认 |
 
-参考后端通过 `deploy/` 提供。插件只连接公开 HTTP API，不安装 Hindsight 到 AstrBot Python 环境；抽取、整合和向量服务按后端配置运行。
+更正、导出、搜索和完整命令见 [使用指南](docs/USAGE.md)。连接有问题时，发送 `/hindsight status`，对照 [常见问题](docs/INSTALL.md#常见问题) 处理。
 
-## 开发与反馈
+## 会记录哪些内容
 
-开发环境、既有回归和修改方式见 [贡献说明](CONTRIBUTING.md)。问题反馈请提交至 [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues)，附上版本、复现步骤和脱敏错误信息。
+记录启用账号的私聊文字，以及 AstrBot 保存到会话历史中的机器人最终文字回复。群聊、图片、语音、引用、转发和以 `/` 开头的命令不自动记录；安装前的聊天记录不自动导入。
+
+记忆由 Hindsight 在后台整理，新消息不会立即出现在记忆列表里。记忆服务暂时不可用时，普通聊天仍可继续。
+
+对话内容会发送到你连接的 Hindsight，以及它配置的模型和向量服务。清空命令删除该插件管理的个人记忆；AstrBot 自己的聊天记录仍由 AstrBot 管理。
+
+## 更多说明
+
+- [安装指南](docs/INSTALL.md)：在 AstrBot 中安装、填配置、处理常见问题。
+- [使用指南](docs/USAGE.md)：查看、更正、导出、暂停和清空记忆。
+- [部署 Hindsight](deploy/README.md)：首次搭建记忆服务。
+- [兼容范围](docs/SUPPORT.md)：支持的版本、平台和消息类型。
+- [备份与恢复](docs/DATA-MAINTENANCE.md)：供维护 AstrBot 的人升级、备份和迁移时使用。
+- [开发与贡献](CONTRIBUTING.md)：源码结构、实现说明和开发检查。
+
+反馈问题请到 [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues)，附上版本、操作步骤和错误提示。
 
 ## 许可
 
-插件代码使用 MIT License，见 [LICENSE](LICENSE)。依赖和 Hindsight 部署材料的许可见 [NOTICE.md](NOTICE.md) 与 `deploy/HINDSIGHT-LICENSE`。
+插件使用 [MIT License](LICENSE)。Hindsight 和其他依赖的许可见 [NOTICE.md](NOTICE.md)。

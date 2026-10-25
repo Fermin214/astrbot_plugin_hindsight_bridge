@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from plugins.astrbot_plugin_hindsight_bridge.dialogue import (
+from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
     appended_history,
     final_reply,
     history_boundary,
@@ -17,8 +17,8 @@ from plugins.astrbot_plugin_hindsight_bridge.dialogue import (
     persistent_messages,
     plain_text,
 )
-from plugins.astrbot_plugin_hindsight_bridge.identity import Incoming
-from plugins.astrbot_plugin_hindsight_bridge.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 
 
 class HistoryBoundaries(unittest.TestCase):

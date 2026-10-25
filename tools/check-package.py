@@ -4,8 +4,30 @@ import ast
 import json
 from pathlib import Path
 import re
+import unicodedata
 
 import yaml
+
+
+def heading_anchors(path):
+    anchors, counts = set(), {}
+    fenced = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced or not re.match(r"^#{1,6} ", line):
+            continue
+        title = re.sub(r"^#{1,6} +", "", line).strip().lower()
+        slug = "".join(
+            char
+            for char in title
+            if not unicodedata.category(char).startswith(("P", "S"))
+            or char in "-_"
+        ).replace(" ", "-")
+        count = counts.get(slug, 0)
+        counts[slug] = count + 1
+        anchors.add(f"{slug}-{count}" if count else slug)
+    return anchors
 
 
 def main():
@@ -21,10 +43,18 @@ def main():
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", metadata["version"])
     assert metadata["support_platforms"] == ["aiocqhttp"]
     assert metadata["astrbot_version"] == ">=4.29.1,<4.30"
-    for name in ("LICENSE", "NOTICE.md", "main.py", "requirements.txt"):
+    for name in (
+        "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
+        "core/__init__.py", "scripts/backup.py",
+        "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
+        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md",
+    ):
         assert (root / name).is_file(), name
+    assert {path.name for path in root.glob("*.py")} == {"main.py"}
     schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
-    example = json.loads((root / "config.example.json").read_text(encoding="utf-8"))
+    example = json.loads(
+        (root / "examples/config.example.json").read_text(encoding="utf-8")
+    )
     assert schema["enabled"]["default"] is False and example["enabled"] is False
     assert not schema["api_key"]["default"] and not example["api_key"]
     for path in root.rglob("*.py"):
@@ -34,10 +64,15 @@ def main():
         if ".git" in path.parts:
             continue
         for link in re.findall(r"\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
-            if "://" in link or link.startswith("#"):
+            if "://" in link:
                 continue
-            target = link.split("#", 1)[0]
-            assert (path.parent / target).exists(), (str(path.relative_to(root)), link)
+            target, _, fragment = link.partition("#")
+            destination = path.parent / target if target else path
+            assert destination.exists(), (str(path.relative_to(root)), link)
+            if fragment and destination.suffix == ".md":
+                assert fragment in heading_anchors(destination), (
+                    str(path.relative_to(root)), link
+                )
     for line in (root / "deploy/.env.example").read_text(encoding="utf-8").splitlines():
         if line.startswith("#") or "=" not in line:
             continue

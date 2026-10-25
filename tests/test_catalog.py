@@ -6,12 +6,12 @@ import unittest
 
 import httpx
 
-from plugins.astrbot_plugin_hindsight_bridge.catalog import (
+from plugins.astrbot_plugin_hindsight_bridge.core.catalog import (
     export_bytes,
     render_memory,
     render_page,
 )
-from plugins.astrbot_plugin_hindsight_bridge.client import (
+from plugins.astrbot_plugin_hindsight_bridge.core.client import (
     EXPORT_FORMAT,
     HindsightClient,
     HindsightError,

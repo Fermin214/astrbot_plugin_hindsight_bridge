@@ -3,56 +3,56 @@
     "description": "启用记忆",
     "type": "bool",
     "default": false,
-    "hint": "先填写服务、时区、精确账号和持久控制目录，再启用并重载。状态命令检查连接与认证。"
+    "hint": "填好 API 地址、Key、服务标识、时区和允许账号后打开，保存并重载插件。之后正常聊天即可。"
   },
   "api_url": {
     "description": "Hindsight API 地址",
     "type": "string",
     "default": "",
-    "hint": "例如 http://hindsight:8888。同一记忆部署使用稳定地址；容器内 localhost 指向 AstrBot 自己。"
+    "hint": "填写记忆服务的 API 地址，不是网页管理面板地址。同一 Docker 网络中通常为 http://hindsight:8888。"
   },
   "api_key": {
     "description": "Hindsight API Key",
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "后端必须实际启用认证。插件会检查无 key 和错误 key 均被拒绝。"
+    "hint": "填写记忆服务的 API Key。仓库部署模板对应 .env 中的 HINDSIGHT_API_TENANT_API_KEY，不是模型 Key 或网页登录 Key。"
   },
   "service_id": {
     "description": "稳定服务标识",
     "type": "string",
     "default": "",
-    "hint": "为这个 Hindsight 服务取一个固定标识，例如 home-hindsight。更换为另一套服务时改用新标识；旧队列不会转发过去。"
+    "hint": "自己起一个固定名字，例如 home-hindsight，无需申请。同一套记忆服务一直沿用这个名字。"
   },
   "service_address_revision": {
     "description": "服务地址版本",
     "type": "int",
     "default": 1,
-    "hint": "同一服务迁址时保留服务标识，并递增此值；更换服务应改服务标识。"
+    "hint": "首次安装保持默认。同一服务搬迁地址时递增此值，具体步骤见备份与恢复文档。"
   },
   "timezone": {
     "description": "消息时区",
     "type": "string",
     "default": "UTC",
-    "hint": "IANA 时区，例如 Asia/Shanghai 或 Asia/Hong_Kong，用于解释消息中的相对日期。"
+    "hint": "中国大陆填 Asia/Shanghai，香港填 Asia/Hong_Kong，用于理解消息中的今天、明天等日期。"
   },
   "control_state_dir": {
     "description": "独立控制目录",
     "type": "string",
     "default": "",
-    "hint": "绝对路径，须位于业务数据目录之外。空值使用独立的 hindsight_bridge_control 插件数据目录；业务恢复必须保留此目录的最新版本。"
+    "hint": "首次安装可留空，插件会在 AstrBot 数据目录下自动创建 astrbot_plugin_hindsight_bridge_control。备份恢复时保留最新控制数据。"
   },
   "agent_id": {
     "description": "稳定 Agent 标识",
     "type": "string",
     "default": "default",
-    "hint": "区分记忆的 Agent 归属，避免使用可改名的人格名称。已有账号的持久映射通过数据迁移调整。"
+    "hint": "首次安装保持 default。已有记忆后不要随意修改；它用于区分记忆归属，不是机器人的显示名称。"
   },
   "allowed_accounts": {
     "description": "允许使用记忆的平台账号",
     "type": "template_list",
     "default": [],
-    "hint": "每项是一个精确的平台实例与用户组合，空列表表示全部关闭。",
+    "hint": "新增一项，填写接入实例和自己的 QQ 号。私聊发送 /sid，复制 Bot ID 和 UID；列表为空时所有人都不启用记忆。",
     "templates": {
       "account": {
         "name": "平台账号",
@@ -60,12 +60,14 @@
           "platform_instance_id": {
             "description": "平台实例 ID",
             "type": "string",
-            "default": ""
+            "default": "",
+            "hint": "在 QQ 私聊中发送 /sid，复制回复中的 Bot ID，去掉外侧括号；不是机器人登录的 QQ 号。"
           },
           "user_id": {
             "description": "用户 ID",
             "type": "string",
-            "default": ""
+            "default": "",
+            "hint": "填写你自己的 QQ 号，也就是私聊 /sid 回复中的 UID，去掉外侧括号。"
           }
         }
       }
@@ -75,64 +77,66 @@
     "description": "权限配置版本（自动维护）",
     "type": "int",
     "default": 1,
-    "hint": "迁移程序维护；精确账号配置为版本 2。"
+    "hint": "插件自动维护，无需手动填写。"
   },
   "allowed_platform_ids": {
-    "description": "P1 迁移：旧平台列表",
+    "description": "旧版配置兼容：平台列表",
     "type": "list",
     "default": [],
-    "hint": "仅用于迁移 P1 配置，日常配置使用允许的平台账号。"
+    "hint": "首次安装留空。添加使用者请填写上面的“允许使用记忆的平台账号”。"
   },
   "allowed_user_ids": {
-    "description": "P1 迁移：旧用户列表",
+    "description": "旧版配置兼容：用户列表",
     "type": "list",
     "default": [],
-    "hint": "仅用于迁移 P1 配置，多个实例与多个用户的旧组合须手动填写精确账号。"
+    "hint": "首次安装留空。添加使用者请填写上面的“允许使用记忆的平台账号”。"
   },
   "recall_timeout": {
     "description": "召回总超时（秒）",
     "type": "float",
     "default": 4,
-    "hint": "自动召回总时限，最多 4 秒；超时后继续普通聊天。"
+    "hint": "首次安装保持默认。自动查找记忆最多等待 4 秒，超时后继续普通聊天。"
   },
   "recall_max_tokens": {
     "description": "召回结果 token 预算",
     "type": "int",
-    "default": 1200
+    "default": 1200,
+    "hint": "首次安装保持默认，用于限制每次取回的记忆文字量。"
   },
   "recall_query_tokens": {
     "description": "查询 token 上限",
     "type": "int",
     "default": 380,
-    "hint": "优先保留当前问题，再添加最近用户语境；最大 400，与结果预算分开。"
+    "hint": "首次安装保持默认。限制发送给记忆服务的查询长度，优先使用本条问题，最多 400 token。"
   },
   "query_tokenizer": {
     "description": "查询编码",
     "type": "string",
     "default": "o200k_base",
-    "hint": "应与 Hindsight 服务一致。初始化时加载词表。"
+    "hint": "首次安装保持默认。服务采用其他编码时，再由维护者调整。"
   },
   "queue_max_tasks": {
     "description": "未完成队列条数上限",
     "type": "int",
     "default": 10000,
-    "hint": "达到上限会暂停新采集，已有任务继续处理；默认 10,000 条。"
+    "hint": "首次安装保持默认。积压达到 10,000 条时停止接收新记录，已有任务继续处理。"
   },
   "queue_max_mib": {
     "description": "队列请求正文上限（MiB）",
     "type": "int",
     "default": 64,
-    "hint": "未完成任务的冻结正文容量；默认 64 MiB。"
+    "hint": "首次安装保持默认。本地待处理记录的正文总容量上限，默认 64 MiB。"
   },
   "command_prefixes": {
     "description": "额外排除的命令前缀",
     "type": "list",
     "default": [],
-    "hint": "以 / 开头的文本固定排除；这里可填写其他命令前缀。"
+    "hint": "以 / 开头的消息自动排除。使用其他命令前缀时，可在这里补充；普通使用留空。"
   },
   "context_max_chars": {
     "description": "注入记忆最大字符数",
     "type": "int",
-    "default": 4000
+    "default": 4000,
+    "hint": "首次安装保持默认。限制每次聊天提供给模型的记忆文字长度。"
   }
 }

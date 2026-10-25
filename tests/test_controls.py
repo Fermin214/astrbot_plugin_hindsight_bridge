@@ -15,11 +15,11 @@ from unittest.mock import patch
 import httpx
 import test_reliability as reliability
 
-from plugins.astrbot_plugin_hindsight_bridge.client import HindsightClient
-from plugins.astrbot_plugin_hindsight_bridge.identity import Scope
-from plugins.astrbot_plugin_hindsight_bridge.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.permissions import migrate, pairs
-from plugins.astrbot_plugin_hindsight_bridge.worker import Worker
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.permissions import migrate, pairs
+from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
 @contextmanager

@@ -18,21 +18,21 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 
-from .catalog import export_bytes, render_memory, render_page
-from .client import HindsightClient, HindsightError
-from .dialogue import (
+from .core.catalog import export_bytes, render_memory, render_page
+from .core.client import HindsightClient, HindsightError
+from .core.dialogue import (
     appended_history,
     final_reply,
     history_boundary,
     history_messages,
     persistent_messages,
 )
-from .identity import Incoming, sha256
-from .materials import encoding, memory_block, recall_query
-from .outbox import Outbox, QueueError
-from .permissions import migrate, pairs
-from .source import local_runner, native_snapshot
-from .worker import Worker
+from .core.identity import Incoming, sha256
+from .core.materials import encoding, memory_block, recall_query
+from .core.outbox import Outbox, QueueError
+from .core.permissions import migrate, pairs
+from .core.source import local_runner, native_snapshot
+from .core.worker import Worker
 
 
 class HindsightBridge(Star):
@@ -729,7 +729,7 @@ class HindsightBridge(Star):
                 yield event.plain_result("记忆范围正在恢复，请稍后查询。")
                 return
             try:
-                from .materials import utc_timestamp
+                from .core.materials import utc_timestamp
 
                 result = await self.recall_text(
                     scope["bank"], query, timestamp=utc_timestamp(), scope=scope

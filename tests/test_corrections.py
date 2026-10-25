@@ -8,9 +8,9 @@ from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
-from plugins.astrbot_plugin_hindsight_bridge.identity import Incoming, sha256
-from plugins.astrbot_plugin_hindsight_bridge.materials import memory_block
-from plugins.astrbot_plugin_hindsight_bridge.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
+from plugins.astrbot_plugin_hindsight_bridge.core.materials import memory_block
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 
 
 class Corrections(unittest.TestCase):

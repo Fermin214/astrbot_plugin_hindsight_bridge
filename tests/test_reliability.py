@@ -14,21 +14,21 @@ from unittest.mock import patch
 
 import httpx
 
-from plugins.astrbot_plugin_hindsight_bridge.client import HindsightClient
-from plugins.astrbot_plugin_hindsight_bridge.identity import (
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import (
     Incoming,
     Scope,
     canonical,
     sha256,
 )
-from plugins.astrbot_plugin_hindsight_bridge.materials import (
+from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
     memory_block,
     recall_query,
     token_count,
 )
-from plugins.astrbot_plugin_hindsight_bridge.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.source import local_runner, native_snapshot
-from plugins.astrbot_plugin_hindsight_bridge.worker import Worker
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_snapshot
+from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
 class Service:
