@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "api_url": "http://hindsight:8888",
+  "api_key": "",
+  "service_id": "home-hindsight",
+  "service_address_revision": 1,
+  "timezone": "Asia/Shanghai",
+  "agent_id": "default",
+  "control_state_dir": "/AstrBot/hindsight-control",
+  "permission_config_version": 2,
+  "allowed_accounts": [
+    {
+      "__template_key": "account",
+      "platform_instance_id": "your-onebot-instance",
+      "user_id": "your-qq-number"
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+name: astrbot-hindsight
+
+services:
+  db:
+    build: ./postgres
+    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_DB: hindsight
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a generated database password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    shm_size: 128m
+    mem_limit: 384m
+    networks: [backend]
+
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      HINDSIGHT_API_DATABASE_URL: postgresql://hindsight:${POSTGRES_PASSWORD:?}@db:5432/hindsight
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?Generate an API key}
+      HINDSIGHT_CP_DATAPLANE_API_URL: http://127.0.0.1:8888
+      HINDSIGHT_CP_DATAPLANE_API_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?}
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?Generate a control plane access key}
+      HINDSIGHT_API_WORKER_ID: ${HINDSIGHT_API_WORKER_ID:?Set a stable unique worker name}
+      HINDSIGHT_API_WORKER_MAX_SLOTS: "2"
+      HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS: "1"
+      HINDSIGHT_API_DB_POOL_MIN_SIZE: "2"
+      HINDSIGHT_API_DB_POOL_MAX_SIZE: "10"
+      HINDSIGHT_API_OPERATION_RETENTION_DAYS: "0"
+      HINDSIGHT_API_VECTOR_EXTENSION: pgvector
+      HINDSIGHT_API_TEXT_SEARCH_EXTENSION: pgroonga
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "8192"
+      HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS: "8192"
+      HINDSIGHT_API_LOG_LEVEL: warning
+      HINDSIGHT_API_OTEL_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${HINDSIGHT_API_PORT:-8888}:8888"
+      - "127.0.0.1:${HINDSIGHT_UI_PORT:-9999}:9999"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/health', timeout=5)"]
+      interval: 20s
+      timeout: 8s
+      start_period: 90s
+      retries: 6
+    mem_limit: 896m
+    memswap_limit: 1280m
+    networks: [backend, clients]
+
+networks:
+  backend:
+    internal: true
+  clients:
+    name: ${HINDSIGHT_CLIENT_NETWORK:-astrbot_hindsight}
+
+volumes:
+  postgres_data:

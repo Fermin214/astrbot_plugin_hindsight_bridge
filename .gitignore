@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.local/
+secrets/
+*.log
+*.sqlite*
+*.db*
+backups/
+*.tar*
+*.zip
+identity.json

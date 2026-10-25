@@ -1,0 +1,11 @@
+* text=auto
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+.env.example text eol=lf
+.github/ export-ignore
+tests/ export-ignore
+tools/ export-ignore
+requirements-dev.txt export-ignore
