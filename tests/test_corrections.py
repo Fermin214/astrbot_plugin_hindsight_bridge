@@ -10,7 +10,7 @@ from pathlib import Path
 
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import memory_block
-from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError, SCHEMA_VERSION
 
 
 class Corrections(unittest.TestCase):
@@ -141,7 +141,44 @@ class Corrections(unittest.TestCase):
             ],
             "fact-1",
         )
-        self.assertEqual(self.queue.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(
+            self.queue.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+        )
+
+    def test_administrator_correction_retains_provenance_after_completion_and_restart(self):
+        captured = self.capture(target={
+            **self.target, "source": "administrator", "submitted_by": "admin",
+        })
+        item = self.queue.verify(self.queue.get(captured.task_id))["items"][0]
+        self.assertEqual(item["metadata"]["role"], "administrator")
+        self.assertEqual(item["metadata"]["format"], "administrator_correction_v1")
+        self.assertTrue(item["document_id"].startswith("ac1-"))
+        self.assertIn("不是用户私聊原文", item["content"])
+        self.queue.update(captured.task_id, "done")
+        self.queue.close()
+        self.open()
+        changes = self.queue.corrections(self.queue.scope(self.source))
+        self.assertEqual(changes[0]["source"], "administrator")
+        self.assertEqual(changes[0]["submitted_by"], "admin")
+        block = memory_block([], corrections=changes)
+        self.assertIn("管理员更正", block)
+        self.assertNotIn("用户更正", block)
+        self.queue.forget(captured.scope_id)
+        self.assertEqual(self.queue.db.execute("SELECT COUNT(*) FROM corrections").fetchone()[0], 0)
+
+    def test_schema_four_migration_preserves_user_correction_and_frozen_request(self):
+        captured = self.capture()
+        frozen = self.queue.verify(self.queue.get(captured.task_id))
+        self.queue.db.execute("ALTER TABLE corrections DROP COLUMN submitted_by")
+        self.queue.db.execute("ALTER TABLE corrections DROP COLUMN source")
+        self.queue.db.execute("PRAGMA user_version=4")
+        self.queue.db.commit()
+        self.queue.close()
+        self.open()
+        self.assertEqual(self.queue.verify(self.queue.get(captured.task_id)), frozen)
+        changes = self.queue.corrections(self.queue.scope(self.source))
+        self.assertEqual(changes[0]["source"], "user")
+        self.assertEqual(changes[0]["submitted_by"], "")
 
     def test_derived_observations_do_not_restore_corrected_values(self):
         changes = [

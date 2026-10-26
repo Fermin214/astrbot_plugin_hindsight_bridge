@@ -174,6 +174,11 @@ def export_bytes(payload) -> bytes:
                 )
             }
         )
+        for key in ("source", "submitted_by"):
+            if key in row:
+                if not isinstance(row[key], str):
+                    raise HindsightError(code)
+                clean["corrections"][-1][key] = row[key]
     try:
         return json.dumps(clean, ensure_ascii=False, allow_nan=False, indent=2).encode(
             "utf-8"

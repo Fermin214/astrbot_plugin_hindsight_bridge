@@ -63,7 +63,15 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 业务库 `runtime.sqlite3` 保存窗口、队列、去重和更正。独立 `control.sqlite3` 保存身份、Bank、代次、模式、删除日志、采集下限、操作接收凭据和取消意图，不保存聊天正文。
 
-业务格式 2→3 新增 `corrections`，3→4 新增短期 `replies` 和 `history_baselines`，沿用既有部署、逻辑身份、Bank、代次、摘要与 operation UUID。缺少历史基线的旧任务不从后来的历史补造助手锚点。
+业务格式 2→3 新增 `corrections`，3→4 新增短期 `replies` 和 `history_baselines`，4→5 为更正补充来源和管理员标识。迁移沿用既有部署、逻辑身份、Bank、代次、摘要与 operation UUID。缺少历史基线的旧任务不从后来的历史补造助手锚点。
+
+## AstrBot 管理视图与安装
+
+`views/memory/` 使用 AstrBot 插件视图 bridge 调用 `core/panel.py` 注册的管理 API，继承 Dashboard 登录与插件访问权限。页面不读取 Dashboard 凭据，不直接访问后端数据库。模型选项只输出名称与兼容结论，服务端通过公开供应商接口生成 Hindsight 配置。
+
+配套安装命令打包固定服务模板和配置，在 Linux Docker 主机创建独立服务及数据卷。容器部署按 AstrBot 容器 hostname 识别目标，自动连接记忆网络，并让 Hindsight 使用模型服务所在的已有网络。`setup.json` 保存配套服务身份和密钥，重复生成安装命令沿用；数据库身份及嵌入模型变化需要迁移。安装设计见 [安装与管理设计](SETUP-DESIGN.md)。
+
+管理员更正使用 `administrator_correction_v1` 与独立 `ac1` 文档，记录提交者，后续召回及导出保留来源。它不冒充用户私聊原文。模式与完整遗忘沿用控制库和删除记录；异步操作返回前重新核对用户范围与代次。
 
 `replies.user_task_id` 与 `history_baselines.task_id` 外键关联 `window(task_id)`，均使用 `ON DELETE CASCADE`。移除账号权限删除对应窗口并级联清理关联。只读、暂停和清空也会切断窗口及未冻结的助手关联。恢复后从新核对事件和成功读取的前置历史建立语境，迟到助手不能跨边界回填。
 

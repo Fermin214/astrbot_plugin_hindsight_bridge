@@ -174,6 +174,28 @@ def correction_payload(payload: dict, target: dict, text: str) -> dict:
         corrects_document_id=target.get("document_id") or "",
         content_sha256=sha256(item["content"]),
     )
+    if target.get("source") == "administrator":
+        item["document_id"] = "ac1-" + item["document_id"][4:]
+        item["content"] = (
+            "材料格式：administrator_correction_v1\n"
+            "这是 AstrBot 管理员在管理面板提交的更正，不是用户私聊原文。"
+            "旧记忆仅用于确定被更正对象。管理员的新陈述覆盖同一事项的旧值，"
+            "必须保留管理员归因，不能声称用户亲自确认。\n"
+            "【提交管理员】\n" + target["submitted_by"]
+            + "\n【旧记忆引用】\n" + json.dumps(
+                {k: target[k] for k in ("id", "text", "document_id") if k in target},
+                ensure_ascii=False,
+            )
+            + "\n【管理员更正原文】\n" + text
+        )
+        item["context"] = "AstrBot 管理面板管理员提交的更正，非用户私聊原文。"
+        metadata.update(
+            format="administrator_correction_v1", role="administrator",
+            source="astrbot.management", delivery="submitted",
+            submitted_by=target["submitted_by"],
+            time_source="management_submitted_at",
+            content_sha256=sha256(item["content"]),
+        )
     return payload
 
 
@@ -216,7 +238,8 @@ def memory_block(results: list[dict], *, limit=4000, corrections=()) -> str:
         return header + json.dumps(
             {
                 "记忆": facts,
-                "用户显式更正": changes,
+                ("显式更正" if any(c.get("source") == "administrator" for c in changes)
+                 else "用户显式更正"): changes,
                 "更正材料省略": omitted,
                 "省略处理": "更正超出预算时不沿用旧结论，缺少有效陈述须询问用户。",
             },
@@ -237,9 +260,11 @@ def memory_block(results: list[dict], *, limit=4000, corrections=()) -> str:
         item = {
             "更正对象": row["memory_id"],
             "旧记忆片段": row["original_text"][:160],
-            "用户更正": row["text"],
+            ("管理员更正" if row.get("source") == "administrator" else "用户更正"): row["text"],
             "时间": row["occurred_at"],
         }
+        if row.get("source") == "administrator":
+            item.update(source="administrator", submitted_by=row["submitted_by"])
         if len(render([], [item, *changes])) <= limit:
             changes.insert(0, item)
         else:

@@ -478,12 +478,18 @@ class HindsightClient:
         if type(offset) is not int or offset < 0 or type(limit) is not int or limit < 1:
             raise HindsightError("invalid_pagination", permanent=True)
         # The supplied bank is the entire read scope; no bank discovery is needed.
-        value = await self.request(
-            "GET",
-            self.bank_path(bank)
-            + "/memories/list?"
-            + urlencode({"offset": offset, "limit": limit}),
-        )
+        try:
+            value = await self.request(
+                "GET",
+                self.bank_path(bank)
+                + "/memories/list?"
+                + urlencode({"offset": offset, "limit": limit}),
+            )
+        except HindsightError as exc:
+            # A new scope has no bank until the first retained conversation.
+            if exc.code == "http_404":
+                return {"items": [], "total": 0, "offset": offset, "limit": limit}
+            raise
         rows, total = value.get("items"), value.get("total")
         if (
             not isinstance(rows, list)

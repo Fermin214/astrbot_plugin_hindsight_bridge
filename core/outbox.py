@@ -14,7 +14,7 @@ from .identity import Incoming, Scope, canonical, sha256
 from .locking import exclusive_lock
 from .materials import Message, correction_payload, request_digest, retain_payload
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ACTIVE_STATES = ("ready", "submitting", "unknown", "tracking", "cancel_requested")
 STATES = (
     *ACTIVE_STATES,
@@ -91,7 +91,7 @@ class Outbox:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
                 raise QueueError("unsupported_database_version")
             self._schema()
             deployment = self.setting("deployment_id")
@@ -219,6 +219,8 @@ class Outbox:
             ("scopes", "principal_id", "TEXT NOT NULL DEFAULT ''"),
             ("scopes", "revision", "INTEGER NOT NULL DEFAULT 0"),
             ("outbox", "cancel_intent", "INTEGER NOT NULL DEFAULT 0"),
+            ("corrections", "source", "TEXT NOT NULL DEFAULT 'user'"),
+            ("corrections", "submitted_by", "TEXT NOT NULL DEFAULT ''"),
         ):
             columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
             if column not in columns:
@@ -409,6 +411,12 @@ class Outbox:
             )
         ]
 
+    def list_scopes(self):
+        return self.db.execute(
+            "SELECT * FROM scopes WHERE connection_id=? ORDER BY platform_instance_id,user_id",
+            (self.connection_id,),
+        ).fetchall()
+
     def sync_permissions(self, accounts):
         self.permission_pairs = frozenset(accounts)
         with self.db:
@@ -532,6 +540,17 @@ class Outbox:
             if correction is None
             else canonical({"text": incoming.text, "target": correction["id"]})
         )
+        if correction is not None and correction.get("source") == "administrator":
+            if (
+                not isinstance(correction.get("submitted_by"), str)
+                or not correction["submitted_by"].strip()
+                or len(correction["submitted_by"]) > 200
+            ):
+                raise QueueError("invalid_correction")
+            source_digest = sha256(canonical({
+                "text": incoming.text, "target": correction["id"],
+                "source": "administrator", "submitted_by": correction["submitted_by"],
+            }))
         identity = incoming.scope(self.deployment_id)
         key = identity.event_key(incoming.message_id)
         args = (self.connection_id, identity.id, key)
@@ -623,7 +642,9 @@ class Outbox:
             )
             if correction is not None:
                 self.db.execute(
-                    "INSERT INTO corrections VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO corrections "
+                    "(task_id,memory_id,document_id,original_text,text,occurred_at,source,submitted_by) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (
                         task_id,
                         correction["id"],
@@ -631,6 +652,8 @@ class Outbox:
                         correction["text"],
                         incoming.text,
                         incoming.iso_timestamp,
+                        correction.get("source", "user"),
+                        correction.get("submitted_by", ""),
                     ),
                 )
             self.db.execute(

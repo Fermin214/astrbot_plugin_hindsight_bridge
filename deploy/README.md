@@ -1,19 +1,25 @@
 # 部署 Hindsight 记忆服务
 
-Hindsight 负责保存、整理和查找记忆，AstrBot 插件通过 API 连接它。这份指南供自己搭建服务的人使用；已有 API 地址和 Key，直接看 [安装 AstrBot 插件](../docs/INSTALL.md)。
+Hindsight 负责保存、整理和查找记忆，AstrBot 插件通过 API 连接它。普通安装使用 AstrBot 插件详情中的 **记忆管理 → 首次设置**，步骤见 [安装指南](../docs/INSTALL.md)。
 
-部署完成后，你会得到插件需要的 **API 地址**和 **API Key**。
+向导从 AstrBot 已配置的供应商中选择对话、嵌入和可选重排模型，生成一条安装命令，在运行 AstrBot 的 Linux 主机终端执行一次。安装器自动生成密钥、启动服务并连接容器网络；回到向导选择接入实例和 QQ 账号，点击「连接并启用」即可。主机需已安装 Docker Engine 和 Compose v2，执行账号需能使用 Docker。
+
+下文是服务维护者可选的 **手工 Linux 部署方式**，适合自行维护后端模型、网络和数据库的场景。完成后，在首次设置中选择「连接已有 Hindsight」，填写服务 **API 地址**和 **API Key**。
+
+向导生成的配套服务文件位于执行账号的 `~/.local/share/astrbot-memory-服务编号/`，准确路径由安装命令显示。配套部署使用独立的 Compose 项目和数据卷，AstrBot 在 Docker 中时不开放主机 API 端口，也不开放独立管理网页端口。下文的端口、服务名和数据卷名称适用于手工部署模板；维护配套服务时应使用其安装目录中的配置。
 
 ## 准备条件
 
-- 一台安装了 Docker Engine 和 Compose v2 的 Linux 主机，或已启动 Docker Desktop 的 Windows 电脑；Windows 使用 Linux 容器。
+- 一台安装了 Docker Engine 和 Compose v2 的 Linux 主机。
 - Git 和 Python 3，用于下载部署文件和生成初始配置。
 - 一个供 Hindsight 整理记忆使用的对话模型服务：API Key、接口地址和模型名。
 - 一个向量模型服务：API Key、接口地址、模型名和输出维数。仓库模板使用百炼 `text-embedding-v4`，维数为 `1024`。
 
-这些模型配置填写在 Hindsight 中。AstrBot 原有的聊天模型继续在 AstrBot 中配置；两边可以使用同一家服务，但需要分别填写。
+手工部署将这些模型配置填写到 Hindsight 的 `.env` 中。使用首次设置向导安装时，插件后台读取所选 AstrBot 供应商的地址和 Key，无需重复填写。
 
 服务包含 Hindsight **1.1.0 Slim** 与 PostgreSQL **17**，数据库构建包含 pgvector 和 PGroonga。模型通过远程接口调用，模板不需要本地显卡；API 调用费用按所用模型服务计费。
+
+首发支持 Linux，Windows 适配后续推出。Docker Desktop 仅用于开发和 Linux 容器验证，不作为用户部署方式。
 
 ## 一、下载部署文件
 
@@ -28,16 +34,8 @@ cd astrbot_plugin_hindsight_bridge/deploy
 
 ## 二、生成配置
 
-Linux：
-
 ```bash
 python3 init-env.py
-```
-
-Windows PowerShell：
-
-```powershell
-python init-env.py
 ```
 
 脚本会生成 `.env` 文件，并填好数据库密码、服务 API Key 和管理面板登录 Key。提示 `.env already exists` 表示配置文件已存在，直接编辑已有文件即可。
@@ -155,7 +153,7 @@ ssh -N -L 9999:127.0.0.1:9999 your-user@your-server
 
 把 `your-user@your-server` 换成服务器登录信息，保持终端打开，再访问自己电脑的 `http://127.0.0.1:9999`。改过服务端网页端口时，替换命令中第二个 `9999`。
 
-管理面板用于查看后端数据和维护服务，普通聊天无需打开它。
+这个独立管理面板用于后端维护。日常查看、搜索、更正、导出、模式切换和完整遗忘都在 AstrBot 插件的「记忆管理」视图中完成。
 
 ## 日常维护
 

@@ -1,12 +1,25 @@
 """Check the public plugin's metadata, syntax, and distribution boundaries."""
 
 import ast
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
 import unicodedata
 
 import yaml
+
+
+class ViewAssets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.paths = []
+
+    def handle_starttag(self, tag, attrs):
+        for key, value in attrs:
+            if key in {"src", "href"} and value:
+                if not value.startswith(("#", "/", "//")) and ":" not in value:
+                    self.paths.append(value.split("#", 1)[0].split("?", 1)[0])
 
 
 def heading_anchors(path):
@@ -46,10 +59,30 @@ def main():
     for name in (
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
+        "core/panel.py", "core/providers.py", "core/installer.py",
+        "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
+        ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
+        "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
+        "deploy/postgres/Dockerfile", "deploy/postgres/extensions.sql",
+        "deploy/HINDSIGHT-LICENSE",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
-        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md",
+        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
     ):
         assert (root / name).is_file(), name
+    for language in ("zh-CN", "en-US"):
+        translation = json.loads(
+            (root / ".astrbot-plugin/i18n" / f"{language}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert translation["views"]["memory"]["title"].strip(), language
+    for view in (root / "views").rglob("*.html"):
+        assets = ViewAssets()
+        assets.feed(view.read_text(encoding="utf-8"))
+        for name in assets.paths:
+            destination = (view.parent / name).resolve()
+            assert destination.is_relative_to(root / "views"), (str(view), name)
+            assert destination.is_file(), (str(view), name)
     assert {path.name for path in root.glob("*.py")} == {"main.py"}
     schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
     example = json.loads(
@@ -79,7 +112,7 @@ def main():
         key, value = line.split("=", 1)
         if key.endswith(("_PASSWORD", "_API_KEY", "_ACCESS_KEY")):
             assert not value.strip(), key
-    print("Plugin metadata, syntax, configuration, and document links passed.")
+    print("Plugin metadata, syntax, configuration, view assets, and document links passed.")
 
 
 if __name__ == "__main__":

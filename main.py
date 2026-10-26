@@ -31,6 +31,7 @@ from .core.identity import Incoming, sha256
 from .core.materials import encoding, memory_block, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import migrate, pairs
+from .core.panel import MemoryPanel
 from .core.source import local_runner, native_snapshot
 from .core.worker import Worker
 
@@ -54,6 +55,7 @@ class HindsightBridge(Star):
         self.idle.set()
         self.confirmations = {}
         self.permission_issue = ""
+        self.panel = MemoryPanel(self)
 
     @staticmethod
     def diagnostic(code):

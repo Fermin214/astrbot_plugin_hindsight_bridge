@@ -3,7 +3,7 @@
     "description": "启用记忆",
     "type": "bool",
     "default": false,
-    "hint": "填好 API 地址、Key、服务标识、时区和允许账号后打开，保存并重载插件。之后正常聊天即可。"
+    "hint": "首次使用请打开插件详情中的「记忆管理 → 首次设置」，按页面提示连接并启用，之后正常聊天即可。"
   },
   "api_url": {
     "description": "Hindsight API 地址",
@@ -22,7 +22,7 @@
     "description": "稳定服务标识",
     "type": "string",
     "default": "",
-    "hint": "自己起一个固定名字，例如 home-hindsight，无需申请。同一套记忆服务一直沿用这个名字。"
+    "hint": "首次设置向导自动维护。同一套记忆服务一直沿用这个名字，手工迁移时按数据维护指南操作。"
   },
   "service_address_revision": {
     "description": "服务地址版本",
@@ -52,7 +52,7 @@
     "description": "允许使用记忆的平台账号",
     "type": "template_list",
     "default": [],
-    "hint": "新增一项，填写接入实例和自己的 QQ 号。私聊发送 /sid，复制 Bot ID 和 UID；列表为空时所有人都不启用记忆。",
+    "hint": "推荐在「记忆管理 → 首次设置」中选择机器人并填写自己的 QQ 号。列表为空时所有人都不启用记忆。",
     "templates": {
       "account": {
         "name": "平台账号",

@@ -104,6 +104,17 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
 
+    async def test_new_bank_has_empty_catalog_and_export(self):
+        client = HindsightClient(
+            "https://hindsight.test", "service-secret",
+            transport=httpx.MockTransport(lambda _: httpx.Response(404)),
+        )
+        try:
+            self.assertEqual((await client.memory_page(BANK))["items"], [])
+            self.assertEqual((await client.export_memories(BANK))["total"], 0)
+        finally:
+            await client.close()
+
     async def test_official_list_detail_document_shapes_and_bank_scope(self):
         page = await self.client.list_memories(BANK, offset=1, limit=1)
         self.assertEqual((page["total"], page["offset"], len(page["items"])), (3, 1, 1))

@@ -10,9 +10,25 @@
 | Hindsight | **1.1.0**，开启 API Key 认证 |
 | QQ 接入 | **OneBot v11**，AstrBot 中的平台类型为 `aiocqhttp` |
 | 对话类型 | QQ 私聊纯文字 |
-| 部署方式 | Linux 上的 AstrBot 与 Hindsight；Windows 主机可通过 Docker Desktop 运行 Linux 容器 |
+| 部署方式 | Linux 原生 AstrBot，或使用桥接网络的 Docker AstrBot；Hindsight 运行于 Linux Docker |
 
-Windows 直接运行 Python 的检查覆盖核心逻辑、HTTP 客户端和 SQLite；完整集成使用 Linux 容器。
+首发面向 Linux。Windows 原生运行、Windows AstrBot 连接 Linux Hindsight 及其他 Windows 部署方式安排在后续版本。Docker Desktop 仅用于开发和 Linux 容器验证，不作为用户部署方式。
+
+## 安装与管理
+
+首次设置和记忆管理视图位于 AstrBot 插件详情内。配套 Linux 安装命令自动处理密钥、服务和网络，主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写地址与 Key 连接。
+
+### 模型供应商复用
+
+| 用途 | 支持范围 |
+| --- | --- |
+| 对话 | AstrBot `openai_chat_completion`，采用 Chat Completions 协议的 OpenAI 兼容服务 |
+| 嵌入 | AstrBot `openai_embedding`；设置向导检查实际向量并读取或自动检测维数 |
+| 重排 | 兼容的百炼、硅基流动和 Cohere 接口；也可不选，使用 RRF |
+
+供应商地址与 Key 由服务端读取。Responses、自定义代理、额外请求头或请求体等无法保持行为的组合会说明具体原因，不会自动换用其他模型。已有 Hindsight 的模型由该服务维护。
+
+详细步骤见 [安装指南](INSTALL.md)，手工维护见 [Linux 部署](../deploy/README.md)。
 
 ## 哪些内容会自动记忆
 
