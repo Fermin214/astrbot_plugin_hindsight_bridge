@@ -66,6 +66,7 @@ def main():
         "deploy/postgres/Dockerfile", "deploy/postgres/extensions.sql",
         "deploy/HINDSIGHT-LICENSE",
         "deploy/model_transport.py", "tools/check-model-protocols.py",
+        "deploy/managed_service.py", "deploy/model_probe.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
         "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
     ):
@@ -89,7 +90,8 @@ def main():
     example = json.loads(
         (root / "examples/config.example.json").read_text(encoding="utf-8")
     )
-    assert schema["enabled"]["default"] is False and example["enabled"] is False
+    for obsolete in ("enabled", "permission_config_version", "allowed_user_ids", "allowed_platform_ids"):
+        assert obsolete not in schema and obsolete not in example, obsolete
     assert not schema["api_key"]["default"] and not example["api_key"]
     for path in root.rglob("*.py"):
         if ".git" not in path.parts:

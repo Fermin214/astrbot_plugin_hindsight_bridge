@@ -18,23 +18,32 @@
     </header>
     <div id="startup" class="notice" role="status">正在连接 AstrBot…</div>
     <nav class="tabs" role="tablist" aria-label="记忆管理">
-      <button id="tab-setup" role="tab" aria-selected="true" aria-controls="panel-setup" type="button">首次设置</button>
-      <button id="tab-status" role="tab" aria-selected="false" aria-controls="panel-status" tabindex="-1" type="button">运行状态</button>
-      <button id="tab-memories" role="tab" aria-selected="false" aria-controls="panel-memories" tabindex="-1" type="button">记忆管理</button>
+      <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">记忆管理</button>
+      <button id="tab-setup" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1" type="button">设置</button>
     </nav>
 
-    <section id="panel-setup" role="tabpanel" aria-labelledby="tab-setup">
+    <section id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+<div id="setup-intro" class="notice" hidden>先安装或连接记忆服务，再配置模型与使用者。完成后即可正常聊天。</div>
+      <div class="section-heading"><h2>运行状态</h2><p>查看连接和用户记忆的运行情况。</p></div>
+      <div class="service-state surface">
+        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+        <div><h3 id="status-label">状态未知</h3><p id="status-description" class="hint">等待服务返回状态。</p></div>
+        <span id="enabled-label" class="badge">尚未读取配置</span>
+      </div>
+      <div class="section-heading"><h2>用户运行状态</h2><p>查看各用户的记忆模式、后台任务和错误信息。</p></div>
+      <div id="scope-statuses" class="scope-statuses"></div>
+
       <fieldset id="setup-fields" disabled>
         <legend class="sr-only">记忆服务设置</legend>
         <div class="section-heading">
-          <h2>连接记忆服务</h2>
-          <p>聊天、嵌入和重排模型直接从 AstrBot 已配置的供应商中选择。</p>
+          <h2>记忆服务</h2>
+          <p>安装或连接服务后，在这里管理模型、使用者和时区。</p>
         </div>
         <fieldset class="connection-options">
           <legend class="sr-only">安装方式</legend>
           <label class="choice">
             <input type="radio" name="connection-mode" value="managed" checked>
-            <span><strong>安装配套记忆服务</strong><small>第一次使用，选择这一项。支持 Linux 服务器。</small></span>
+            <span><strong>安装配套记忆服务</strong><small>在运行 AstrBot 的 Linux 主机安装。</small></span>
           </label>
           <label class="choice">
             <input type="radio" name="connection-mode" value="existing">
@@ -42,25 +51,20 @@
           </label>
         </fieldset>
         <div id="managed-settings" class="surface">
-          <div class="form-grid">
-            <label>聊天模型 <span class="required">必选</span><select id="chat-provider" required></select></label>
-            <label>嵌入模型 <span class="required">必选</span><select id="embedding-provider" required></select></label>
-            <label>重排模型 <span class="optional">可选</span><select id="rerank-provider"></select></label>
-          </div>
-          <p id="provider-help" class="hint"></p>
+
           <p class="hint">适用于运行 AstrBot 的 Linux 主机，需已安装 Docker 和 Compose。命令会自动配置服务与网络；AstrBot 使用 Docker 时无需开放额外端口。</p>
           <div class="actions">
             <button id="prepare" class="primary" type="button">生成安装命令</button>
-            <span class="hint">复用所选供应商的配置，不用再填模型密钥。</span>
+            <span class="hint">安装只部署服务，模型在安装完成后选择。</span>
           </div>
           <div id="installation" class="installation" hidden>
             <h3>在服务器上安装一次</h3>
-            <p>在运行 AstrBot 的 Linux 服务器终端粘贴一次，完成后回到这里连接并启用。</p>
+            <p>在运行 AstrBot 的 Linux 服务器终端粘贴一次，完成后回到这里检查连接并配置模型。</p>
             <label for="install-command">安装命令</label>
             <textarea id="install-command" rows="5" readonly spellcheck="false" autocomplete="off" aria-describedby="command-warning"></textarea>
             <div class="actions">
-              <button id="copy-command" type="button">复制命令</button>
-              <span id="command-warning" class="hint">命令含模型凭据，请勿发送给他人或公开截图。</span>
+              <button id="copy-command" type="button">复制并隐藏</button><button id="hide-command" type="button">关闭</button>
+              <span id="command-warning" class="hint">命令含这套服务的连接凭据，仅在生成时展示；不包含模型密钥。</span>
             </div>
             <p id="install-message" class="hint"></p>
           </div>
@@ -70,14 +74,20 @@
             <h3 id="connection-heading">安装完成后连接</h3>
             <div class="form-grid">
               <label>API 地址<input id="api-url" type="url" inputmode="url" placeholder="http://hindsight:8888" required autocomplete="off"></label>
-              <label>API Key<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
+              <label id="api-key-field">连接密钥<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
             </div>
             <p id="key-help" class="hint">填写记忆服务的连接密钥。</p>
             <button id="check-connection" type="button">检查连接</button>
             <p id="connection-result" role="status" class="hint">尚未检查连接。</p>
           </div>
+<div id="models-settings" class="settings-section" hidden><div class="section-heading"><h2>模型配置</h2><p>选择 AstrBot 已配置的模型，检查连接后应用到配套服务。</p></div><div class="surface">          <div class="form-grid">
+            <label>聊天模型 <span class="required">必选</span><select id="chat-provider"></select></label>
+            <label>嵌入模型 <span class="required">必选</span><select id="embedding-provider"></select></label>
+            <label>重排模型 <span class="optional">可选</span><select id="rerank-provider"></select></label>
+          </div>
+          <p id="provider-help" class="hint"></p><div class="actions"><button id="save-models" type="button">检查并保存模型</button></div></div></div>
           <div class="section-heading">
-            <h2>为谁开启记忆</h2>
+            <h2>使用者</h2>
             <p>选择 AstrBot 中已连接的机器人，再填写和它私聊的 QQ 号。每个用户的记忆独立管理。</p>
           </div>
           <div class="surface">
@@ -86,29 +96,35 @@
             <p id="platform-help" class="hint"></p>
           </div>
           <div class="settings-footer">
-            <label class="timezone">时区<input id="timezone" type="text" required placeholder="Asia/Shanghai" autocomplete="off"></label>
-            <label class="check-label"><input id="enabled" type="checkbox">启用长期记忆</label>
-            <button id="save-settings" type="submit" class="primary">保存设置</button>
-            <button id="connect-enable" type="button">连接并启用</button>
+            <label class="timezone">时区<input id="timezone" type="text" required placeholder="自动读取浏览器时区" autocomplete="off"></label>
+            <button id="save-settings" type="submit" class="primary">完成设置</button>
           </div>
-          <p class="hint">连接并启用会先检查服务，连接成功后保存设置。之后正常聊天即可。</p>
-          <p class="hint">启用时会自动关闭所选账号的「现实世界时间感知」和「用户识别」，以保持聊天原文准确关联；无需手动修改配置文件或重载插件。</p>
+          <p class="hint">保存后立即生效。正常聊天即可使用长期记忆。总开关位于 AstrBot 插件面板。</p>
+          <p id="timezone-help" class="hint"></p>
         </form>
       </fieldset>
+
+
+
+
+      <details id="maintenance" class="settings-section" hidden>
+        <summary>服务维护</summary>
+        <div class="surface">
+          <h3>重新部署</h3><p class="hint">更新或修复服务文件，沿用原有身份与数据。</p>
+          <button id="reinstall" type="button">重新生成安装命令</button>
+          <h3 class="maintenance-heading">卸载配套服务</h3>
+          <p class="hint">删除这套服务的容器、专属网络、数据卷和安装文件。插件本体在 AstrBot 插件面板卸载。</p>
+          <label class="check-label"><input id="delete-memory-data" type="checkbox">我确认删除这套配套服务及全部记忆数据</label>
+          <button id="prepare-uninstall" type="button" class="danger">生成完整卸载命令</button>
+          <div id="uninstallation" class="installation" hidden>
+            <label for="uninstall-command">卸载命令</label><textarea id="uninstall-command" rows="4" readonly spellcheck="false" autocomplete="off"></textarea>
+            <div class="actions"><button id="copy-uninstall" type="button">复制并隐藏</button><button id="hide-uninstall" type="button">关闭</button></div>
+          </div>
+        </div>
+      </details>
     </section>
 
-    <section id="panel-status" role="tabpanel" aria-labelledby="tab-status" hidden>
-      <div class="section-heading"><h2>服务状态</h2><p>查看连接和用户记忆的运行情况。</p></div>
-      <div class="service-state surface">
-        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-        <div><h3 id="status-label">状态未知</h3><p id="status-description" class="hint">等待服务返回状态。</p></div>
-        <span id="enabled-label" class="badge">尚未读取配置</span>
-      </div>
-      <div class="section-heading"><h2>用户记忆</h2><p>遇到写入错误时，可以到记忆管理中查看并重试。</p></div>
-      <div id="scope-statuses" class="scope-statuses"></div>
-    </section>
-
-    <section id="panel-memories" role="tabpanel" aria-labelledby="tab-memories" hidden>
+    <section id="panel-memories" role="tabpanel" aria-labelledby="tab-memories">
       <div class="section-heading"><h2>按用户管理记忆</h2><p>查看记住了什么，更正不准确的内容，或调整记忆的使用方式。</p></div>
       <fieldset id="memory-fields" disabled>
         <legend class="sr-only">用户记忆操作</legend>
@@ -142,7 +158,7 @@
           <button id="next" type="button">下一页</button>
         </div>
       </fieldset>
-      <div id="no-scopes" class="empty" hidden><h3>还没有可管理的用户</h3><p>在首次设置中添加用户并启用记忆，开始聊天后即可在这里查看。</p><button id="go-setup" type="button">前往首次设置</button></div>
+      <div id="no-scopes" class="empty" hidden><h3>还没有可管理的用户</h3><p>在设置中添加使用者，开始聊天后即可在这里查看。</p><button id="go-setup" type="button">前往设置</button></div>
     </section>
     <div id="feedback" class="feedback" role="status" aria-live="polite" hidden>
       <span id="feedback-message"></span>

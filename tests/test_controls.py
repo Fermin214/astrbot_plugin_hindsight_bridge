@@ -18,7 +18,7 @@ import test_reliability as reliability
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.permissions import migrate, pairs
+from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
@@ -419,33 +419,13 @@ class Controls(unittest.IsolatedAsyncioTestCase):
 
 
 class PermissionMigration(unittest.TestCase):
-    def test_exact_pairs_and_legacy_ambiguity(self):
-        config = {
-            "allowed_platform_ids": ["A"],
-            "allowed_user_ids": ["X", "Y"],
-        }
-        selected, error = migrate(config)
-        self.assertEqual(selected, {("A", "X"), ("A", "Y")})
-        self.assertFalse(error)
-        self.assertNotIn("allowed_user_ids", config)
-        ambiguous = {"allowed_platform_ids": ["A", "B"], "allowed_user_ids": ["X", "Y"]}
-        self.assertEqual(migrate(ambiguous), (frozenset(), "permission_pairs_required"))
-        configured = {
-            "permission_config_version": 2,
-            "allowed_accounts": [
-                {"platform_instance_id": "A", "user_id": "X"},
-                {"platform_instance_id": "B", "user_id": "Y"},
-            ],
-            "allowed_user_ids": ["X", "Y"],
-            "allowed_platform_ids": ["A", "B"],
-        }
-        selected, _ = migrate(configured)
-        self.assertNotIn(("A", "Y"), selected)
-        self.assertNotIn(("B", "X"), selected)
-        self.assertEqual(
-            migrate({"allowed_user_ids": ["X"]}, [("observed", "X")])[0],
-            {("observed", "X")},
-        )
+    def test_exact_pairs_cannot_expand_to_other_users(self):
+        selected = pairs([
+            {"platform_instance_id": "A", "user_id": "X"},
+            {"platform_instance_id": "B", "user_id": "Y"},
+        ])
+        self.assertEqual(selected, {("A", "X"), ("B", "Y")})
+        self.assertEqual(pairs([]), frozenset())
         with self.assertRaises(QueueError):
             pairs([{"platform_instance_id": "", "user_id": "X"}])
 

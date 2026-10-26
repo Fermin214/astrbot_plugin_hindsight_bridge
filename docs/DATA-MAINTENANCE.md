@@ -14,7 +14,7 @@
 
 填写过 `control_state_dir` 时，控制数据在指定目录中。默认两个插件目录随 AstrBot 的 `data` 持久保存；无需为了首次安装另加控制目录挂载。
 
-通过向导安装的服务文件位于执行安装命令者的 `~/.local/share/astrbot-memory-服务编号/`。该目录包含 `.env` 和 `compose.yaml`，需要一同备份；在这个目录中维护时，数据库服务名为 `memory-db`。`setup.json` 保存配套服务身份和 Key，应与插件配置一起保存。数据库仍存放在对应 Docker 数据卷中。
+通过向导安装的服务文件位于执行安装命令者的 `~/.local/share/astrbot-memory-服务编号/`。该目录包含 `.env` 和 `compose.yaml`，需要一同备份；在这个目录中维护时，数据库服务名为 `memory-db`。`setup.json` 保存配套服务身份和 Key，应与插件配置一起保存。数据库存放在 `memory_postgres` 数据卷中，模型配置与凭据存放在 `memory_settings` 数据卷的 `models.json` 中，两个卷都需要备份。
 
 **恢复旧业务备份时，保留最新的控制数据。** 例如周一备份、周二清空记忆、周三恢复周一备份，周二的清空记录仍需生效，防止旧记忆重新出现。
 

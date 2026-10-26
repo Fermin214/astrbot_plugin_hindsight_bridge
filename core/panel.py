@@ -10,7 +10,6 @@ import secrets
 import socket
 import sqlite3
 import time
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -18,7 +17,7 @@ import httpx
 from .catalog import export_bytes
 from .client import HindsightClient, HindsightError
 from .identity import Incoming, sha256
-from .installer import installation
+from .installer import installation, uninstallation
 from .materials import recall_query
 from .outbox import QueueError
 from .permissions import pairs
@@ -40,6 +39,8 @@ class MemoryPanel:
             ("connection/check", "POST", self.check),
             ("settings/save", "POST", self.save),
             ("install/prepare", "POST", self.prepare),
+            ("models/save", "POST", self.save_models),
+            ("uninstall/prepare", "POST", self.prepare_uninstall),
             ("scopes/<scope_id>/memories", "GET", self.memories),
             ("scopes/<scope_id>/detail", "GET", self.detail),
             ("scopes/<scope_id>/search", "POST", self.search),
@@ -114,7 +115,7 @@ class MemoryPanel:
             return value
         changed = False
         for key, size in (
-            ("id", 6), ("database_password", 32), ("api_key", 32), ("panel_key", 32)
+            ("id", 6), ("database_password", 32), ("api_key", 32), ("management_key", 32)
         ):
             if not value.get(key):
                 value[key] = secrets.token_hex(size)
@@ -174,13 +175,20 @@ class MemoryPanel:
                         for key in ("scope_id", "platform_instance_id", "user_id", "mode", "bank")
                     } | {"summary": plugin.outbox.summary(scope["scope_id"])})
         state = self.state()
+        managed_status = None
+        if state.get("management_url") and state.get("management_key"):
+            try:
+                managed_status = await self.managed_request(state)
+            except PanelError:
+                managed_status = {"installed": False, "configured": False, "ready": False}
+        configured = bool(config.get("api_url") and config.get("api_key") and config.get("service_id"))
         return {
             "config_revision": self.config_revision(),
             "config": {
-                "enabled": bool(config.get("enabled")),
+                "configured": configured,
                 "api_url": config.get("api_url", "") or state.get("api_url", ""),
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
-                "timezone": config.get("timezone", "UTC"),
+                "timezone": config.get("timezone", "") if configured else "",
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": bool(state.get("id")) and (
                     not config.get("api_url")
@@ -192,6 +200,9 @@ class MemoryPanel:
                 )},
             },
             "platforms": self.platforms(),
+            "managed_service": managed_status,
+            "has_installation": bool(state.get("id")),
+            "installation_api_url": state.get("api_url", ""),
             "providers": self.providers().options(),
             "status": {
                 "label": connection_message or plugin.status,
@@ -220,84 +231,102 @@ class MemoryPanel:
     async def check(self):
         payload = await self.body()
         url, key = self.credentials(payload)
+        state = self.state()
+        if state.get("management_url") and self.connection_url(url) == self.connection_url(state.get("api_url", "")):
+            status = await self.managed_request(state)
+            if not status["ready"]:
+                return {"ok": True, "ready": False, "message": "配套服务已安装，请选择模型并保存。"}
         client = HindsightClient(url, key)
         try:
             async with asyncio.timeout(10):
                 await client.ensure_auth(force=True)
         finally:
             await client.close()
-        return {"ok": True, "message": "记忆服务连接正常，API Key 有效。"}
+        return {"ok": True, "ready": True, "message": "记忆服务连接正常。"}
 
-    async def installation_marker(self, state, url, *, api_key=None):
-        """Return the deployed marker, or None when it cannot be read."""
-        identifier = state.get("id")
-        key = state.get("api_key") if api_key is None else api_key
-        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{12}", identifier):
-            return None
-        if not isinstance(key, str) or not key:
-            return None
-        client = None
+    async def managed_request(self, state, environment=None):
+        url, key = state.get("management_url"), state.get("management_key")
+        if not url or not key:
+            raise PanelError("请先生成并执行配套服务安装命令。")
         try:
-            client = HindsightClient(url, key)
-            bank = "astrbot-setup-" + identifier
-            offset = 0
-            async with asyncio.timeout(5):
-                while offset < 10000:
-                    result = await client.request(
-                        "GET", "/v1/default/banks?"
-                        + urlencode({"q": bank, "limit": 100, "offset": offset}),
-                    )
-                    rows, total = result.get("banks"), result.get("total")
-                    if (
-                        not isinstance(rows, list) or len(rows) > 100
-                        or type(total) is not int or total < offset + len(rows)
-                    ):
-                        raise HindsightError("invalid_bank_list")
-                    for row in rows:
-                        if not isinstance(row, dict) or not isinstance(row.get("bank_id"), str):
-                            raise HindsightError("invalid_bank_list")
-                        if row["bank_id"] == bank:
-                            name = row.get("name")
-                            return name if isinstance(name, str) else ""
-                    offset += len(rows)
-                    if offset >= total:
-                        return None
-                    if not rows:
-                        raise HindsightError("invalid_bank_list")
-            raise PanelError("安装标记查询超过一万条记录，请在服务端检查安装标记后重试。")
+            async with httpx.AsyncClient(
+                trust_env=False, follow_redirects=False, timeout=360 if environment is not None else 3,
+            ) as http:
+                headers = {"Authorization": "Bearer " + key}
+                response = await http.get(url + "/status", headers=headers)
+                response.raise_for_status()
+                status = response.json()
+                if status.get("installation_id") != state.get("id") or status.get("protocol") != 1:
+                    raise PanelError("配套服务标识不匹配，请检查安装记录。")
+                if environment is not None:
+                    response = await http.post(url + "/models", json={"environment": environment}, headers=headers)
+                    if response.status_code == 400:
+                        raise PanelError(response.json().get("message", "模型配置应用失败。"))
+                    response.raise_for_status()
+                    status = response.json()
+                return {
+                    "installed": True, "configured": status.get("configured") is True,
+                    "ready": status.get("ready") is True,
+                    "embedding_fingerprint": status.get("embedding_fingerprint", ""),
+                }
         except PanelError:
             raise
-        except (HindsightError, TimeoutError, OSError, ValueError):
-            return None
-        finally:
-            if client is not None:
-                await client.close()
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            raise PanelError("无法连接配套服务管理接口，请先执行安装命令或检查服务状态。") from None
 
     async def prepare(self):
         payload = await self.body()
         async with self.lock:
             self.check_revision(payload)
-            payload = dict(payload)
-            payload.pop("config_revision", None)
-            environment = await self.providers().resolve_checked(payload)
             state = self.state(create=True)
-            for key in ("chat_provider_id", "embedding_provider_id", "rerank_provider_id"):
-                state[key] = str(payload.get(key, ""))
             result = installation(
-                Path(__file__).resolve().parent.parent, state, environment,
+                Path(__file__).resolve().parent.parent, state,
                 container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
             )
-            fingerprint = result.get("embedding_fingerprint")
-            if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
-                raise PanelError("安装器未提供有效的嵌入配置标识，请更新插件后重试。")
-            marker = await self.installation_marker(state, result["api_url"])
-            if marker is not None and marker != "astrbot-setup-v1:" + fingerprint:
-                raise PanelError("已部署服务的嵌入配置与所选模型不一致，请先迁移已有向量数据。")
-            state.pop("embedding_identity", None)
-            state["candidate_fingerprint"] = fingerprint
             state["api_url"] = result["api_url"]
+            state["management_url"] = result["management_url"]
             self.store_state(state)
-            return {**result, "config_revision": self.config_revision()}
+            return {
+                "command": result["command"], "message": result["message"],
+                "api_url": result["api_url"], "config_revision": self.config_revision(),
+            }
+
+    async def save_models(self):
+        payload = await self.body()
+        async with self.lock:
+            self.check_revision(payload)
+            state = self.state()
+            await self.managed_request(state)
+            selection = {key: payload.get(key, "") for key in (
+                "chat_provider_id", "embedding_provider_id", "rerank_provider_id",
+            )}
+            environment = await self.providers().resolve_checked(selection)
+            self.check_revision(payload)
+            plugin = self.plugin
+            active = self.connection_url(plugin.config.get("api_url", "")) == self.connection_url(state.get("api_url", ""))
+            if active:
+                plugin.stopping = True
+                await plugin._close_resources()
+            try:
+                result = await self.managed_request(state, environment)
+                if not result["ready"]:
+                    raise PanelError("模型配置已接收，服务尚未就绪，请稍后刷新。")
+                state.update(selection)
+                self.store_state(state)
+            finally:
+                if active:
+                    plugin.permissions = None
+                    plugin.stopping = False
+                    await plugin.initialize()
+            return {"saved": True, "config_revision": self.config_revision(), "message": "模型配置已保存并生效。"}
+
+    async def prepare_uninstall(self):
+        payload = await self.body()
+        async with self.lock:
+            self.check_revision(payload)
+            if payload.get("delete_memory_data") is not True:
+                raise PanelError("请确认删除这套配套服务及全部记忆数据。")
+            return uninstallation(self.state())
 
     async def save(self):
         payload = await self.body()
@@ -307,23 +336,18 @@ class MemoryPanel:
             return await self._save(payload, revision)
 
     async def _save(self, payload, revision):
-        enabled = payload.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise PanelError("启用选项无效。")
         accounts = payload.get("allowed_accounts", [])
         selected = pairs(accounts)
         valid_platforms = {row["id"] for row in self.platforms()}
         if any(platform not in valid_platforms for platform, _ in selected):
             raise PanelError("请选择 AstrBot 中已启用的 OneBot 接入实例。")
-        if enabled and not selected:
-            raise PanelError("请至少添加一个允许使用记忆的 QQ 账号。")
         if any(not user.isdecimal() or len(user) > 20 for _, user in selected):
             raise PanelError("用户账号请填写自己的 QQ 号。")
         zone = str(payload.get("timezone", "UTC"))
         try:
             ZoneInfo(zone)
         except (ValueError, KeyError):
-            raise PanelError("时区无效，例如中国大陆可填写 Asia/Shanghai。") from None
+            raise PanelError("时区无效，请使用例如 Asia/Shanghai 的时区名称。") from None
         url, key = self.credentials(payload)
         try:
             client = HindsightClient(url, key)
@@ -331,28 +355,21 @@ class MemoryPanel:
             raise PanelError("服务地址格式无效，请填写完整的 HTTP 地址与有效 Key。") from None
         state = self.state()
         try:
-            if enabled:
-                async with asyncio.timeout(10):
-                    await client.ensure_auth(force=True)
-                if state.get("id") and client.url == self.connection_url(state.get("api_url", "")):
-                    candidate = state.get("candidate_fingerprint")
-                    if not isinstance(candidate, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate):
-                        raise PanelError("请先生成并执行安装命令，再连接并启用。")
-                    marker = await self.installation_marker(state, client.url, api_key=key)
-                    if marker != "astrbot-setup-v1:" + candidate:
-                        raise PanelError("服务尚未完成所选配置的安装，请执行最新安装命令后重试。")
+            if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):
+                status = await self.managed_request(state)
+                if not status["configured"] or not status["ready"]:
+                    raise PanelError("请先在设置中选择模型并保存，待服务就绪后完成设置。")
+            async with asyncio.timeout(10):
+                await client.ensure_auth(force=True)
         except (HindsightError, TimeoutError):
             raise PanelError("记忆服务连接检查失败，请检查服务地址、Key 与服务运行状态。") from None
         finally:
             await client.close()
         context = self.plugin.context
-        conversation_configs = []
         for platform, user in selected:
             profile = context.get_config(f"{platform}:FriendMessage:{user}")
             if not local_runner(profile):
                 raise PanelError("所选账号需要使用 AstrBot 内置 Agent，请先在配置文件中选择内置执行器。")
-            if all(profile is not previous for previous in conversation_configs):
-                conversation_configs.append(profile)
         if revision != self.config_revision():
             raise PanelError("连接检查期间配置已被更新，请刷新页面后重新保存。")
         plugin = self.plugin
@@ -375,28 +392,25 @@ class MemoryPanel:
         # process interruption cannot lose the route back to the old queue.
         self.store_state(state)
         updates = {
-            "enabled": enabled, "api_url": client.url, "api_key": key,
+            "api_url": client.url, "api_key": key,
             "service_id": service,
             "timezone": zone, "allowed_accounts": [
                 {"platform_instance_id": platform, "user_id": user}
                 for platform, user in sorted(selected)
-            ], "permission_config_version": 2,
+            ],
         }
         plugin.stopping = True
         try:
             await plugin._close_resources()
+            for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids"):
+                plugin.config.pop(obsolete, None)
             plugin.config.update(updates)
             plugin.config.save_config()
             plugin.permissions = None
             plugin.stopping = False
             await plugin.initialize()
-            if enabled and not plugin.outbox:
+            if not plugin.outbox:
                 raise PanelError("记忆服务初始化失败，请检查服务配置与本地数据目录。")
-            for profile in conversation_configs:
-                settings = profile.setdefault("provider_settings", {})
-                settings["datetime_system_prompt"] = False
-                settings["identifier"] = False
-                profile.save_config()
         except Exception:
             await plugin._close_resources()
             plugin.config.clear()
@@ -415,7 +429,7 @@ class MemoryPanel:
     def scope(self, scope_id):
         plugin = self.plugin
         if not plugin.outbox or plugin.stopping:
-            raise PanelError("请先在首次设置中连接并启用记忆服务。")
+            raise PanelError("请先在设置中完成记忆服务配置。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
         if not scope or not plugin.outbox.can_recall(scope, manual=True):

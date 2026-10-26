@@ -43,7 +43,8 @@ class InMemoryPanel(module.MemoryPanel):
 
 class PanelTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.profile = Config()
+        self.profile = Config(provider_settings={"datetime_system_prompt": True, "identifier": True})
+        self.profile.save_config = unittest.mock.Mock()
         self.config = Config(
             enabled=True, api_url="http://old-service:8888", api_key="old-secret",
             service_id="old-service-id", service_address_revision=4,
@@ -65,7 +66,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.outbox = None
 
         async def initialize():
-            if self.config["enabled"]:
+            if self.config.get("api_url") and self.config.get("api_key"):
                 self.plugin.outbox = SimpleNamespace(
                     recovering=False, list_scopes=lambda: [],
                 )
@@ -164,7 +165,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["connections"]["http://new-service:8888"], new_id)
         self.assertEqual(len(state["id"]), 12)
         self.assertTrue(all(state.get(key) for key in (
-            "database_password", "api_key", "panel_key",
+            "database_password", "api_key", "management_key",
         )))
 
     async def test_save_lock_covers_inherited_credentials_and_network_check(self):
@@ -206,59 +207,58 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
                 return_exceptions=True,
             )
 
-    async def test_candidate_can_change_until_deployed_marker_locks_embedding(self):
-        fingerprints = ["a" * 64, "b" * 64]
-        install_url = "http://managed-service:8888"
-
-        def installation(root, state, env, **kwargs):
-            return {
-                "api_url": install_url, "command": "installation-command",
-                "embedding_fingerprint": fingerprints.pop(0),
-            }
-
-        self.panel.body = AsyncMock(return_value={
-            "chat_provider_id": "chat", "embedding_provider_id": "embed",
-            "rerank_provider_id": "",
-        })
-        with patch.object(module, "installation", side_effect=installation):
-            first = await self.panel.prepare()
-            second = await self.panel.prepare()
-        self.assertNotEqual(first["embedding_fingerprint"], second["embedding_fingerprint"])
-        self.assertNotIn("embedding_identity", self.panel.state())
-        self.assertEqual(self.panel.state()["candidate_fingerprint"], "b" * 64)
-        self.assertEqual(second["config_revision"], self.panel.config_revision())
-        self.markers[install_url] = "astrbot-setup-v1:" + "b" * 64
-        before = self.panel.state()
-        with patch.object(module, "installation", return_value={
-            "api_url": install_url, "embedding_fingerprint": "c" * 64,
-        }):
-            with self.assertRaisesRegex(module.PanelError, "已部署服务.*不一致"):
-                await self.panel.prepare()
-        self.assertEqual(self.panel.state(), before)
-
-    async def test_prepare_rejects_stale_revision_and_strips_valid_revision(self):
+    async def test_installation_needs_no_models_and_stale_revision_is_rejected(self):
         catalog = self.panel.providers()
         self.panel.providers = lambda: catalog
-        selection = {
-            "chat_provider_id": "chat", "embedding_provider_id": "embed",
-            "rerank_provider_id": "",
-        }
         revision = self.panel.config_revision()
-        submitted = {**selection, "config_revision": revision}
-        self.panel.body = AsyncMock(return_value=submitted)
+        self.panel.body = AsyncMock(return_value={"config_revision": revision})
         with patch.object(module, "installation", return_value={
-            "api_url": "http://managed-service:8888", "embedding_fingerprint": "b" * 64,
+            "api_url": "http://managed-service:8888", "management_url": "http://managed-service:8766",
+            "command": "installation-command", "message": "installed",
         }) as install:
             response = await self.panel.prepare()
-            catalog.resolve_checked.assert_awaited_once_with(selection)
-            self.assertEqual(submitted["config_revision"], revision)
+            catalog.resolve_checked.assert_not_awaited()
             self.assertEqual(response["config_revision"], self.panel.config_revision())
-            state = self.panel.state()
+            self.assertNotIn("management_key", response)
+            self.assertTrue(self.panel.state()["management_key"])
             with self.assertRaisesRegex(module.PanelError, "配置已被更新"):
                 await self.panel.prepare()
-            self.assertEqual(self.panel.state(), state)
-            self.assertEqual(catalog.resolve_checked.await_count, 1)
             self.assertEqual(install.call_count, 1)
+
+    async def test_save_changes_only_plugin_configuration(self):
+        before = copy.deepcopy(self.profile)
+        await self.save()
+        self.assertEqual(self.profile, before)
+        self.profile.save_config.assert_not_called()
+        self.assertNotIn("enabled", self.config)
+        self.assertNotIn("permission_config_version", self.config)
+        self.assertTrue((await self.panel.bootstrap())["config"]["configured"])
+
+    async def test_model_settings_are_applied_after_installation(self):
+        self.panel.saved_state = {"id": "012345abcdef", "api_url": "http://managed-service:8888"}
+        self.panel.managed_request = AsyncMock(return_value={"installed": True, "configured": True, "ready": True})
+        catalog = self.panel.providers()
+        catalog.resolve_checked.return_value = {"HINDSIGHT_API_LLM_MODEL": "selected"}
+        self.panel.providers = lambda: catalog
+        selection = {"chat_provider_id": "chat", "embedding_provider_id": "embed", "rerank_provider_id": ""}
+        self.panel.body = AsyncMock(return_value=selection)
+        response = await self.panel.save_models()
+        self.assertTrue(response["saved"])
+        catalog.resolve_checked.assert_awaited_once_with(selection)
+        self.assertEqual(self.panel.managed_request.await_args_list[-1].args[1], {"HINDSIGHT_API_LLM_MODEL": "selected"})
+        self.assertEqual(self.panel.state()["embedding_provider_id"], "embed")
+        self.profile.save_config.assert_not_called()
+
+    async def test_uninstall_requires_explicit_data_deletion_and_owned_installation(self):
+        self.panel.body = AsyncMock(return_value={"delete_memory_data": False})
+        with self.assertRaisesRegex(module.PanelError, "确认删除"):
+            await self.panel.prepare_uninstall()
+        self.panel.body = AsyncMock(return_value={"delete_memory_data": True})
+        with self.assertRaisesRegex(ValueError, "找不到"):
+            await self.panel.prepare_uninstall()
+        self.panel.state(create=True)
+        result = await self.panel.prepare_uninstall()
+        self.assertTrue(result["command"])
 
     async def test_managed_tracks_active_url_rather_than_candidate_existence(self):
         state = self.panel.state(create=True)
@@ -270,75 +270,16 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(url=url):
                 self.assertTrue((await self.panel.bootstrap())["config"]["managed"])
 
-    async def test_enable_requires_marker_matching_latest_candidate(self):
+    async def test_incomplete_models_cannot_finish_setup(self):
         state = self.panel.state(create=True)
-        state.update(api_url="http://managed-service:8888", candidate_fingerprint="b" * 64)
+        state.update(api_url="http://managed-service:8888", management_url="http://managed-service:8766")
         self.panel.store_state(state)
-        before = dict(self.config)
-        for marker in (
-            None, HindsightError("connection_error"), "astrbot-setup-v1:" + "a" * 64,
-        ):
-            self.markers[state["api_url"]] = marker
-            with self.subTest(marker_type=type(marker).__name__):
-                with self.assertRaisesRegex(module.PanelError, "执行最新安装命令") as caught:
-                    await self.save(api_url=state["api_url"], api_key="selected-secret")
-                self.assertEqual(dict(self.config), before)
-                self.assertNotIn("selected-secret", str(caught.exception))
-        self.markers[state["api_url"]] = "astrbot-setup-v1:" + "b" * 64
-        response = await self.save(api_url=state["api_url"], api_key="selected-secret")
-        self.assertTrue(response["saved"])
-        self.assertEqual(self.marker_keys[-1], "selected-secret")
-        self.assertNotEqual(self.config["service_id"], "old-service-id")
-
-    async def test_marker_search_is_filtered_paginated_and_exact(self):
-        state = self.panel.state(create=True)
-        expected = "astrbot-setup-v1:" + "b" * 64
-
-        def pages(offset, bank):
-            if offset == 0:
-                return {
-                    "banks": [
-                        {"bank_id": bank + "-other", "name": expected},
-                        {"bank_id": "unrelated-private-bank", "name": "private-name"},
-                    ],
-                    "total": 3,
-                }
-            self.assertEqual(offset, 2)
-            return {"banks": [{"bank_id": bank, "name": expected}], "total": 3}
-
-        self.bank_pages = pages
-        marker = await self.panel.installation_marker(state, "http://managed-service:8888")
-        self.assertEqual(marker, expected)
-        self.assertEqual([offset for _, offset in self.marker_queries], [0, 2])
-        snapshot = await self.panel.bootstrap()
-        self.assertEqual(len(self.marker_queries), 2)
-        for private_value in ("unrelated-private-bank", "private-name"):
-            self.assertNotIn(private_value, json.dumps(snapshot))
-
-    async def test_marker_query_stops_at_ten_thousand_and_rejects_broken_pages(self):
-        state = self.panel.state(create=True)
-        self.bank_pages = lambda offset, bank: {
-            "banks": [
-                {"bank_id": f"unrelated-{offset + index}", "name": "private-name"}
-                for index in range(100)
-            ],
-            "total": 10001,
-        }
-        with self.assertRaisesRegex(module.PanelError, "一万条"):
-            await self.panel.installation_marker(state, "http://managed-service:8888")
-        self.assertEqual(len(self.marker_queries), 100)
-        self.assertEqual(self.marker_queries[-1][1], 9900)
-        for page in (
-            {"banks": [], "total": 1},
-            {"banks": [{"bank_id": 123, "name": "private-name"}], "total": 1},
-            {"banks": [], "total": "private-name"},
-            {"config": {}, "overrides": {}},
-        ):
-            self.bank_pages = lambda offset, bank, page=page: page
-            with self.subTest(page_keys=tuple(page)):
-                self.assertIsNone(
-                    await self.panel.installation_marker(state, "http://managed-service:8888")
-                )
+        self.panel.managed_request = AsyncMock(return_value={"configured": False, "ready": False})
+        before = copy.deepcopy(self.config)
+        with self.assertRaisesRegex(module.PanelError, "先在设置中选择模型"):
+            await self.save(api_url=state["api_url"])
+        self.assertEqual(self.config, before)
+        self.profile.save_config.assert_not_called()
 
 
 if __name__ == "__main__":

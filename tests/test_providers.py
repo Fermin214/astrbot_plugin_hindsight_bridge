@@ -330,7 +330,7 @@ class CheckedProviderTests(unittest.IsolatedAsyncioTestCase):
         self.embedding.get_embedding = AsyncMock(return_value=[0.5, -0.25, 1.0])
         option = self.catalog.options()["embedding"][0]
         self.assertTrue(option["supported"])
-        self.assertEqual(option["reason"], "安装时自动检测嵌入维数")
+        self.assertEqual(option["reason"], "保存模型时自动检测嵌入维数")
         self.embedding.get_embedding.assert_not_called()
         with self.assertRaises(SetupError):
             self.catalog.resolve(self.selection)

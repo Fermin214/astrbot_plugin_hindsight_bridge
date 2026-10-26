@@ -203,7 +203,7 @@ class ProviderCatalog:
                             provider, kind, allow_unknown_dimensions=True
                         )
                         if kind == "embedding" and _DIMENSIONS_ENV not in env:
-                            option["reason"] = "安装时自动检测嵌入维数"
+                            option["reason"] = "保存模型时自动检测嵌入维数"
                     except SetupError as error:
                         option.update(supported=False, reason=str(error))
                     except Exception:

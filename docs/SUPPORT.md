@@ -16,7 +16,7 @@
 
 ## 安装与管理
 
-首次设置和记忆管理视图位于 AstrBot 插件详情内。配套 Linux 安装命令自动处理密钥、服务和网络，主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写地址与 Key 连接。
+记忆管理视图位于 AstrBot 插件详情内，分为「记忆管理」与「设置」两个标签。配套 Linux 安装命令自动处理密钥、服务和网络，主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写地址与 Key 连接。
 
 ### 模型供应商复用
 

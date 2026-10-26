@@ -1,5 +1,4 @@
 {
-  "enabled": false,
   "api_url": "http://hindsight:8888",
   "api_key": "",
   "service_id": "home-hindsight",
@@ -7,7 +6,6 @@
   "timezone": "Asia/Shanghai",
   "agent_id": "default",
   "control_state_dir": "",
-  "permission_config_version": 2,
   "allowed_accounts": [
     {
       "__template_key": "account",

@@ -1,10 +1,4 @@
 {
-  "enabled": {
-    "description": "启用记忆",
-    "type": "bool",
-    "default": false,
-    "hint": "首次使用请打开插件详情中的「记忆管理 → 首次设置」，按页面提示连接并启用，之后正常聊天即可。"
-  },
   "api_url": {
     "description": "Hindsight API 地址",
     "type": "string",
@@ -22,7 +16,7 @@
     "description": "稳定服务标识",
     "type": "string",
     "default": "",
-    "hint": "首次设置向导自动维护。同一套记忆服务一直沿用这个名字，手工迁移时按数据维护指南操作。"
+    "hint": "设置页面自动维护。同一套记忆服务一直沿用这个名字，手工迁移时按数据维护指南操作。"
   },
   "service_address_revision": {
     "description": "服务地址版本",
@@ -33,8 +27,8 @@
   "timezone": {
     "description": "消息时区",
     "type": "string",
-    "default": "UTC",
-    "hint": "中国大陆填 Asia/Shanghai，香港填 Asia/Hong_Kong，用于理解消息中的今天、明天等日期。"
+    "default": "",
+    "hint": "设置页面自动读取浏览器时区，用于理解消息中的今天、明天等日期。Asia/Shanghai 与 Asia/Hong_Kong 都是 UTC+08:00。"
   },
   "control_state_dir": {
     "description": "独立控制目录",
@@ -52,7 +46,7 @@
     "description": "允许使用记忆的平台账号",
     "type": "template_list",
     "default": [],
-    "hint": "推荐在「记忆管理 → 首次设置」中选择机器人并填写自己的 QQ 号。列表为空时所有人都不启用记忆。",
+    "hint": "在「记忆管理 → 设置」中选择机器人并填写自己的 QQ 号。列表为空时所有人都不启用记忆。",
     "templates": {
       "account": {
         "name": "平台账号",
@@ -72,24 +66,6 @@
         }
       }
     }
-  },
-  "permission_config_version": {
-    "description": "权限配置版本（自动维护）",
-    "type": "int",
-    "default": 1,
-    "hint": "插件自动维护，无需手动填写。"
-  },
-  "allowed_platform_ids": {
-    "description": "旧版配置兼容：平台列表",
-    "type": "list",
-    "default": [],
-    "hint": "首次安装留空。添加使用者请填写上面的“允许使用记忆的平台账号”。"
-  },
-  "allowed_user_ids": {
-    "description": "旧版配置兼容：用户列表",
-    "type": "list",
-    "default": [],
-    "hint": "首次安装留空。添加使用者请填写上面的“允许使用记忆的平台账号”。"
   },
   "recall_timeout": {
     "description": "召回总超时（秒）",

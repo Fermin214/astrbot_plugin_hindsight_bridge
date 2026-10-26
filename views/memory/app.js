@@ -77,6 +77,10 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
 }
 
 function activateTab(name, focus = false) {
+  if (name !== "setup") {
+    clearCommand();
+    clearUninstall();
+  }
   document.querySelectorAll('[role="tab"]').forEach((tab) => {
     const selected = tab.id === `tab-${name}`;
     tab.setAttribute("aria-selected", String(selected));
@@ -130,7 +134,7 @@ function updateProviderHelp() {
   $("provider-help").textContent = missing.length
     ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，再回到这里刷新状态。`
     : "选择 AstrBot 已配置的模型。重排模型可不选，记忆服务会使用默认排序。";
-  $("prepare").disabled = missing.length > 0 || locks.has("setup");
+  $("save-models").disabled = missing.length > 0 || locks.has("setup");
 }
 
 function clearCommand() {
@@ -139,10 +143,22 @@ function clearCommand() {
   $("install-message").textContent = "";
 }
 
+function clearUninstall() {
+  $("uninstallation").hidden = true;
+  $("uninstall-command").value = "";
+}
+
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  $("managed-settings").hidden = !managed;
-  $("connection-heading").textContent = managed ? "安装完成后连接" : "连接已有 Hindsight";
+  const installed = data?.managed_service?.installed === true;
+  $("managed-settings").hidden = !managed || installed || (data?.config.configured && data?.config.managed);
+  $("models-settings").hidden = !managed || !installed;
+  $("maintenance").hidden = !managed || !data?.has_installation;
+  $("api-key-field").hidden = managed;
+  $("api-url").readOnly = managed;
+  $("connection-heading").textContent = managed ? "配套服务连接" : "连接已有 Hindsight";
+  $("key-help").textContent = managed ? "服务连接凭据由插件自动配置，无需填写。"
+    : data?.config.has_api_key ? "已保存连接密钥。留空沿用，填写新值则替换。" : "填写已有 Hindsight 的服务 API Key，与模型供应商密钥不同。";
 }
 
 function addAccount(account = {}) {
@@ -204,7 +220,8 @@ function hydrateConfig() {
   let browserTimezone = "Asia/Shanghai";
   try { browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || browserTimezone; } catch { /* Use the fallback when Intl is unavailable. */ }
   $("timezone").value = config.timezone || browserTimezone;
-  $("enabled").checked = config.enabled === true;
+  $("setup-intro").hidden = config.configured === true;
+  $("save-settings").textContent = config.configured ? "保存设置" : "完成设置";
   document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
   updateConnectionMode();
   for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, config[`${kind}_provider_id`]);
@@ -212,6 +229,18 @@ function hydrateConfig() {
   (config.allowed_accounts || []).forEach(addAccount);
   if (!config.allowed_accounts?.length) addAccount();
   updateProviderHelp();
+  updateTimezoneHelp();
+}
+
+function updateTimezoneHelp() {
+  try {
+    const zone = $("timezone").value.trim();
+    const part = new Intl.DateTimeFormat("zh-CN", { timeZone: zone, timeZoneName: "longOffset" })
+      .formatToParts(new Date()).find((item) => item.type === "timeZoneName");
+    $("timezone-help").textContent = `${part?.value.replace("GMT", "UTC") || zone}。用于解释消息中的今天、明天等日期。`;
+  } catch {
+    $("timezone-help").textContent = "填写 IANA 时区名称，例如 Asia/Shanghai。";
+  }
 }
 
 function scopeName(scope) {
@@ -241,19 +270,22 @@ function renderStatus() {
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
   $("status-description").textContent = status.recovering ? "恢复完成后再使用记忆管理，可点击刷新状态查看进度。"
     : connected === true ? "已取得服务连接状态。用户记忆的处理情况见下方。"
-    : connected === false ? "请在首次设置中检查 API 地址和 Key，再检查连接。"
+    : connected === false ? "请检查服务连接与运行状态。"
     : "服务尚未返回明确的连接结果，请检查连接或稍后刷新。";
-  $("enabled-label").textContent = data.config?.enabled ? "长期记忆已启用" : "长期记忆未启用";
+  if (!data.config.configured && data.managed_service?.installed) {
+    $("status-label").textContent = data.managed_service.ready ? "模型已配置，可以完成设置" : "服务已安装，请配置模型";
+  }
+  $("enabled-label").textContent = data.config?.configured ? "已完成配置" : "等待配置";
   $("scope-statuses").replaceChildren();
   if (!data.scopes?.length) {
     const empty = el("div", "empty");
-    empty.append(el("h3", "", "还没有配置用户"), el("p", "", "到首次设置中添加用户并保存，即可为其开启记忆。"));
+    empty.append(el("h3", "", "还没有用户运行记录"), el("p", "", "添加使用者并完成设置，开始聊天后即可查看。"));
     $("scope-statuses").append(empty);
   }
   (data.scopes || []).forEach((scope) => {
     const row = el("article", "scope-status");
     const heading = el("div", "scope-status-header");
-    const manage = el("button", "", "管理记忆");
+    const manage = el("button", "", "查看该用户记忆");
     manage.type = "button";
     manage.addEventListener("click", () => {
       if (locks.has("memory")) return;
@@ -276,6 +308,7 @@ async function refreshBootstrap({ hydrate = false } = {}) {
     for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, $(`${kind}-provider`).value);
     refreshAccountPlatforms();
     updateProviderHelp();
+    updateConnectionMode();
   }
   $("platform-help").textContent = data.platforms?.length ? "只对这里列出的用户启用记忆。请先移除不需要的空白行，再保存。" : "未找到平台实例。请先在 AstrBot 中连接 QQ 机器人，再刷新此页。";
   renderStatus();
@@ -335,7 +368,7 @@ function renderMemories(items, searching) {
   list.replaceChildren();
   if (!items.length) {
     const empty = el("div", "empty");
-    empty.append(el("h3", "", searching ? "没有找到相关记忆" : "还没有保存的记忆"), el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : "启用记忆后正常聊天，保存的内容会显示在这里。"));
+    empty.append(el("h3", "", searching ? "没有找到相关记忆" : "还没有保存的记忆"), el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : "完成设置后正常聊天，保存的内容会显示在这里。"));
     list.append(empty);
   }
   items.forEach((item) => {
@@ -443,9 +476,9 @@ function connectionPayload() {
   return { api_url: apiUrl, api_key: $("api-key").value.trim() };
 }
 
-function settingsPayload(enabled) {
+function settingsPayload() {
   const payload = {
-    ...connectionPayload(), enabled, timezone: $("timezone").value.trim(),
+    ...connectionPayload(), timezone: $("timezone").value.trim(),
     allowed_accounts: [], config_revision: settingsRevision,
   };
   if (!payload.timezone) throw new Error("请填写时区，例如 Asia/Shanghai。");
@@ -462,7 +495,6 @@ function settingsPayload(enabled) {
     seen.add(identity);
     payload.allowed_accounts.push({ platform_instance_id: platform.value, user_id: userId });
   }
-  if (enabled && !payload.allowed_accounts.length) throw new Error("请至少添加一个用户，再启用长期记忆。");
   return payload;
 }
 
@@ -473,28 +505,29 @@ async function checkConnection(payload) {
   return response;
 }
 
-async function saveSettings(forceEnable) {
+async function saveSettings() {
   // Validate before disabling fields; browser constraint validation ignores disabled controls.
   if (!$("settings-form").reportValidity()) return;
-  const payload = settingsPayload(forceEnable || $("enabled").checked);
-  await perform(forceEnable ? $("connect-enable") : $("save-settings"), "setup", async () => {
-    if (forceEnable) await checkConnection({ api_url: payload.api_url, api_key: payload.api_key });
+  const payload = settingsPayload();
+  await perform($("save-settings"), "setup", async () => {
     const response = await bridge.apiPost("settings/save", payload);
     if (response.saved !== true) throw new Error(response.message || "设置未保存，请重试。");
     $("api-key").value = "";
     clearCommand();
     await refreshBootstrap({ hydrate: true });
-    notify(response.message || (forceEnable ? "已连接并启用记忆，正常聊天即可。" : "设置已保存。"));
+    activateTab("memories", true);
+    notify(response.message || "设置已保存，正常聊天即可。");
   });
 }
 
 $("settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  void saveSettings(false).catch((error) => notify(errorMessage(error), true));
+  void saveSettings().catch((error) => notify(errorMessage(error), true));
 });
-$("connect-enable").addEventListener("click", () => void saveSettings(true).catch((error) => notify(errorMessage(error), true)));
 $("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
   await checkConnection(connectionPayload());
+  clearCommand();
+  await refreshBootstrap();
 }));
 $("api-url").addEventListener("input", () => {
   const changed = data.config.api_url
@@ -507,26 +540,42 @@ $("api-key").addEventListener("input", () => { $("connection-result").textConten
 $("add-account").addEventListener("click", () => addAccount().focus());
 document.querySelectorAll('[name="connection-mode"]').forEach((radio) => radio.addEventListener("change", () => {
   clearCommand();
+  clearUninstall();
+  $("api-key").value = "";
+  $("api-url").value = radio.value === "managed" ? data.installation_api_url || "" : data.config.api_url || "";
   updateConnectionMode();
 }));
 for (const kind of ["chat", "embedding", "rerank"]) $(`${kind}-provider`).addEventListener("change", clearCommand);
-$("prepare").addEventListener("click", () => void perform($("prepare"), "setup", async () => {
+async function prepareInstallation(button) {
+  await perform(button, "setup", async () => {
   clearCommand();
-  const selection = { config_revision: settingsRevision };
-  for (const kind of ["chat", "embedding", "rerank"]) {
-    const select = $(`${kind}-provider`);
-    if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的聊天模型和嵌入模型，重排模型可以不选。");
-    selection[`${kind}_provider_id`] = select.value;
-  }
-  const response = await bridge.apiPost("install/prepare", selection);
+  const response = await bridge.apiPost("install/prepare", { config_revision: settingsRevision });
   if (!response.command) throw new Error("未生成安装命令，请稍后重试。");
   if (response.config_revision) settingsRevision = response.config_revision;
   $("install-command").value = response.command;
   $("install-message").textContent = response.message || "";
   $("installation").hidden = false;
+  $("managed-settings").hidden = false;
   if (response.api_url) $("api-url").value = response.api_url;
   $("install-command").focus();
-  notify("安装命令已生成。安装完成后，点击「连接并启用」。");
+  notify("安装命令已生成。执行后检查连接，再配置模型。");
+  });
+}
+$("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
+$("reinstall").addEventListener("click", () => void prepareInstallation($("reinstall")));
+$("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
+  const selection = { config_revision: settingsRevision };
+  for (const kind of ["chat", "embedding", "rerank"]) {
+    const select = $(`${kind}-provider`);
+    if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的聊天和嵌入模型，重排可以留空。");
+    selection[`${kind}_provider_id`] = select.value;
+  }
+  const response = await bridge.apiPost("models/save", selection);
+  if (response.saved !== true) throw new Error("模型配置未保存，请重试。");
+  settingsRevision = response.config_revision;
+  clearCommand();
+  await refreshBootstrap();
+  notify(response.message);
 }));
 $("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", async () => {
   const command = $("install-command");
@@ -539,7 +588,35 @@ $("copy-command").addEventListener("click", () => void perform($("copy-command")
   } catch {
     if (!document.execCommand("copy")) throw new Error("浏览器限制了自动复制。命令已选中，请按 Ctrl+C，或长按选择复制。");
   }
-  notify("安装命令已复制。");
+  clearCommand();
+  $("managed-settings").hidden = true;
+  notify("安装命令已复制并隐藏。");
+}));
+$("hide-command").addEventListener("click", clearCommand);
+$("timezone").addEventListener("input", updateTimezoneHelp);
+$("prepare-uninstall").addEventListener("click", () => void perform($("prepare-uninstall"), "setup", async () => {
+  clearUninstall();
+  if (!$("delete-memory-data").checked) throw new Error("请先确认删除配套服务及全部记忆数据。");
+  const response = await bridge.apiPost("uninstall/prepare", { config_revision: settingsRevision, delete_memory_data: true });
+  $("uninstall-command").value = response.command;
+  $("uninstallation").hidden = false;
+}));
+$("hide-uninstall").addEventListener("click", clearUninstall);
+$("delete-memory-data").addEventListener("change", clearUninstall);
+$("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", async () => {
+  const field = $("uninstall-command");
+  if (!field.value) throw new Error("请先生成卸载命令。");
+  field.focus();
+  field.select();
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(field.value);
+  } catch {
+    if (!document.execCommand("copy")) throw new Error("请按 Ctrl+C 复制选中的命令。");
+  }
+  clearUninstall();
+  $("delete-memory-data").checked = false;
+  notify("卸载命令已复制并隐藏。");
 }));
 $("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", async () => {
   await refreshBootstrap({ hydrate: !data });
@@ -658,10 +735,13 @@ async function start() {
     const theme = (value) => { document.documentElement.dataset.theme = (value || bridge.getContext?.())?.isDark ? "dark" : "light"; };
     theme(context);
     const off = bridge.onContext?.(theme);
-    window.addEventListener("beforeunload", () => { off?.(); clearCommand(); }, { once: true });
+    window.addEventListener("beforeunload", () => { off?.(); clearCommand(); clearUninstall(); }, { once: true });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) { clearCommand(); clearUninstall(); }
+    });
     await refreshBootstrap({ hydrate: true });
     $("refresh").disabled = false;
-    if (data.config.enabled && data.config.api_url) activateTab("status");
+    activateTab(data.config.configured ? "memories" : "setup");
   } catch (error) {
     $("startup").textContent = errorMessage(error);
     $("startup").classList.add("error");

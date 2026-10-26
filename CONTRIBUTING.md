@@ -6,7 +6,7 @@
 
 - `main.py`：AstrBot 插件入口、事件接入和用户命令。
 - `core/`：身份权限、记忆材料、队列、后端客户端，以及管理 API、供应商适配与 Linux 安装命令生成。
-- `views/memory/`：AstrBot 内首次设置、运行状态与记忆管理的 HTML、JavaScript 和样式。
+- `views/memory/`：AstrBot 内「记忆管理」和「设置」两个标签页的 HTML、JavaScript 和样式；设置包含安装、模型配置、运行状态和卸载。
 - `.astrbot-plugin/i18n/`：插件视图标题的中文和英文资源。
 - `docs/`：安装、使用、兼容范围、数据维护和实现说明。
 - `examples/`：插件配置示例。

@@ -96,6 +96,10 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .choice strong { display: block; font-size: 15px; }
 .choice small { display: block; color: var(--muted); font-weight: 400; margin-top: 3px; }
 .surface { padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.settings-section { margin-top: 26px; }
+.settings-section > summary { cursor: pointer; font-size: 17px; font-weight: 650; padding-block: 12px; }
+.settings-section .check-label { margin-block: 14px; }
+.maintenance-heading { margin-top: 24px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
 .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
 .required, .optional { font-size: 12px; margin-left: 4px; color: var(--muted); font-weight: 400; }

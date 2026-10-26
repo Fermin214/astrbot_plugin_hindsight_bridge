@@ -64,6 +64,26 @@ class HistoryBoundaries(unittest.TestCase):
         self.assertIsNone(final_reply(rows, "旧问题"))
         self.assertIsNone(final_reply(rows, "新问题"))
 
+    def test_native_reminders_do_not_change_source_text_or_cross_turn_boundaries(self):
+        source = "今天想吃面"
+        user = {"role": "user", "content": [
+            {"type": "text", "text": source},
+            {"type": "text", "text": "<system_reminder>User ID: 123, Nickname: Alice\nCurrent datetime: 2026-10-26 12:00 (CST), Weekday: Monday</system_reminder>"},
+        ]}
+        rows = [user, {"role": "assistant", "content": "可以试试牛肉面。"}]
+        before = json.dumps(rows, ensure_ascii=False)
+        self.assertEqual(final_reply(rows, source), "可以试试牛肉面。")
+        self.assertIsNone(final_reply(rows, source + "条"))
+        self.assertEqual(json.dumps(rows, ensure_ascii=False), before)
+        for extra in (
+            {"type": "image_url", "image_url": {"url": "local"}},
+            {"type": "text", "text": "其他插件改写的提示"},
+            {"type": "text", "text": "<system_reminder>其他提示</system_reminder>"},
+        ):
+            altered = {"role": "user", "content": [user["content"][0], extra]}
+            self.assertIsNone(final_reply([altered, rows[-1]], source))
+        self.assertIsNone(final_reply(rows + [{"role": "user", "content": "下一条"}], source))
+
     def test_failed_read_repeated_question_and_edited_prefix_cannot_reuse_old_reply(
         self,
     ):

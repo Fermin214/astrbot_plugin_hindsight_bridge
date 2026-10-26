@@ -30,7 +30,7 @@ from .core.dialogue import (
 from .core.identity import Incoming, sha256
 from .core.materials import encoding, memory_block, recall_query
 from .core.outbox import Outbox, QueueError
-from .core.permissions import migrate, pairs
+from .core.permissions import pairs
 from .core.panel import MemoryPanel
 from .core.source import local_runner, native_snapshot
 from .core.worker import Worker
@@ -54,7 +54,6 @@ class HindsightBridge(Star):
         self.idle = asyncio.Event()
         self.idle.set()
         self.confirmations = {}
-        self.permission_issue = ""
         self.panel = MemoryPanel(self)
 
     @staticmethod
@@ -83,7 +82,6 @@ class HindsightBridge(Star):
             "catalog_changed": "查看期间记忆发生变化，请重新查看该页",
             "export_source_missing": "记忆来源不完整，请检查后端数据与保留策略",
             "invalid_identifier": "记忆 ID 无效，请从 view 列表复制完整 ID",
-            "permission_pairs_required": "请在允许账号中逐项填写平台实例与用户",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
         }
         if not code:
@@ -91,18 +89,15 @@ class HindsightBridge(Star):
         return explanations.get(code, "处理失败，请检查服务与数据目录") + f"（{code}）"
 
     async def initialize(self):
-        if not self.config.get("enabled", False):
-            self.status = "已停用"
-            return
         url = str(self.config.get("api_url", "")).strip()
         key = str(self.config.get("api_key", "")).strip()
         service = str(self.config.get("service_id", "")).strip()
         if not url or not key or not service:
-            self.status = "请配置 API 地址、Key 和稳定服务标识"
+            self.status = "请在设置中连接记忆服务"
             return
         try:
             tokenizer = str(self.config.get("query_tokenizer", "o200k_base"))
-            zone = str(self.config.get("timezone", "UTC"))
+            zone = str(self.config.get("timezone") or "UTC")
             ZoneInfo(zone)
             await asyncio.to_thread(encoding, tokenizer)
             self.client = HindsightClient(url, key, tokenizer=tokenizer)
@@ -118,9 +113,6 @@ class HindsightBridge(Star):
                 control_directory=self.control_directory(),
                 agent_id=str(self.config.get("agent_id", "default")),
             )
-            _, self.permission_issue = migrate(
-                self.config, self.outbox.known_accounts()
-            )
             self.refresh_permissions()
             self.outbox.recovering = True
             self.worker = Worker(
@@ -130,7 +122,7 @@ class HindsightBridge(Star):
                 refresh_permissions=self.refresh_permissions,
             )
             self.task = asyncio.create_task(self.worker.run(), name="hindsight-outbox")
-            self.status = self.permission_issue or "已配置"
+            self.status = "已配置"
         except Exception as exc:  # noqa: BLE001 -- plugin initialization must preserve chat
             self.status = "初始化失败：" + (
                 str(exc) if isinstance(exc, QueueError) else type(exc).__name__
@@ -155,8 +147,6 @@ class HindsightBridge(Star):
         except QueueError as exc:
             self.warning(str(exc))
             accounts = frozenset()
-        if not self.config.get("enabled", False):
-            accounts = frozenset()
         if accounts != self.permissions:
             self.outbox.sync_permissions(accounts)
             self.permissions = accounts
@@ -169,7 +159,6 @@ class HindsightBridge(Star):
             return False
         return (
             not self.stopping
-            and bool(self.config.get("enabled", False))
             and event.is_private_chat()
             and not event.get_group_id()
             and event.get_platform_name() == "aiocqhttp"
