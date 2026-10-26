@@ -75,8 +75,11 @@ class Message:
     timestamp: int
     role: str = "user"
 
-    def iso_time(self, zone: str) -> str:
-        return datetime.fromtimestamp(self.timestamp, ZoneInfo(zone)).isoformat()
+    def iso_time(self, zone: str | None = None) -> str:
+        occurred = datetime.fromtimestamp(self.timestamp, UTC)
+        return occurred.astimezone(
+            ZoneInfo(zone) if zone is not None else None
+        ).isoformat()
 
 
 def retain_payload(
@@ -86,7 +89,7 @@ def retain_payload(
     history: tuple[Message, ...],
     conversation_id: str,
     operation_id: str,
-    zone: str,
+    zone: str | None,
     *,
     assistant=False,
 ) -> dict:
@@ -98,8 +101,9 @@ def retain_payload(
 
     dialogue = assistant or any(m.role == "assistant" for m in history)
     material_format = "dialogue_window_v2" if dialogue else FORMAT
+    zone_label = zone if zone is not None else "system"
     content = (
-        f"材料格式：{material_format}；时区：{zone}\n"
+        f"材料格式：{material_format}；时区：{zone_label}\n"
         "历史语境只用于理解指代，只从新增消息抽取新增信息。"
         "user 是用户原文，assistant 是会话历史保存的助手正文，发送状态未知。"
         "助手建议不等于用户接受，只有用户明确接受或拒绝才形成对应决定；"
@@ -143,7 +147,7 @@ def retain_payload(
                     "time_source": (
                         "history_observed_at" if assistant else "onebot.time"
                     ),
-                    "timezone": zone,
+                    "timezone": zone_label,
                     "content_sha256": sha256(content),
                 },
                 "observation_scopes": "shared",

@@ -2,7 +2,10 @@
 
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import unittest
@@ -10,6 +13,9 @@ from unittest.mock import AsyncMock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
+from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 
 
 class Config(dict):
@@ -127,7 +133,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.client_patch.stop)
         self.payload = {
             "enabled": True, "api_url": self.config["api_url"], "api_key": "",
-            "timezone": "UTC", "allowed_accounts": copy.deepcopy(self.config["allowed_accounts"]),
+            "allowed_accounts": copy.deepcopy(self.config["allowed_accounts"]),
         }
 
     async def save(self, **updates):
@@ -138,14 +144,68 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await self.panel.bootstrap()
         revision = snapshot["config_revision"]
         self.assertNotIn("config_revision", snapshot["config"])
-        response = await self.save(config_revision=revision, timezone="Asia/Shanghai")
+        response = await self.save(config_revision=revision, allowed_accounts=[])
         self.assertEqual(response["config_revision"], self.panel.config_revision())
         self.assertNotEqual(response["config_revision"], revision)
         calls = len(self.auth_calls)
         with self.assertRaisesRegex(module.PanelError, "配置已被更新"):
             await self.save(config_revision=revision)
         self.assertEqual(len(self.auth_calls), calls)
-        self.assertEqual(self.config["timezone"], "Asia/Shanghai")
+        self.assertNotIn("timezone", self.config)
+        self.assertEqual(self.config["allowed_accounts"], [])
+
+    async def test_saved_users_are_visible_without_a_running_service(self):
+        snapshot = await self.panel.bootstrap()
+        self.assertEqual(len(snapshot["scopes"]), 1)
+        user = snapshot["scopes"][0]
+        self.assertEqual((user["platform_instance_id"], user["user_id"]), ("qq", "123"))
+        self.assertTrue(user["pending"])
+        self.assertEqual(user["pending_reason"], "service")
+
+    async def test_connected_user_can_set_mode_before_first_message(self):
+        @asynccontextmanager
+        async def resources():
+            yield
+
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = Outbox(
+                Path(temporary) / "runtime", self.config["service_id"], self.config["api_url"],
+                credential_fingerprint="test", control_directory=Path(temporary) / "control",
+            )
+            self.plugin.outbox = queue
+            self.plugin.using_resources = resources
+            self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
+            bot = SimpleNamespace(get_login_info=AsyncMock(return_value={"user_id": 20001}))
+            self.plugin.context.get_platform_inst = lambda platform: SimpleNamespace(get_client=lambda: bot)
+            try:
+                snapshot = await self.panel.bootstrap()
+                scope = snapshot["scopes"][0]
+                self.assertFalse(scope["pending"])
+                self.assertEqual(scope["summary"]["counts"], {})
+                self.assertEqual(queue.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+                queue.set_mode(scope["scope_id"], "paused")
+                incoming = Incoming("aiocqhttp", "qq", "20001", "123", "first", 1, "hello")
+                actual = queue.scope(incoming)
+                self.assertEqual(actual["scope_id"], scope["scope_id"])
+                self.assertEqual(actual["mode"], "paused")
+                self.profile.save_config.assert_not_called()
+            finally:
+                queue.close()
+
+    async def test_offline_robot_does_not_create_an_unverified_memory_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = Outbox(
+                Path(temporary) / "runtime", self.config["service_id"], self.config["api_url"],
+                credential_fingerprint="test", control_directory=Path(temporary) / "control",
+            )
+            self.plugin.outbox = queue
+            try:
+                snapshot = await self.panel.bootstrap()
+                self.assertTrue(snapshot["scopes"][0]["pending"])
+                self.assertEqual(snapshot["scopes"][0]["pending_reason"], "platform")
+                self.assertEqual(queue.list_scopes(), [])
+            finally:
+                queue.close()
 
     async def test_new_url_gets_independent_service_id_and_switch_back_restores_id(self):
         await self.save(api_url="http://new-service:8888/", api_key="new-secret")
@@ -259,6 +319,25 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.panel.state(create=True)
         result = await self.panel.prepare_uninstall()
         self.assertTrue(result["command"])
+
+    async def test_reinstall_does_not_need_the_uninstalled_service(self):
+        state = self.panel.state(create=True)
+        state.update(api_url=self.config["api_url"], management_url="http://old-service:8766")
+        self.panel.store_state(state)
+        self.panel.managed_request = AsyncMock(side_effect=module.PanelError("offline"))
+        snapshot = await self.panel.bootstrap()
+        self.assertTrue(snapshot["config"]["configured"])
+        self.assertFalse(snapshot["managed_service"]["installed"])
+        self.panel.managed_request.reset_mock()
+        self.panel.body = AsyncMock(return_value={"config_revision": snapshot["config_revision"]})
+        with patch.object(module, "installation", return_value={
+            "api_url": state["api_url"], "management_url": state["management_url"],
+            "command": "reinstall-command", "message": "",
+        }):
+            response = await self.panel.prepare()
+        self.assertEqual(response["command"], "reinstall-command")
+        self.assertEqual(self.panel.state()["id"], state["id"])
+        self.panel.managed_request.assert_not_awaited()
 
     async def test_managed_tracks_active_url_rather_than_candidate_existence(self):
         state = self.panel.state(create=True)

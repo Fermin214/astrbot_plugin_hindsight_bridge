@@ -10,7 +10,6 @@ import secrets
 import socket
 import sqlite3
 import time
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -66,12 +65,24 @@ class MemoryPanel:
                 message = (
                     str(exc) if isinstance(exc, (PanelError, ValueError))
                     and not isinstance(exc, QueueError)
-                    else self.plugin.diagnostic(self.plugin.error_code(exc))
+                    else self.error_message(self.plugin.error_code(exc))
                 )
                 return error_response(message, headers={"Cache-Control": "no-store"})
             except (OSError, sqlite3.DatabaseError):
                 return error_response("无法保存数据，请检查 AstrBot 数据目录与磁盘空间。")
         return invoke
+
+    def error_message(self, code):
+        messages = {
+            "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试后台任务」。",
+            "remote_cancelled": "后台任务已取消。",
+            "cancellation_registered": "正在取消后台任务。",
+            "retry_state_changed": "任务状态已变化，请刷新状态。",
+            "cancel_target_missing": "需要取消的任务已不存在，请刷新状态。",
+        }
+        if code in messages:
+            return messages[code]
+        return self.plugin.diagnostic(code).removesuffix(f"（{code}）")
 
     @staticmethod
     async def body():
@@ -154,6 +165,62 @@ class MemoryPanel:
         async with self.lock:
             return await self._bootstrap()
 
+    async def user_scopes(self):
+        plugin, scopes = self.plugin, []
+        accounts = pairs(plugin.config.get("allowed_accounts", []))
+        queue = plugin.outbox if not plugin.stopping else None
+        if queue:
+            plugin.refresh_permissions()
+            scopes = [dict(row) for row in queue.list_scopes() if row["allowed"]]
+        known = {(row["platform_instance_id"], row["user_id"]) for row in scopes}
+        bot_ids = {}
+        for platform, user in sorted(accounts - known):
+            if queue and not queue.recovering:
+                if platform not in bot_ids:
+                    bot_ids[platform] = await self.bot_id(platform)
+                if bot_ids[platform] and plugin.outbox is queue and not plugin.stopping:
+                    scopes.append(dict(queue.scope(Incoming(
+                        "aiocqhttp", platform, bot_ids[platform], user, "", int(time.time()), "",
+                    ))))
+                    continue
+            scopes.append({
+                "scope_id": "pending-" + sha256(json.dumps([
+                    plugin.config.get("service_id", ""), platform, user,
+                ])),
+                "platform_instance_id": platform, "user_id": user,
+                "mode": "active", "bank": "", "pending": True,
+                "pending_reason": "recovering" if queue else "service",
+            })
+            if queue and not queue.recovering:
+                scopes[-1]["pending_reason"] = "platform"
+        result = []
+        for scope in scopes:
+            summary = queue.summary(scope["scope_id"]) if queue and not scope.get("pending") else {
+                "counts": {}, "last_error": "",
+            }
+            summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
+            result.append({key: scope[key] for key in (
+                "scope_id", "platform_instance_id", "user_id", "mode", "bank",
+            )} | {
+                "pending": scope.get("pending", False),
+                "pending_reason": scope.get("pending_reason", ""),
+                "summary": summary,
+            })
+        return result
+
+    async def bot_id(self, platform):
+        try:
+            get_platform = getattr(self.plugin.context, "get_platform_inst", None)
+            adapter = get_platform(platform) if get_platform else None
+            if adapter is None:
+                return ""
+            async with self.plugin.using_resources(), asyncio.timeout(1):
+                login = await adapter.get_client().get_login_info()
+            identity = str(login.get("user_id", ""))
+            return identity if identity.isdecimal() and int(identity) > 0 else ""
+        except Exception:  # An offline QQ adapter must not hide configured users.
+            return ""
+
     async def _bootstrap(self):
         plugin, config = self.plugin, self.plugin.config
         connected, connection_message = None, ""
@@ -164,16 +231,8 @@ class MemoryPanel:
                 connected = True
             except (HindsightError, TimeoutError) as exc:
                 connected = False
-                connection_message = plugin.diagnostic(plugin.error_code(exc))
-        scopes = []
-        if plugin.outbox and not plugin.stopping:
-            plugin.refresh_permissions()
-            for scope in plugin.outbox.list_scopes():
-                if scope["allowed"]:
-                    scopes.append({
-                        key: scope[key]
-                        for key in ("scope_id", "platform_instance_id", "user_id", "mode", "bank")
-                    } | {"summary": plugin.outbox.summary(scope["scope_id"])})
+                connection_message = self.error_message(plugin.error_code(exc))
+        scopes = await self.user_scopes()
         state = self.state()
         managed_status = None
         if state.get("management_url") and state.get("management_key"):
@@ -188,7 +247,6 @@ class MemoryPanel:
                 "configured": configured,
                 "api_url": config.get("api_url", "") or state.get("api_url", ""),
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
-                "timezone": config.get("timezone", "") if configured else "",
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": bool(state.get("id")) and (
                     not config.get("api_url")
@@ -272,7 +330,7 @@ class MemoryPanel:
         except PanelError:
             raise
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            raise PanelError("无法连接配套服务管理接口，请先执行安装命令或检查服务状态。") from None
+            raise PanelError("无法连接配套服务。请先执行安装命令；已安装则检查服务是否运行。") from None
 
     async def prepare(self):
         payload = await self.body()
@@ -343,11 +401,6 @@ class MemoryPanel:
             raise PanelError("请选择 AstrBot 中已启用的 OneBot 接入实例。")
         if any(not user.isdecimal() or len(user) > 20 for _, user in selected):
             raise PanelError("用户账号请填写自己的 QQ 号。")
-        zone = str(payload.get("timezone", "UTC"))
-        try:
-            ZoneInfo(zone)
-        except (ValueError, KeyError):
-            raise PanelError("时区无效，请使用例如 Asia/Shanghai 的时区名称。") from None
         url, key = self.credentials(payload)
         try:
             client = HindsightClient(url, key)
@@ -394,7 +447,7 @@ class MemoryPanel:
         updates = {
             "api_url": client.url, "api_key": key,
             "service_id": service,
-            "timezone": zone, "allowed_accounts": [
+            "allowed_accounts": [
                 {"platform_instance_id": platform, "user_id": user}
                 for platform, user in sorted(selected)
             ],
@@ -402,7 +455,7 @@ class MemoryPanel:
         plugin.stopping = True
         try:
             await plugin._close_resources()
-            for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids"):
+            for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids", "timezone"):
                 plugin.config.pop(obsolete, None)
             plugin.config.update(updates)
             plugin.config.save_config()
@@ -430,6 +483,8 @@ class MemoryPanel:
         plugin = self.plugin
         if not plugin.outbox or plugin.stopping:
             raise PanelError("请先在设置中完成记忆服务配置。")
+        if scope_id.startswith("pending-"):
+            raise PanelError("请先连接所选 QQ 机器人，再刷新状态。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
         if not scope or not plugin.outbox.can_recall(scope, manual=True):
@@ -555,8 +610,8 @@ class MemoryPanel:
                 }
                 return {
                     "confirmation": token,
-                    "message": f"将清空 {scope['platform_instance_id']} / {scope['user_id']} "
-                    "的全部记忆、来源和待办，绑定账号共用此结果。清空后保持暂停。",
+                    "message": "同时删除聊天来源和待处理任务。若绑定了其他账号，"
+                    "这些账号共用的记忆也会清空。清空后保持暂停。",
                 }
             elif action == "forget_confirm":
                 confirmation = str(payload.get("confirmation", ""))
@@ -575,5 +630,6 @@ class MemoryPanel:
             plugin.worker.wake.set()
             return {"message": {
                 "mode": "记忆模式已更新。", "correct": "管理员更正已保存，后台正在整理。",
-                "forget_confirm": "旧记忆已停用，后台正在清理。完成后可重新开启记忆。",
+                "forget_confirm": "记忆已暂停，后台正在清理。清理完成后，"
+                "选择「正常记忆」并点击「应用模式」可重新记录。",
             }[action]}

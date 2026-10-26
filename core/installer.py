@@ -163,7 +163,7 @@ else
   docker compose --project-name "$project" up -d --build
 fi
 docker compose --project-name "$project" up -d --wait --wait-timeout 600
-printf '\n安装完成。回到插件的「设置」检查连接，再选择模型并保存。\n'
+printf '\n安装完成。回到插件的「设置」选择模型，点击「检查并保存模型」。\n'
 printf '服务文件位置：%s\n' "$target"
 """
 

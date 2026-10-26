@@ -9,7 +9,6 @@ import weakref
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -20,6 +19,7 @@ from astrbot.core.agent.message import TextPart
 
 from .core.catalog import export_bytes, render_memory, render_page
 from .core.client import HindsightClient, HindsightError
+from .core.clock import host_timezone
 from .core.dialogue import (
     appended_history,
     final_reply,
@@ -97,8 +97,6 @@ class HindsightBridge(Star):
             return
         try:
             tokenizer = str(self.config.get("query_tokenizer", "o200k_base"))
-            zone = str(self.config.get("timezone") or "UTC")
-            ZoneInfo(zone)
             await asyncio.to_thread(encoding, tokenizer)
             self.client = HindsightClient(url, key, tokenizer=tokenizer)
             self.outbox = Outbox(
@@ -107,7 +105,7 @@ class HindsightBridge(Star):
                 self.client.url,
                 credential_fingerprint=sha256(key),
                 address_revision=int(self.config.get("service_address_revision", 1)),
-                zone=zone,
+                zone=host_timezone(self.context),
                 max_tasks=int(self.config.get("queue_max_tasks", 10000)),
                 max_bytes=int(self.config.get("queue_max_mib", 64)) * 1024 * 1024,
                 control_directory=self.control_directory(),
@@ -142,6 +140,8 @@ class HindsightBridge(Star):
         return directory
 
     def refresh_permissions(self):
+        if self.outbox is not None:
+            self.outbox.zone = host_timezone(self.context)
         try:
             accounts = pairs(self.config.get("allowed_accounts", []))
         except QueueError as exc:

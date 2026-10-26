@@ -24,12 +24,6 @@
     "default": 1,
     "hint": "首次安装保持默认。同一服务搬迁地址时递增此值，具体步骤见备份与恢复文档。"
   },
-  "timezone": {
-    "description": "消息时区",
-    "type": "string",
-    "default": "",
-    "hint": "设置页面自动读取浏览器时区，用于理解消息中的今天、明天等日期。Asia/Shanghai 与 Asia/Hong_Kong 都是 UTC+08:00。"
-  },
   "control_state_dir": {
     "description": "独立控制目录",
     "type": "string",

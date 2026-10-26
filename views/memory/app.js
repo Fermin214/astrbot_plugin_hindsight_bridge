@@ -73,13 +73,14 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
       button.disabled = false;
     }
     if (group === "setup") updateProviderHelp();
+    if (group === "memory") renderScope();
   }
 }
 
 function activateTab(name, focus = false) {
   if (name !== "setup") {
-    clearCommand();
-    clearUninstall();
+    $("installation").open = false;
+    $("uninstallation").open = false;
   }
   document.querySelectorAll('[role="tab"]').forEach((tab) => {
     const selected = tab.id === `tab-${name}`;
@@ -114,7 +115,7 @@ function option(value, label, disabled = false) {
 
 function providerSelect(kind, selected) {
   const select = $(`${kind}-provider`);
-  select.replaceChildren(option("", kind === "rerank" ? "不使用重排，使用默认排序" : "请选择模型"));
+  select.replaceChildren(option("", kind === "rerank" ? "不使用重排模型" : "请选择模型"));
   const providers = data.providers?.[kind] || [];
   providers.forEach((provider) => {
     const label = [provider.name || provider.label || provider.id, provider.model].filter(Boolean).join(" / ");
@@ -133,44 +134,38 @@ function updateProviderHelp() {
   }
   $("provider-help").textContent = missing.length
     ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，再回到这里刷新状态。`
-    : "选择 AstrBot 已配置的模型。重排模型可不选，记忆服务会使用默认排序。";
+    : "聊天模型用于整理记忆，嵌入模型用于查找记忆；重排模型可不选。";
   $("save-models").disabled = missing.length > 0 || locks.has("setup");
-}
-
-function clearCommand() {
-  $("installation").hidden = true;
-  $("install-command").value = "";
-  $("install-message").textContent = "";
 }
 
 function clearUninstall() {
   $("uninstallation").hidden = true;
+  $("uninstallation").open = false;
   $("uninstall-command").value = "";
 }
 
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  const installed = data?.managed_service?.installed === true;
-  $("managed-settings").hidden = !managed || installed || (data?.config.configured && data?.config.managed);
-  $("models-settings").hidden = !managed || !installed;
+  $("managed-settings").hidden = !managed;
+  $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;
   $("api-key-field").hidden = managed;
   $("api-url").readOnly = managed;
   $("connection-heading").textContent = managed ? "配套服务连接" : "连接已有 Hindsight";
-  $("key-help").textContent = managed ? "服务连接凭据由插件自动配置，无需填写。"
-    : data?.config.has_api_key ? "已保存连接密钥。留空沿用，填写新值则替换。" : "填写已有 Hindsight 的服务 API Key，与模型供应商密钥不同。";
+  $("key-help").hidden = managed;
+  $("key-help").textContent = data?.config.has_api_key ? "已保存连接密钥。留空沿用，填写新值则替换。" : "填写已有 Hindsight 的服务 API Key，与模型供应商密钥不同。";
 }
 
 function addAccount(account = {}) {
   const row = el("div", "account-row");
-  const platformLabel = el("label", "", "机器人 / 平台实例");
+  const platformLabel = el("label", "", "QQ 机器人");
   const select = el("select");
   select.className = "account-platform";
   select.required = true;
   select.append(option("", "请选择已连接的机器人"));
   (data.platforms || []).forEach((platform) => select.append(option(platform.id, platform.name || platform.id)));
   if (account.platform_instance_id && !(data.platforms || []).some((item) => item.id === account.platform_instance_id)) {
-    select.append(option(account.platform_instance_id, `${account.platform_instance_id}（实例不可用，请重新选择）`, true));
+    select.append(option(account.platform_instance_id, `${account.platform_instance_id}（机器人不可用，请重新选择）`, true));
   }
   select.value = account.platform_instance_id || "";
   platformLabel.append(select);
@@ -204,7 +199,7 @@ function refreshAccountPlatforms() {
     select.replaceChildren(option("", "请选择已连接的机器人"));
     (data.platforms || []).forEach((platform) => select.append(option(platform.id, platform.name || platform.id)));
     if (selected && !(data.platforms || []).some((platform) => platform.id === selected)) {
-      select.append(option(selected, `${selected}（实例不可用，请重新选择）`, true));
+      select.append(option(selected, `${selected}（机器人不可用，请重新选择）`, true));
     }
     select.value = selected;
   });
@@ -215,11 +210,9 @@ function hydrateConfig() {
   settingsRevision = data.config_revision;
   $("api-url").value = config.api_url || "";
   $("api-key").value = "";
+  $("connection-result").hidden = true;
   $("api-key").placeholder = config.has_api_key ? "已保存，留空继续使用" : "填写记忆服务的 API Key";
   $("key-help").textContent = config.has_api_key ? "已保存 API Key。留空保留，填写新值则替换。" : "填写记忆服务的连接密钥。";
-  let browserTimezone = "Asia/Shanghai";
-  try { browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || browserTimezone; } catch { /* Use the fallback when Intl is unavailable. */ }
-  $("timezone").value = config.timezone || browserTimezone;
   $("setup-intro").hidden = config.configured === true;
   $("save-settings").textContent = config.configured ? "保存设置" : "完成设置";
   document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
@@ -229,18 +222,6 @@ function hydrateConfig() {
   (config.allowed_accounts || []).forEach(addAccount);
   if (!config.allowed_accounts?.length) addAccount();
   updateProviderHelp();
-  updateTimezoneHelp();
-}
-
-function updateTimezoneHelp() {
-  try {
-    const zone = $("timezone").value.trim();
-    const part = new Intl.DateTimeFormat("zh-CN", { timeZone: zone, timeZoneName: "longOffset" })
-      .formatToParts(new Date()).find((item) => item.type === "timeZoneName");
-    $("timezone-help").textContent = `${part?.value.replace("GMT", "UTC") || zone}。用于解释消息中的今天、明天等日期。`;
-  } catch {
-    $("timezone-help").textContent = "填写 IANA 时区名称，例如 Asia/Shanghai。";
-  }
 }
 
 function scopeName(scope) {
@@ -258,6 +239,7 @@ function countDescription(counts) {
     retained: "已保存", cancelled: "已取消", dead: "失败",
     ready: "等待处理", submitting: "正在提交", unknown: "结果待确认", tracking: "正在整理",
     reconcile_required: "需要核对", discarded: "已丢弃", collecting: "收集中", held: "等待回复",
+    cancel_requested: "正在取消",
   };
   return Object.entries(counts).map(([key, value]) => `${labels[key] || key}：${text(value)}`).join("，") || "暂无后台任务";
 }
@@ -268,18 +250,24 @@ function renderStatus() {
   $("status-label").textContent = status.recovering ? "正在恢复记忆服务"
     : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
-  $("status-description").textContent = status.recovering ? "恢复完成后再使用记忆管理，可点击刷新状态查看进度。"
-    : connected === true ? "已取得服务连接状态。用户记忆的处理情况见下方。"
-    : connected === false ? "请检查服务连接与运行状态。"
-    : "服务尚未返回明确的连接结果，请检查连接或稍后刷新。";
-  if (!data.config.configured && data.managed_service?.installed) {
-    $("status-label").textContent = data.managed_service.ready ? "模型已配置，可以完成设置" : "服务已安装，请配置模型";
+  $("status-description").textContent = status.recovering ? "稍后点击「刷新状态」查看结果。"
+    : connected === false ? (data.config.managed
+      ? "可重新执行安装命令，或点击「检查连接」查看原因。"
+      : "请检查服务地址、密钥与服务状态，再点击「检查连接」。")
+    : "";
+  if (data.config.managed && data.managed_service?.installed && !status.recovering) {
+    if (!data.managed_service.ready) {
+      $("status-label").textContent = "服务已安装，请选择模型并保存";
+      $("status-description").textContent = "";
+    } else if (!data.config.configured) {
+      $("status-label").textContent = "模型已保存，请添加使用者并完成设置";
+    }
   }
-  $("enabled-label").textContent = data.config?.configured ? "已完成配置" : "等待配置";
+  $("status-description").hidden = !$("status-description").textContent;
   $("scope-statuses").replaceChildren();
   if (!data.scopes?.length) {
     const empty = el("div", "empty");
-    empty.append(el("h3", "", "还没有用户运行记录"), el("p", "", "添加使用者并完成设置，开始聊天后即可查看。"));
+    empty.append(el("h3", "", "还没有添加使用者"), el("p", "", "在下方添加使用者并保存。"));
     $("scope-statuses").append(empty);
   }
   (data.scopes || []).forEach((scope) => {
@@ -292,9 +280,9 @@ function renderStatus() {
       selectScope(scope.scope_id);
       activateTab("memories", true);
     });
-    heading.append(el("strong", "", scopeName(scope)), el("span", "badge", modeLabels[scope.mode] || "模式未知"), manage);
-    row.append(heading, el("p", "hint", countDescription(scope.summary?.counts)));
-    if (scope.summary?.last_error) row.append(el("p", "hint error-text", scope.summary.last_error));
+    heading.append(el("strong", "", scopeName(scope)), el("span", "badge", scope.pending ? "等待连接" : modeLabels[scope.mode] || "模式未知"), manage);
+    row.append(heading, el("p", "hint", scope.pending ? pendingScopeHelp(scope) : countDescription(scope.summary?.counts)));
+    if (scope.summary?.error_message) row.append(el("p", "hint error-text", scope.summary.error_message));
     $("scope-statuses").append(row);
   });
 }
@@ -310,7 +298,8 @@ async function refreshBootstrap({ hydrate = false } = {}) {
     updateProviderHelp();
     updateConnectionMode();
   }
-  $("platform-help").textContent = data.platforms?.length ? "只对这里列出的用户启用记忆。请先移除不需要的空白行，再保存。" : "未找到平台实例。请先在 AstrBot 中连接 QQ 机器人，再刷新此页。";
+  $("platform-help").textContent = data.platforms?.length ? "" : "未找到 QQ 机器人。请先在 AstrBot 中添加机器人，再点击「刷新状态」。";
+  $("platform-help").hidden = !$("platform-help").textContent;
   renderStatus();
   const previous = scopeId;
   const scopes = data.scopes || [];
@@ -320,6 +309,7 @@ async function refreshBootstrap({ hydrate = false } = {}) {
   if (!scopes.length) $("scope-picker").append(option("", "暂无用户"));
   $("scope-picker").value = scopeId;
   $("memory-fields").disabled = !scopeId || locks.has("memory");
+  $("memory-fields").hidden = !scopes.length;
   $("setup-fields").disabled = locks.has("setup");
   $("no-scopes").hidden = scopes.length > 0;
   renderScope();
@@ -342,9 +332,16 @@ async function refreshBootstrap({ hydrate = false } = {}) {
 function renderScope() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   $("scope-mode").value = scope?.mode || "";
-  $("mode-help").textContent = modeHelp[scope?.mode] || "记忆模式未知，请刷新状态。";
-  $("scope-error").hidden = !scope?.summary?.last_error;
-  $("scope-error").textContent = text(scope?.summary?.last_error);
+  $("mode-help").textContent = scope?.pending ? pendingScopeHelp(scope) : modeHelp[scope?.mode] || "";
+  for (const id of ["scope-mode", "save-mode", "retry", "export", "forget"]) $(id).disabled = !scope || scope.pending === true;
+  $("scope-error").hidden = !scope?.summary?.error_message;
+  $("scope-error").textContent = text(scope?.summary?.error_message);
+}
+
+function pendingScopeHelp(scope) {
+  if (scope.pending_reason === "service") return "请先在「设置」中完成服务配置。";
+  if (scope.pending_reason === "recovering") return "记忆服务正在恢复，稍后点击「刷新状态」。";
+  return "QQ 机器人尚未连接。连接后点击「刷新状态」即可管理记忆。";
 }
 
 function selectScope(id) {
@@ -368,7 +365,10 @@ function renderMemories(items, searching) {
   list.replaceChildren();
   if (!items.length) {
     const empty = el("div", "empty");
-    empty.append(el("h3", "", searching ? "没有找到相关记忆" : "还没有保存的记忆"), el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : "完成设置后正常聊天，保存的内容会显示在这里。"));
+    empty.append(
+      el("h3", "", searching ? "没有找到相关记忆" : page > 1 ? "这一页没有记忆" : "还没有保存的记忆"),
+      el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : page > 1 ? "点击「上一页」返回。" : "与机器人正常私聊后，记忆会在后台整理。稍后点击「刷新状态」查看。"),
+    );
     list.append(empty);
   }
   items.forEach((item) => {
@@ -389,6 +389,16 @@ async function loadMemories(requestedPage = page) {
   const version = ++listVersion;
   const id = scopeId;
   if (!id) return;
+  const scope = data.scopes.find((item) => item.scope_id === id);
+  if (scope?.pending) {
+    $("memory-list").setAttribute("aria-busy", "false");
+    renderMemories([], false);
+    $("memory-list").querySelector("h3").textContent = "还没有保存的记忆";
+    $("memory-list").querySelector("p").textContent = pendingScopeHelp(scope);
+    $("list-summary").textContent = "";
+    $("pagination").hidden = true;
+    return;
+  }
   const searching = searchMode;
   $("memory-list").setAttribute("aria-busy", "true");
   $("list-summary").textContent = "正在读取记忆…";
@@ -434,9 +444,9 @@ function renderDetail(record, corrections = []) {
     const labels = { id: "记忆编号", text: "记忆内容", type: "类型", date: "时间", context: "相关语境", document_id: "来源文档" };
     const description = el("dl");
     Object.entries(record).forEach(([key, value]) => {
-      if (value == null || value === "") return;
+      if (!labels[key] || value == null || value === "") return;
       const row = el("div", "detail-field");
-      row.append(el("dt", "", labels[key] || key), el("dd", "", key === "type" ? memoryTypes[value] || value : value));
+      row.append(el("dt", "", labels[key]), el("dd", "", key === "type" ? memoryTypes[value] || value : value));
       description.append(row);
     });
     content.append(description);
@@ -478,17 +488,15 @@ function connectionPayload() {
 
 function settingsPayload() {
   const payload = {
-    ...connectionPayload(), timezone: $("timezone").value.trim(),
+    ...connectionPayload(),
     allowed_accounts: [], config_revision: settingsRevision,
   };
-  if (!payload.timezone) throw new Error("请填写时区，例如 Asia/Shanghai。");
-  try { new Intl.DateTimeFormat("zh-CN", { timeZone: payload.timezone }); } catch { throw new Error("时区无法识别，请填写例如 Asia/Shanghai。"); }
   const seen = new Set();
   for (const row of $("accounts").children) {
     const platform = row.querySelector(".account-platform");
     const user = row.querySelector(".account-user");
     const userId = user.value.trim();
-    if (!platform.value || platform.selectedOptions[0]?.disabled) throw new Error("请为每个用户选择可用的机器人平台实例。");
+    if (!platform.value || platform.selectedOptions[0]?.disabled) throw new Error("请为每个用户选择可用的 QQ 机器人。");
     if (!/^[0-9]+$/.test(userId)) throw new Error("用户 QQ 号只能填写数字。");
     const identity = JSON.stringify([platform.value, userId]);
     if (seen.has(identity)) throw new Error(`用户 ${userId} 已经添加，请移除重复行。`);
@@ -513,7 +521,7 @@ async function saveSettings() {
     const response = await bridge.apiPost("settings/save", payload);
     if (response.saved !== true) throw new Error(response.message || "设置未保存，请重试。");
     $("api-key").value = "";
-    clearCommand();
+    $("installation").open = false;
     await refreshBootstrap({ hydrate: true });
     activateTab("memories", true);
     notify(response.message || "设置已保存，正常聊天即可。");
@@ -526,39 +534,40 @@ $("settings-form").addEventListener("submit", (event) => {
 });
 $("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
   await checkConnection(connectionPayload());
-  clearCommand();
   await refreshBootstrap();
 }));
 $("api-url").addEventListener("input", () => {
   const changed = data.config.api_url
     && $("api-url").value.trim().replace(/\/+$/, "") !== data.config.api_url.replace(/\/+$/, "");
-  $("connection-result").textContent = changed
+  notify(changed
     ? "连接其他服务会使用独立记忆。旧记忆保存在原服务；同一服务搬迁请按数据维护指南操作。"
-    : "地址已修改，请重新检查连接。";
+    : "保存设置时会检查连接。", false, "connection-result");
 });
-$("api-key").addEventListener("input", () => { $("connection-result").textContent = "密钥已修改，请重新检查连接。"; });
+$("api-key").addEventListener("input", () => notify("保存设置时会检查新密钥。", false, "connection-result"));
 $("add-account").addEventListener("click", () => addAccount().focus());
 document.querySelectorAll('[name="connection-mode"]').forEach((radio) => radio.addEventListener("change", () => {
-  clearCommand();
-  clearUninstall();
+  $("installation").open = false;
+  $("uninstallation").open = false;
   $("api-key").value = "";
+  $("connection-result").hidden = true;
   $("api-url").value = radio.value === "managed" ? data.installation_api_url || "" : data.config.api_url || "";
   updateConnectionMode();
 }));
-for (const kind of ["chat", "embedding", "rerank"]) $(`${kind}-provider`).addEventListener("change", clearCommand);
 async function prepareInstallation(button) {
   await perform(button, "setup", async () => {
-  clearCommand();
-  const response = await bridge.apiPost("install/prepare", { config_revision: settingsRevision });
-  if (!response.command) throw new Error("未生成安装命令，请稍后重试。");
-  if (response.config_revision) settingsRevision = response.config_revision;
-  $("install-command").value = response.command;
-  $("install-message").textContent = response.message || "";
-  $("installation").hidden = false;
-  $("managed-settings").hidden = false;
-  if (response.api_url) $("api-url").value = response.api_url;
-  $("install-command").focus();
-  notify("安装命令已生成。执行后检查连接，再配置模型。");
+    const response = await bridge.apiPost("install/prepare", { config_revision: settingsRevision });
+    if (!response.command) throw new Error("未生成安装命令，请稍后重试。");
+    if (response.config_revision) settingsRevision = response.config_revision;
+    $("install-command").value = response.command;
+    $("installation").hidden = false;
+    $("installation").open = true;
+    $("managed-settings").hidden = false;
+    data.has_installation = true;
+    data.installation_api_url = response.api_url;
+    updateConnectionMode();
+    if (response.api_url) $("api-url").value = response.api_url;
+    $("install-command").focus();
+    notify("安装命令已生成。执行后在下方选择模型并保存。");
   });
 }
 $("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
@@ -573,7 +582,7 @@ $("save-models").addEventListener("click", () => void perform($("save-models"), 
   const response = await bridge.apiPost("models/save", selection);
   if (response.saved !== true) throw new Error("模型配置未保存，请重试。");
   settingsRevision = response.config_revision;
-  clearCommand();
+  $("installation").open = false;
   await refreshBootstrap();
   notify(response.message);
 }));
@@ -588,20 +597,16 @@ $("copy-command").addEventListener("click", () => void perform($("copy-command")
   } catch {
     if (!document.execCommand("copy")) throw new Error("浏览器限制了自动复制。命令已选中，请按 Ctrl+C，或长按选择复制。");
   }
-  clearCommand();
-  $("managed-settings").hidden = true;
-  notify("安装命令已复制并隐藏。");
+  $("installation").open = false;
+  notify("安装命令已复制。请在运行 AstrBot 的 Linux 主机终端执行，再选择模型并保存。");
 }));
-$("hide-command").addEventListener("click", clearCommand);
-$("timezone").addEventListener("input", updateTimezoneHelp);
 $("prepare-uninstall").addEventListener("click", () => void perform($("prepare-uninstall"), "setup", async () => {
-  clearUninstall();
   if (!$("delete-memory-data").checked) throw new Error("请先确认删除配套服务及全部记忆数据。");
   const response = await bridge.apiPost("uninstall/prepare", { config_revision: settingsRevision, delete_memory_data: true });
   $("uninstall-command").value = response.command;
   $("uninstallation").hidden = false;
+  $("uninstallation").open = true;
 }));
-$("hide-uninstall").addEventListener("click", clearUninstall);
 $("delete-memory-data").addEventListener("change", clearUninstall);
 $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", async () => {
   const field = $("uninstall-command");
@@ -614,9 +619,8 @@ $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninsta
   } catch {
     if (!document.execCommand("copy")) throw new Error("请按 Ctrl+C 复制选中的命令。");
   }
-  clearUninstall();
-  $("delete-memory-data").checked = false;
-  notify("卸载命令已复制并隐藏。");
+  $("uninstallation").open = false;
+  notify("卸载命令已复制。请在运行 AstrBot 的 Linux 主机终端执行，完成后点击「刷新状态」。");
 }));
 $("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", async () => {
   await refreshBootstrap({ hydrate: !data });
@@ -713,7 +717,7 @@ $("confirm-forget").addEventListener("click", () => {
       $("query").value = "";
       await refreshBootstrap();
       if (scopeId) await loadMemories();
-      notify(response.message || "此用户的全部记忆已清空。");
+      notify(response.message || "记忆已清空并暂停。需要重新记录时，选择「正常记忆」并点击「应用模式」。");
     } finally {
       $("forget-agree").disabled = false;
       $("cancel-forget").disabled = false;
@@ -735,10 +739,7 @@ async function start() {
     const theme = (value) => { document.documentElement.dataset.theme = (value || bridge.getContext?.())?.isDark ? "dark" : "light"; };
     theme(context);
     const off = bridge.onContext?.(theme);
-    window.addEventListener("beforeunload", () => { off?.(); clearCommand(); clearUninstall(); }, { once: true });
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) { clearCommand(); clearUninstall(); }
-    });
+    window.addEventListener("beforeunload", () => { off?.(); }, { once: true });
     await refreshBootstrap({ hydrate: true });
     $("refresh").disabled = false;
     activateTab(data.config.configured ? "memories" : "setup");

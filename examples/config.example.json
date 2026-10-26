@@ -3,7 +3,6 @@
   "api_key": "",
   "service_id": "home-hindsight",
   "service_address_revision": 1,
-  "timezone": "Asia/Shanghai",
   "agent_id": "default",
   "control_state_dir": "",
   "allowed_accounts": [

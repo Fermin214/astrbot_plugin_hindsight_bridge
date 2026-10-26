@@ -45,7 +45,7 @@ class Outbox:
         *,
         credential_fingerprint: str,
         address_revision: int = 1,
-        zone: str = "UTC",
+        zone: str | None = None,
         max_tasks: int = 10000,
         max_bytes: int = 64 * 1024 * 1024,
         control_directory: Path | None = None,
@@ -58,7 +58,8 @@ class Outbox:
         self.permission_pairs = None
         self.recovering = False
         self.max_tasks, self.max_bytes = max_tasks, max_bytes
-        ZoneInfo(zone)
+        if zone is not None:
+            ZoneInfo(zone)
         if (
             not self.connection_id
             or not self.agent_id

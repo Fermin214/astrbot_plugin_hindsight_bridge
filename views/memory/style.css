@@ -97,7 +97,6 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .choice small { display: block; color: var(--muted); font-weight: 400; margin-top: 3px; }
 .surface { padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .settings-section { margin-top: 26px; }
-.settings-section > summary { cursor: pointer; font-size: 17px; font-weight: 650; padding-block: 12px; }
 .settings-section .check-label { margin-block: 14px; }
 .maintenance-heading { margin-top: 24px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
@@ -106,6 +105,7 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; }
 .actions .hint { margin-top: 0; }
 .installation { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 18px; }
+.installation > summary { cursor: pointer; font-weight: 650; }
 .installation p { margin: 7px 0 12px; }
 .installation textarea { margin-top: 6px; background: var(--bg); font-family: Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
 .connection-form { margin-top: 16px; }
@@ -115,7 +115,6 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .account-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .account-row:last-child { margin-bottom: 10px; }
 .settings-footer { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 22px; }
-.timezone { width: 220px; margin-right: auto; }
 .check-label { display: flex; align-items: center; gap: 9px; }
 .settings-footer > button { align-self: end; }
 .service-state { display: flex; align-items: center; gap: 14px; }
@@ -184,7 +183,6 @@ dialog::backdrop { background: #12223566; }
   .account-row { grid-template-columns: 1fr auto; }
   .account-row label:first-child { grid-column: 1 / -1; }
   .settings-footer { gap: 14px 10px; }
-  .timezone { width: 100%; }
   .settings-footer .check-label { flex-basis: 100%; }
   .settings-footer > button { flex: 1 1 120px; }
   .search-bar { flex-wrap: wrap; }
