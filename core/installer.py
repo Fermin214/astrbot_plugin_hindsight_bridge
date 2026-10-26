@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import io
 import ipaddress
+import json
 from pathlib import Path
 import re
 import shlex
@@ -111,7 +112,7 @@ if [ -f "$target/identity" ]; then
 fi
 if [ -f "$target/.env" ]; then
   # Database identity and model dimensions must survive repeated installation.
-  for field in POSTGRES_PASSWORD HINDSIGHT_API_TENANT_API_KEY HINDSIGHT_API_WORKER_ID HINDSIGHT_API_EMBEDDINGS_PROVIDER HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS; do
+  for field in POSTGRES_PASSWORD HINDSIGHT_API_TENANT_API_KEY HINDSIGHT_API_WORKER_ID HINDSIGHT_SETUP_FINGERPRINT; do
     old="$(grep -m1 "^${field}=" "$target/.env" || true)"
     new="$(grep -m1 "^${field}=" "$stage/.env" || true)"
     [ "$old" = "$new" ] || fail '服务身份或嵌入模型发生变化，请先完成数据迁移。'
@@ -132,6 +133,15 @@ if [ -n "$astrbot_id" ]; then
     index=$((index + 1))
   done
   [ "$index" -gt 0 ] || fail 'AstrBot 没有可连接的 Docker 网络。'
+  if [ HAS_TRANSPORT_VALUE = yes ]; then
+    printf '  memory-models:\n    networks:\n' >> compose.override.yaml
+    index=0
+    for shared in $existing; do
+      [ "$shared" = NETWORK_VALUE ] && continue
+      printf '      astrbot_%s: {}\n' "$index" >> compose.override.yaml
+      index=$((index + 1))
+    done
+  fi
   printf 'networks:\n' >> compose.override.yaml
   index=0
   for shared in $existing; do
@@ -148,11 +158,19 @@ else
 fi
 docker compose --project-name "$project" up -d --wait --wait-timeout 600
 docker compose --project-name "$project" exec -T memory-api python - <<'PY'
+import asyncio
 import json
+import logging
+import math
 import os
 import sys
 import urllib.request
 from hindsight_api.config import get_config
+from hindsight_api.engine.embeddings import create_embeddings_from_env
+from hindsight_api.engine.cross_encoder import create_cross_encoder_from_env
+from hindsight_api.engine.llm_wrapper import LLMProvider
+
+logging.disable(logging.CRITICAL)
 
 worker = get_config()
 if not worker.worker_enabled or worker.worker_max_slots <= sum(worker.worker_slot_reservations.values()):
@@ -166,27 +184,34 @@ def call(url, key, body, method="POST"):
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 
-try:
-    prefix = "HINDSIGHT_API_EMBEDDINGS_OPENAI_"
-    vector = call(os.environ[prefix + "BASE_URL"].rstrip("/") + "/embeddings",
-                  os.environ[prefix + "API_KEY"], {
-                      "model": os.environ[prefix + "MODEL"], "input": "连接检查",
-                      "dimensions": int(os.environ[prefix + "DIMENSIONS"]),
-                  })["data"][0]["embedding"]
-    assert len(vector) == int(os.environ[prefix + "DIMENSIONS"])
-except Exception:
-    sys.exit("安装未完成：记忆服务无法调用嵌入模型，请检查模型地址、密钥和网络后重新执行安装命令。")
-try:
-    prefix = "HINDSIGHT_API_LLM_"
-    result = call(os.environ[prefix + "BASE_URL"].rstrip("/") + "/chat/completions",
-                  os.environ[prefix + "API_KEY"], {
-                      "model": os.environ[prefix + "MODEL"],
-                      "messages": [{"role": "user", "content": "Reply OK."}],
-                      "max_tokens": 32,
-                  })
-    assert result.get("choices")
-except Exception:
-    sys.exit("安装未完成：记忆服务无法调用对话模型，请检查模型地址、密钥和网络后重新执行安装命令。")
+async def check_models():
+    try:
+        embeddings = create_embeddings_from_env()
+        await embeddings.initialize()
+        vectors = await embeddings.encode(["连接检查"])
+        assert len(vectors) == 1
+        assert len(vectors[0]) == int(os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS"])
+        assert all(math.isfinite(float(value)) for value in vectors[0])
+    except Exception:
+        sys.exit("安装未完成：记忆服务无法调用嵌入模型，请检查模型地址、密钥和网络后重新执行安装命令。")
+    try:
+        llm = LLMProvider.from_env()
+        try:
+            await llm.verify_connection()
+        finally:
+            await llm.cleanup()
+    except Exception:
+        sys.exit("安装未完成：记忆服务无法调用对话模型，请检查模型地址、密钥和网络后重新执行安装命令。")
+    if os.environ.get("HINDSIGHT_API_RERANKER_PROVIDER") != "rrf":
+        try:
+            reranker = create_cross_encoder_from_env()
+            await reranker.initialize()
+            scores = await reranker.predict([("连接检查", "记忆服务连接检查")])
+            assert len(scores) == 1 and math.isfinite(float(scores[0]))
+        except Exception:
+            sys.exit("安装未完成：记忆服务无法调用重排模型，请检查模型地址、密钥和网络后重新执行安装命令。")
+
+asyncio.run(check_models())
 try:
     call("http://127.0.0.1:8888/v1/default/banks/astrbot-setup-" + os.environ["HINDSIGHT_SETUP_ID"],
          os.environ["HINDSIGHT_API_TENANT_API_KEY"],
@@ -200,22 +225,32 @@ printf '服务文件位置：%s\n' "$target"
 
 
 def environment_file(values):
-    """Compose single quoted dotenv values keep dollars and backslashes literal."""
+    """Quote Compose dotenv values without changing request parameters."""
     rows = []
     for key, value in sorted(values.items()):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
             raise ValueError("invalid_environment_name")
         text = str(value)
-        if any(ord(char) < 32 for char in text) or "'" in text:
+        if any(ord(char) < 32 for char in text):
             raise ValueError("模型配置含安装文件无法保存的字符，请改用已有服务连接。")
-        rows.append(f"{key}='{text}'")
+        if "'" in text:
+            rows.append(key + "=" + json.dumps(text, ensure_ascii=False).replace("$", "$$"))
+        else:
+            rows.append(f"{key}='{text}'")
     return "\n".join(rows) + "\n"
 
 
 def installation(root, state, model_environment, *, container_hostname=""):
-    for key, value in model_environment.items():
-        if not key.endswith("_BASE_URL"):
-            continue
+    model_environment = dict(model_environment)
+    transports = json.loads(model_environment.pop("ASTRBOT_MEMORY_MODEL_CONFIG", "{}"))
+    identity = model_environment.pop("ASTRBOT_MEMORY_EMBEDDING_IDENTITY", None)
+    addresses = [
+        value for key, value in model_environment.items() if key.endswith("_BASE_URL")
+    ] + [
+        descriptor[field] for descriptor in transports.values()
+        for field in ("base_url", "proxy") if descriptor.get(field)
+    ]
+    for value in addresses:
         hostname = urlsplit(value).hostname or ""
         try:
             loopback = ipaddress.ip_address(hostname).is_loopback
@@ -232,7 +267,7 @@ def installation(root, state, model_environment, *, container_hostname=""):
     project = "astrbot-memory-" + identifier
     network = project + "-clients"
     alias = "memory-" + identifier
-    embedding = {
+    embedding = json.loads(identity) if identity else {
         key: value for key, value in model_environment.items()
         if key.startswith("HINDSIGHT_API_EMBEDDINGS_")
         and not key.endswith(("_API_KEY", "_BATCH_SIZE"))
@@ -250,6 +285,12 @@ def installation(root, state, model_environment, *, container_hostname=""):
         "HINDSIGHT_SETUP_ID": identifier,
         "HINDSIGHT_SETUP_FINGERPRINT": fingerprint,
     }
+    values = {
+        key: str(value).replace(
+            "__ASTRBOT_MEMORY_TRANSPORT_KEY__", state["api_key"]
+        ).replace("http://memory-models:8765", f"http://memory-models-{identifier}:8765")
+        for key, value in values.items()
+    }
     compose = COMPOSE.replace("MEMORY_ALIAS", alias).replace("MEMORY_NETWORK", network)
     if container_hostname:
         compose = compose.replace(
@@ -260,6 +301,42 @@ def installation(root, state, model_environment, *, container_hostname=""):
         "compose.yaml": compose,
         "identity": identifier + "\n",
     }
+    if transports:
+        # Both processes use the pinned image; the relay has no published port.
+        values["ASTRBOT_MEMORY_MODEL_CONFIG"] = json.dumps(transports, ensure_ascii=False, allow_nan=False)
+        files["model_transport.py"] = (Path(root) / "deploy/model_transport.py").read_text(encoding="utf-8")
+        values["ASTRBOT_MEMORY_TRANSPORT_CODE"] = base64.b64encode(
+            files["model_transport.py"].encode("utf-8")
+        ).decode("ascii")
+        files[".env"] = environment_file(values)
+        compose = compose.replace(
+            "  memory-api:\n",
+            "  memory-models:\n"
+            "    image: ghcr.io/vectorize-io/hindsight:1.1.0-slim\n"
+            "    entrypoint: [python, -c, \"import base64,os; exec(compile(base64.b64decode(os.environ['ASTRBOT_MEMORY_TRANSPORT_CODE']), 'model_transport.py', 'exec'))\"]\n"
+            "    restart: unless-stopped\n"
+            "    init: true\n"
+            "    read_only: true\n"
+            "    cap_drop: [ALL]\n"
+            "    security_opt: [no-new-privileges:true]\n"
+            "    extra_hosts: [\"host.docker.internal:host-gateway\"]\n"
+            "    env_file: .env\n"
+            "    environment:\n"
+            "      ASTRBOT_MEMORY_TRANSPORT_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?}\n"
+            "    healthcheck:\n"
+            "      test: [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).close()\"]\n"
+            "      interval: 5s\n"
+            "      timeout: 5s\n"
+            "      retries: 10\n"
+            "    networks:\n"
+            "      memory_clients:\n"
+            f"        aliases: [memory-models-{identifier}]\n"
+            "  memory-api:\n",
+        ).replace(
+            "    depends_on:\n      memory-db:",
+            "    depends_on:\n      memory-models:\n        condition: service_healthy\n      memory-db:",
+        )
+        files["compose.yaml"] = compose
     for name in ("Dockerfile", "extensions.sql"):
         path = Path(root) / "deploy" / "postgres" / name
         files["postgres/" + name] = path.read_text(encoding="utf-8")
@@ -271,7 +348,7 @@ def installation(root, state, model_environment, *, container_hostname=""):
         for name, content in files.items():
             data = content.encode("utf-8")
             entry = tarfile.TarInfo(name)
-            entry.size, entry.mode = len(data), 0o600
+            entry.size, entry.mode = len(data), 0o644 if name == "model_transport.py" else 0o600
             output.addfile(entry, io.BytesIO(data))
     script = SCRIPT
     for marker, value in {
@@ -280,6 +357,7 @@ def installation(root, state, model_environment, *, container_hostname=""):
         "NETWORK_VALUE": shlex.quote(network),
         "ALIAS_VALUE": alias,
         "ARCHIVE_VALUE": base64.b64encode(archive.getvalue()).decode("ascii"),
+        "HAS_TRANSPORT_VALUE": "yes" if transports else "no",
     }.items():
         script = script.replace(marker, value)
     encoded = base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")

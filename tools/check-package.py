@@ -65,6 +65,7 @@ def main():
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
         "deploy/postgres/Dockerfile", "deploy/postgres/extensions.sql",
         "deploy/HINDSIGHT-LICENSE",
+        "deploy/model_transport.py", "tools/check-model-protocols.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
         "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
     ):

@@ -71,7 +71,7 @@ https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
 
 ### 供应商显示不兼容
 
-向导只复用能够保持请求协议的供应商配置。Responses、自定义代理或额外请求参数等组合会显示具体原因，见 [模型兼容范围](SUPPORT.md#模型供应商复用)。也可连接由维护者配置的已有 Hindsight。
+向导支持 OpenAI Chat、Responses、Claude、Gemini，以及百炼和 Ollama 原生嵌入。常用代理、请求头和额外参数可以沿用。模型类型未知、使用多模态嵌入或请求参数覆盖记忆处理所需字段时，会显示具体原因，见 [模型兼容范围](SUPPORT.md#模型供应商复用)。
 
 ### 安装命令提示无法使用 Docker
 

@@ -75,6 +75,8 @@ class ProviderTests(unittest.TestCase):
             "embed", Kind.EMBEDDING, "openai_embedding", "text-embedding-v4",
             embedding_api_key="embedding-secret",
             embedding_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            embedding_dimensions_mode="always",
+            embedding_dimensions=1024,
         )
         self.context = Context(self.chat, self.embedding)
         self.catalog = ProviderCatalog(self.context)
@@ -192,30 +194,34 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(selection=selection), self.assertRaises(SetupError):
                 self.catalog.resolve(selection)
 
-    def test_unknown_adapter_and_responses_are_rejected_and_explained(self):
-        for adapter in ("openai_responses", "deepseek", "custom_adapter"):
+    def test_unknown_adapters_are_rejected_and_explained(self):
+        for adapter in ("deepseek", "custom_adapter"):
             self.chat.adapter = adapter
-            with self.subTest(adapter=adapter), self.assertRaises(SetupError):
-                self.catalog.resolve(self.selection)
-            option = self.catalog.options()["chat"][0]
-            self.assertFalse(option["supported"])
-            self.assertTrue(option["reason"])
+            with self.subTest(adapter=adapter):
+                with self.assertRaises(SetupError):
+                    self.catalog.resolve(self.selection)
+                option = self.catalog.options()["chat"][0]
+                self.assertFalse(option["supported"])
+                self.assertTrue(option["reason"])
 
     def test_custom_transport_and_request_options_are_not_dropped(self):
-        for field, value in (
-            ("proxy", "http://proxy.invalid/secret"),
-            ("custom_headers", {"Authorization": "header-secret"}),
-            ("custom_extra_body", {"model": "different-model"}),
-            ("api_version", "2025-01-01"),
-        ):
-            with self.subTest(field=field):
-                self.chat.provider_config[field] = value
-                with self.assertRaises(SetupError) as caught:
-                    self.catalog.resolve(self.selection)
-                self.assertNotIn("secret", str(caught.exception))
-                self.assertNotIn("http", str(caught.exception))
-                self.assertFalse(self.catalog.options()["chat"][0]["supported"])
-                del self.chat.provider_config[field]
+        self.chat.adapter = "openai_responses"
+        self.chat.provider_config.update(
+            proxy="http://proxy.test:8080",
+            custom_headers={"X-Route": "header-secret"},
+            custom_extra_body={"temperature": 0.4, "instructions": "It's $a\\b"},
+        )
+        env = self.catalog.resolve(self.selection)
+        self.assertEqual(env["HINDSIGHT_API_LLM_PROVIDER"], "openai-responses")
+        self.assertEqual(json.loads(env["HINDSIGHT_API_LLM_EXTRA_BODY"])["temperature"], 0.4)
+        descriptor = json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["chat"]
+        self.assertEqual(descriptor["base_url"], "https://api.deepseek.com/v1")
+        self.assertEqual(descriptor["proxy"], "http://proxy.test:8080")
+        self.assertEqual(descriptor["headers"]["X-Route"], "header-secret")
+        self.assertNotIn("secret", json.dumps(self.catalog.options()))
+        self.chat.provider_config["custom_extra_body"] = {"model": "different-model"}
+        with self.assertRaisesRegex(SetupError, "覆盖"):
+            self.catalog.resolve(self.selection)
 
     def test_dimension_is_explicit_positive_integer(self):
         for dim in (0, -1, None, True, "1024", 1024.0):
@@ -223,10 +229,12 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(dim=dim), self.assertRaises(SetupError):
                 self.catalog.resolve(self.selection)
 
-    def test_dimension_suppression_is_incompatible(self):
+    def test_dimension_suppression_keeps_declared_storage_dimension(self):
         self.embedding.provider_config["embedding_dimensions_mode"] = "never"
-        with self.assertRaisesRegex(SetupError, "维度"):
-            self.catalog.resolve(self.selection)
+        env = self.catalog.resolve(self.selection)
+        descriptor = json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["embedding"]
+        self.assertFalse(descriptor["send_dimensions"])
+        self.assertEqual(env["HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS"], "1024")
 
     def test_embedding_adapter_and_key_are_not_taken_from_chat(self):
         self.embedding.adapter = "unknown_embedding"
@@ -243,21 +251,23 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(SetupError, "对话供应商缺少可用密钥"):
             self.catalog.resolve(self.selection)
 
-    def test_rerank_missing_key_and_nonstandard_suffix_are_rejected(self):
+    def test_local_rerank_can_omit_key_and_preserves_custom_path(self):
         self.resolve_rerank("vllm_rerank", "https://api.siliconflow.cn")
         rerank = self.context.providers["rerank"]
         rerank.provider_config["rerank_api_key"] = ""
-        with self.assertRaisesRegex(SetupError, "重排供应商缺少密钥"):
-            self.catalog.resolve({**self.selection, "rerank_provider_id": "rerank"})
-        rerank.provider_config["rerank_api_key"] = "rerank-secret"
+        env = self.catalog.resolve({**self.selection, "rerank_provider_id": "rerank"})
+        self.assertEqual(json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["rerank"]["api_key"], "")
         rerank.provider_config["rerank_api_suffix"] = "/custom"
-        with self.assertRaises(SetupError):
-            self.catalog.resolve({**self.selection, "rerank_provider_id": "rerank"})
+        env = self.catalog.resolve({**self.selection, "rerank_provider_id": "rerank"})
+        self.assertEqual(
+            json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["rerank"]["base_url"],
+            "https://api.siliconflow.cn/custom",
+        )
 
     def test_bad_urls_and_request_endpoints_are_rejected_safely(self):
         for base in (
             "file:///secret", "https://user:secret@example.test/v1",
-            "https://example.test/v1?key=secret", "https://example.test/v1#secret",
+            "https://example.test/v1#secret",
             "https://example.test/responses", "https://example.test/chat/completions",
             "https://example.test:bad/v1", "https://example.test/\nsecret",
         ):
@@ -267,15 +277,26 @@ class ProviderTests(unittest.TestCase):
             self.assertNotIn("secret", str(caught.exception))
             self.assertNotIn("https://", str(caught.exception))
 
-    def test_unknown_rerank_fields_and_native_bailian_do_not_guess(self):
-        for adapter, base, extra in (
-            ("cohere_rerank", "https://api.cohere.com/v2/rerank", {}),
-            ("vllm_rerank", "https://unrecognized.test", {}),
-            ("bailian_rerank", "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank", {}),
-            ("bailian_rerank", "https://dashscope.aliyuncs.com/compatible-api/v1/reranks", {"instruct": "custom"}),
-        ):
-            with self.subTest(adapter=adapter, base=base), self.assertRaises(SetupError):
-                self.resolve_rerank(adapter, base, **extra)
+    def test_native_bailian_and_tei_preserve_request_semantics(self):
+        env = self.resolve_rerank(
+            "bailian_rerank",
+            "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+            instruct="排序指令",
+        )
+        descriptor = json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["rerank"]
+        self.assertEqual(descriptor["protocol"], "bailian_native")
+        self.assertEqual(descriptor["instruct"], "排序指令")
+        env = self.resolve_rerank(
+            "tei_rerank", "http://tei.test", model="",
+            tei_rerank_truncate=True, tei_rerank_raw_scores=True,
+        )
+        descriptor = json.loads(env["ASTRBOT_MEMORY_MODEL_CONFIG"])["rerank"]
+        self.assertEqual(descriptor["base_url"], "http://tei.test/rerank")
+        self.assertEqual(descriptor["tei_options"], {
+            "truncate": True, "raw_scores": True, "truncation_direction": "right",
+        })
+        with self.assertRaises(SetupError):
+            self.resolve_rerank("cohere_rerank", "https://api.cohere.com/v2/rerank")
 
     def test_provider_failures_do_not_expose_raw_error(self):
         def fail():
@@ -389,7 +410,7 @@ class CheckedProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_incompatible_or_wrong_selection_never_calls_embedding(self):
         self.embedding.provider_config["embedding_dimensions"] = 0
         self.embedding.get_embedding = AsyncMock(return_value=[0.5])
-        self.embedding.provider_config["custom_headers"] = {"X-Key": "secret"}
+        self.embedding.provider_config["custom_headers"] = {"X-Key": "secret\ninvalid"}
         self.assertFalse(self.catalog.options()["embedding"][0]["supported"])
         with self.assertRaises(SetupError):
             await self.catalog.resolve_checked(self.selection)

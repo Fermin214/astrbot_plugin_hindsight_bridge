@@ -22,11 +22,19 @@
 
 | 用途 | 支持范围 |
 | --- | --- |
-| 对话 | AstrBot `openai_chat_completion`，采用 Chat Completions 协议的 OpenAI 兼容服务 |
-| 嵌入 | AstrBot `openai_embedding`；设置向导检查实际向量并读取或自动检测维数 |
-| 重排 | 兼容的百炼、硅基流动和 Cohere 接口；也可不选，使用 RRF |
+| 对话 | OpenAI Chat Completions、OpenAI Responses、Azure OpenAI、Anthropic Messages、Google Gemini |
+| 嵌入 | OpenAI Embeddings、百炼 DashScope 原生文本嵌入、Google Gemini、Ollama `/api/embed` |
+| 重排 | 百炼原生及兼容接口、Cohere 格式接口（含硅基流动、Jina、vLLM）、Hugging Face TEI；也可不选，使用 RRF |
 
-供应商地址与 Key 由服务端读取。Responses、自定义代理、额外请求头或请求体等无法保持行为的组合会说明具体原因，不会自动换用其他模型。已有 Hindsight 的模型由该服务维护。
+供应商地址与 Key 由服务端读取。DeepSeek 官方的 Chat Completions 和 Responses 配置均可复用，包括 `temperature` 等额外请求参数。OpenRouter、Groq、智谱、小米等 AstrBot 内置 OpenAI 兼容适配器也可选择。
+
+支持自定义 HTTP(S) 地址、HTTP(S) 代理、额外请求头和请求参数。Azure 沿用部署名称、`api-version` 和 API Key；Claude 与 Gemini 沿用思考参数。覆盖模型、输入、工具或结构化输出的参数会给出冲突提示，避免影响记忆抽取。
+
+百炼、Gemini、Ollama 等原生接口通过随配套服务安装的内部转换服务接入，不需要重新添加供应商。转换服务不开放主机端口，按所选供应商分别调用原来的地址，不经过 Magpie 或其他模型网关；只有所选供应商本身配置了网关时才使用它。Gemini 嵌入不额外归一化；OpenAI 嵌入遵循 AstrBot 的维度发送设置，存储维数另行检查。
+
+设置向导会检查实际嵌入向量并读取或自动检测维数。多模态嵌入、未实现的第三方适配器，以及含用户名密码的代理地址不在支持范围，列表会说明原因，不会换用其他模型。已有 Hindsight 的模型由该服务维护，插件中的模型选择仅用于安装配套服务。
+
+协议检查使用 Hindsight **1.1.0** 的 SDK 和本机模拟接口，覆盖请求路径、参数、认证与响应解析。真实模型链路使用 WorkBuddy DeepSeek 与百炼验证；协议兼容不等于逐个验证所有厂商、模型和代理服务。开发者可在 Hindsight 镜像内运行 `python tools/check-model-protocols.py` 复现协议检查。
 
 详细步骤见 [安装指南](INSTALL.md)，手工维护见 [Linux 部署](../deploy/README.md)。
 
