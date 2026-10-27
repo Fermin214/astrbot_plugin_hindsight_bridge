@@ -14,8 +14,8 @@
         <h1>记忆管理</h1>
         <p>在 AstrBot 中设置服务、查看和更正记忆。</p>
       </div>
-      <button id="refresh" type="button" disabled>刷新状态</button>
     </header>
+    <div id="update-error" class="notice error" role="status" hidden><span id="update-error-message"></span> <button id="refresh" type="button" disabled>重新获取</button></div>
     <div id="startup" class="notice" role="status">正在连接 AstrBot…</div>
     <nav class="tabs" role="tablist" aria-label="记忆管理">
       <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">记忆管理</button>
@@ -72,7 +72,7 @@
               <label id="api-key-field">连接密钥<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
             </div>
             <p id="key-help" class="hint">填写记忆服务的连接密钥。</p>
-            <button id="check-connection" type="button">检查连接</button>
+            <button id="check-connection" type="button">测试服务连接</button>
             <p id="connection-result" role="status" class="hint" hidden></p>
           </div>
           <div id="models-settings" class="settings-section">
@@ -84,7 +84,8 @@
                 <label>重排模型 <span class="optional">可选</span><select id="rerank-provider"></select></label>
               </div>
               <p id="provider-help" class="hint"></p>
-              <div class="actions"><button id="save-models" type="button">检查并保存模型</button></div>
+              <div class="actions"><button id="save-models" type="button">验证并保存模型</button></div>
+              <p id="model-progress" class="hint" role="status" hidden></p>
             </div>
           </div>
           <div class="section-heading">
@@ -145,13 +146,21 @@
           <button type="submit" id="search" class="primary">搜索记忆</button>
           <button type="button" id="show-all">查看全部</button>
         </form>
-        <div class="list-heading"><p id="list-summary" role="status">请选择用户。</p></div>
+        <div class="list-heading">
+          <p id="list-summary" role="status">请选择用户。</p>
+          <button id="memory-updates" type="button" hidden>记忆有更新，点击查看</button>
+        </div>
         <div id="memory-list" class="memory-list" aria-busy="false"></div>
-        <div class="pagination" id="pagination" hidden>
+        <nav class="pagination" id="pagination" aria-label="记忆分页" hidden>
+          <label class="page-size-label">每页<select id="page-size"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label>
+          <button id="first" type="button">首页</button>
           <button id="previous" type="button">上一页</button>
+          <div id="page-links" class="page-links"></div>
           <span id="page-number"></span>
           <button id="next" type="button">下一页</button>
-        </div>
+          <button id="last" type="button">末页</button>
+          <form id="page-jump" class="page-jump"><label for="page-input">跳至</label><input id="page-input" type="number" min="1" step="1" required aria-label="跳转页码"><button type="submit">跳转</button></form>
+        </nav>
       </fieldset>
       <div id="no-scopes" class="empty" hidden><h3>还没有添加使用者</h3><p>在「设置」中添加使用者并保存。</p><button id="go-setup" type="button">前往设置</button></div>
     </section>

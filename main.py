@@ -881,6 +881,7 @@ class HindsightBridge(Star):
 
     async def terminate(self):
         self.stopping = True
+        await self.panel.close()
         self.incoming.clear()
         self.handled.clear()
         self.turns.clear()

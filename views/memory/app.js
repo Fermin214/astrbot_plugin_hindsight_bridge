@@ -11,9 +11,19 @@ let data = null;
 let settingsRevision = "";
 let scopeId = "";
 let page = 1;
+let pageSize = 20;
+let totalPages = 1;
 let searchMode = false;
 let total = 0;
-const pageCounts = new Map();
+let listSignature = "";
+let headSignature = "";
+let modeDirty = false;
+let refreshTimer;
+let refreshRunning = false;
+let refreshFailures = 0;
+let modelRequestId = "";
+let modelWatch = null;
+let statusSignature = "";
 let listVersion = 0;
 let detailVersion = 0;
 let detailMemoryId = null;
@@ -48,7 +58,9 @@ function notify(message, error = false, target = "feedback") {
 }
 
 function errorMessage(error) {
-  return error?.message || "操作未完成，请稍后重试。";
+  const message = error?.message || "";
+  if (/timeout|timed out|超时/i.test(message)) return "请求超时，请稍后重试。";
+  return message || "操作未完成，请稍后重试。";
 }
 
 async function perform(button, group, work, feedbackTarget = "feedback") {
@@ -133,7 +145,7 @@ function updateProviderHelp() {
     if (!(data.providers?.[kind] || []).some((provider) => provider.supported !== false)) missing.push(name);
   }
   $("provider-help").textContent = missing.length
-    ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，再回到这里刷新状态。`
+    ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，模型列表会自动更新。`
     : "聊天模型用于整理记忆，嵌入模型用于查找记忆；重排模型可不选。";
   $("save-models").disabled = missing.length > 0 || locks.has("setup");
 }
@@ -153,6 +165,7 @@ function updateConnectionMode() {
   $("api-url").readOnly = managed;
   $("connection-heading").textContent = managed ? "配套服务连接" : "连接已有 Hindsight";
   $("key-help").hidden = managed;
+  $("check-connection").hidden = managed;
   $("key-help").textContent = data?.config.has_api_key ? "已保存连接密钥。留空沿用，填写新值则替换。" : "填写已有 Hindsight 的服务 API Key，与模型供应商密钥不同。";
 }
 
@@ -250,10 +263,10 @@ function renderStatus() {
   $("status-label").textContent = status.recovering ? "正在恢复记忆服务"
     : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
-  $("status-description").textContent = status.recovering ? "稍后点击「刷新状态」查看结果。"
+  $("status-description").textContent = status.recovering ? "恢复完成后自动更新。"
     : connected === false ? (data.config.managed
-      ? "可重新执行安装命令，或点击「检查连接」查看原因。"
-      : "请检查服务地址、密钥与服务状态，再点击「检查连接」。")
+      ? "请检查配套服务是否运行；服务恢复后会自动连接。"
+      : "请检查服务地址、密钥与服务状态，可点击「测试服务连接」查看原因。")
     : "";
   if (data.config.managed && data.managed_service?.installed && !status.recovering) {
     if (!data.managed_service.ready) {
@@ -287,34 +300,53 @@ function renderStatus() {
   });
 }
 
-async function refreshBootstrap({ hydrate = false } = {}) {
+async function refreshBootstrap({ hydrate = false, automatic = false } = {}) {
   const next = await bridge.apiGet("bootstrap");
   if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   data = next;
   if (hydrate) hydrateConfig();
-  else {
+  else if (!automatic) {
     for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, $(`${kind}-provider`).value);
     refreshAccountPlatforms();
     updateProviderHelp();
     updateConnectionMode();
   }
-  $("platform-help").textContent = data.platforms?.length ? "" : "未找到 QQ 机器人。请先在 AstrBot 中添加机器人，再点击「刷新状态」。";
+  if (automatic && document.activeElement?.tagName !== "SELECT") {
+    for (const kind of ["chat", "embedding", "rerank"]) {
+      const providers = next.providers?.[kind] || [];
+      const select = $(`${kind}-provider`);
+      const version = JSON.stringify(providers);
+      if (select.dataset.providers !== version) {
+        providerSelect(kind, select.value);
+        select.dataset.providers = version;
+      }
+    }
+    refreshAccountPlatforms();
+    updateProviderHelp();
+  }
+  $("platform-help").textContent = data.platforms?.length ? "" : "未找到 QQ 机器人。请先在 AstrBot 中添加机器人。";
   $("platform-help").hidden = !$("platform-help").textContent;
-  renderStatus();
+  const nextStatusSignature = JSON.stringify([data.config.configured, data.status, data.managed_service, data.scopes]);
+  if (!automatic || nextStatusSignature !== statusSignature) {
+    renderStatus();
+    statusSignature = nextStatusSignature;
+  }
   const previous = scopeId;
   const scopes = data.scopes || [];
   scopeId = scopes.some((scope) => scope.scope_id === previous) ? previous : (scopes[0]?.scope_id || "");
-  $("scope-picker").replaceChildren();
-  scopes.forEach((scope) => $("scope-picker").append(option(scope.scope_id, scopeName(scope))));
-  if (!scopes.length) $("scope-picker").append(option("", "暂无用户"));
+  const choices = scopes.map((scope) => [scope.scope_id, scopeName(scope)]);
+  if (!scopes.length) choices.push(["", "暂无用户"]);
+  if (JSON.stringify([...$("scope-picker").options].map((item) => [item.value, item.textContent])) !== JSON.stringify(choices)) {
+    $("scope-picker").replaceChildren(...choices.map(([id, name]) => option(id, name)));
+  }
   $("scope-picker").value = scopeId;
   $("memory-fields").disabled = !scopeId || locks.has("memory");
   $("memory-fields").hidden = !scopes.length;
   $("setup-fields").disabled = locks.has("setup");
   $("no-scopes").hidden = scopes.length > 0;
-  renderScope();
+  if (!modeDirty && !locks.has("memory")) renderScope();
   if (previous !== scopeId) {
-    pageCounts.clear();
+    listSignature = headSignature = "";
     page = 1;
     searchMode = false;
     $("query").value = "";
@@ -327,6 +359,7 @@ async function refreshBootstrap({ hydrate = false } = {}) {
     }
   }
   $("startup").hidden = true;
+  if (data.model_job?.status === "running" && !modelWatch) void watchModels();
 }
 
 function renderScope() {
@@ -340,8 +373,8 @@ function renderScope() {
 
 function pendingScopeHelp(scope) {
   if (scope.pending_reason === "service") return "请先在「设置」中完成服务配置。";
-  if (scope.pending_reason === "recovering") return "记忆服务正在恢复，稍后点击「刷新状态」。";
-  return "QQ 机器人尚未连接。连接后点击「刷新状态」即可管理记忆。";
+  if (scope.pending_reason === "recovering") return "记忆服务正在恢复，完成后自动更新。";
+  return "QQ 机器人尚未连接。连接后会自动更新。";
 }
 
 function selectScope(id) {
@@ -349,7 +382,9 @@ function selectScope(id) {
   $("scope-picker").value = id;
   page = 1;
   searchMode = false;
-  pageCounts.clear();
+  listSignature = headSignature = "";
+  modeDirty = false;
+  $("memory-updates").hidden = true;
   $("query").value = "";
   renderScope();
   void perform(null, "memory", loadMemories);
@@ -367,7 +402,7 @@ function renderMemories(items, searching) {
     const empty = el("div", "empty");
     empty.append(
       el("h3", "", searching ? "没有找到相关记忆" : page > 1 ? "这一页没有记忆" : "还没有保存的记忆"),
-      el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : page > 1 ? "点击「上一页」返回。" : "与机器人正常私聊后，记忆会在后台整理。稍后点击「刷新状态」查看。"),
+      el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : page > 1 ? "点击「上一页」返回。" : "与机器人正常私聊后，记忆会在后台整理，完成后自动显示。"),
     );
     list.append(empty);
   }
@@ -385,7 +420,39 @@ function renderMemories(items, searching) {
   });
 }
 
-async function loadMemories(requestedPage = page) {
+function memorySignature(response) {
+  return JSON.stringify([response.total, response.items, response.corrections]);
+}
+
+function deferMemoryUpdates() {
+  return searchMode || page > 1 || Boolean($("query").value.trim())
+    || $("detail-dialog").open || $("forget-dialog").open
+    || $("memory-fields").contains(document.activeElement);
+}
+
+function renderPagination() {
+  $("pagination").hidden = searchMode || total === 0;
+  $("page-number").textContent = `第 ${page} / ${totalPages} 页`;
+  $("previous").disabled = $("first").disabled = page <= 1;
+  $("next").disabled = $("last").disabled = page >= totalPages;
+  $("page-input").max = String(totalPages);
+  $("page-input").value = String(page);
+  const pages = [...new Set([1, totalPages, page - 2, page - 1, page, page + 1, page + 2])]
+    .filter((number) => number >= 1 && number <= totalPages).sort((a, b) => a - b);
+  const links = $("page-links");
+  links.replaceChildren();
+  pages.forEach((number, index) => {
+    if (index && number - pages[index - 1] > 1) links.append(el("span", "", "…"));
+    const button = el("button", "", String(number));
+    button.type = "button";
+    button.setAttribute("aria-label", `第 ${number} 页`);
+    if (number === page) button.setAttribute("aria-current", "page");
+    button.addEventListener("click", () => void perform(null, "memory", () => loadMemories(number)));
+    links.append(button);
+  });
+}
+
+async function loadMemories(requestedPage = page, { quiet = false } = {}) {
   const version = ++listVersion;
   const id = scopeId;
   if (!id) return;
@@ -400,35 +467,34 @@ async function loadMemories(requestedPage = page) {
     return;
   }
   const searching = searchMode;
-  $("memory-list").setAttribute("aria-busy", "true");
-  $("list-summary").textContent = "正在读取记忆…";
-  $("memory-list").replaceChildren();
-  $("pagination").hidden = true;
+  if (!quiet) {
+    $("memory-list").setAttribute("aria-busy", "true");
+    $("list-summary").textContent = "正在读取记忆…";
+  }
   try {
     const response = searching
       ? await bridge.apiPost(endpoint("search", id), { query: $("query").value.trim() })
-      : await bridge.apiGet(endpoint("memories", id), { page: requestedPage, query: "" });
+      : await bridge.apiGet(endpoint("memories", id), { page: requestedPage, page_size: pageSize });
     if (version !== listVersion || id !== scopeId) return;
+    if (quiet && (locks.size || document.hidden || deferMemoryUpdates())) {
+      if (headSignature && memorySignature(response) !== headSignature) $("memory-updates").hidden = false;
+      return;
+    }
     const items = (searching ? response.results : response.items) || [];
     if (!Array.isArray(items)) throw new Error("记忆列表格式不正确，请稍后刷新。");
     total = searching ? items.length : Number(response.total);
     page = searching ? 1 : Number(response.page) || requestedPage;
-    if (!searching) pageCounts.set(page, items.length);
+    totalPages = Number(response.total_pages) || Math.max(1, Math.ceil(total / pageSize));
+    const signature = memorySignature(response);
+    if (!searching && page === 1) headSignature = signature;
+    if (quiet && signature === listSignature) return;
+    listSignature = signature;
     renderMemories(items, searching);
     $("list-summary").textContent = searching ? `找到 ${items.length} 条相关记忆` : Number.isFinite(total) ? `共 ${total} 条记忆` : "全部记忆";
-    $("pagination").hidden = searching || !items.length;
-    $("page-number").textContent = `第 ${page} 页`;
-    $("previous").disabled = page <= 1;
-    // Count visited pages rather than assume an undocumented page size.
-    const visitedCount = [...pageCounts.entries()].filter(([number]) => number <= page).reduce((sum, [, count]) => sum + count, 0);
-    $("next").disabled = !Number.isFinite(total) || !items.length || visitedCount >= total;
-    if (!searching && !items.length && page > 1) {
-      $("list-summary").textContent = "已经到最后一页，点击上一页返回。";
-      $("pagination").hidden = false;
-      $("next").disabled = true;
-    }
+    renderPagination();
+    $("memory-updates").hidden = true;
   } catch (error) {
-    if (version === listVersion) $("list-summary").textContent = "记忆读取失败，请点击「查看全部」重试。";
+    if (!quiet && version === listVersion) $("list-summary").textContent = "记忆读取失败，请点击「查看全部」重试。";
     throw error;
   } finally {
     if (version === listVersion) $("memory-list").setAttribute("aria-busy", "false");
@@ -513,6 +579,100 @@ async function checkConnection(payload) {
   return response;
 }
 
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function watchModels(requestId = "") {
+  if (modelWatch) return modelWatch;
+  locks.add("setup");
+  $("setup-fields").disabled = true;
+  $("model-progress").hidden = false;
+  modelWatch = (async () => {
+    while (true) {
+      let job;
+      try {
+        job = await bridge.apiGet("models/status");
+      } catch {
+        $("model-progress").textContent = "暂时无法获取进度，正在重新连接。请勿重复提交模型配置。";
+        await delay(5000);
+        continue;
+      }
+      if (requestId && job.request_id !== requestId) {
+        $("model-progress").textContent = "模型保存请求未确认，请点击「验证并保存模型」重试。";
+        if (job.status === "running") {
+          requestId = job.request_id;
+          continue;
+        }
+        return;
+      }
+      $("model-progress").textContent = job.message || "正在处理模型配置…";
+      if (job.status === "running") {
+        await delay(2000);
+        continue;
+      }
+      if (job.status === "succeeded") {
+        settingsRevision = job.config_revision;
+        $("model-progress").textContent = "模型已保存，记忆服务连接正常。";
+        await refreshBootstrap();
+        notify("模型已保存，记忆服务连接正常。");
+      } else {
+        $("model-progress").textContent = job.status === "idle"
+          ? "模型检查已中断，请重新验证并保存。"
+          : `${job.message || "模型验证或保存失败。"} 请修正问题后重试。`;
+        await refreshBootstrap({ automatic: true });
+      }
+      return;
+    }
+  })().catch((error) => {
+    $("model-progress").textContent = errorMessage(error);
+  }).finally(() => {
+    modelWatch = null;
+    modelRequestId = "";
+    locks.delete("setup");
+    $("setup-fields").disabled = !data;
+    updateProviderHelp();
+  });
+  return modelWatch;
+}
+
+function scheduleRefresh(milliseconds = 5000) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => void autoRefresh(), milliseconds);
+}
+
+async function autoRefresh() {
+  if (document.hidden || refreshRunning || !data || locks.size) {
+    scheduleRefresh();
+    return;
+  }
+  refreshRunning = true;
+  try {
+    await refreshBootstrap({ automatic: true });
+    if (scopeId && !$("panel-memories").hidden && !data.scopes.find((scope) => scope.scope_id === scopeId)?.pending) {
+      const reading = deferMemoryUpdates();
+      if (reading) {
+        const id = scopeId;
+        const response = await bridge.apiGet(endpoint("memories", id), { page: 1, page_size: pageSize });
+        if (id === scopeId) {
+          const signature = memorySignature(response);
+          if (headSignature && signature !== headSignature) $("memory-updates").hidden = false;
+          headSignature = signature;
+        }
+      } else if (!locks.size) {
+        await loadMemories(1, { quiet: true });
+      }
+    }
+    refreshFailures = 0;
+    $("update-error").hidden = true;
+  } catch {
+    refreshFailures++;
+    $("update-error").hidden = false;
+    $("update-error-message").textContent = "暂时无法获取最新数据，正在自动重试。";
+  } finally {
+    refreshRunning = false;
+    scheduleRefresh(Math.min(30000, 5000 * (refreshFailures + 1)));
+  }
+}
+
 async function saveSettings() {
   // Validate before disabling fields; browser constraint validation ignores disabled controls.
   if (!$("settings-form").reportValidity()) return;
@@ -573,18 +733,35 @@ async function prepareInstallation(button) {
 $("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
 $("reinstall").addEventListener("click", () => void prepareInstallation($("reinstall")));
 $("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
-  const selection = { config_revision: settingsRevision };
+  modelRequestId ||= globalThis.crypto?.randomUUID?.() || `model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selection = { config_revision: settingsRevision, background: true, request_id: modelRequestId };
   for (const kind of ["chat", "embedding", "rerank"]) {
     const select = $(`${kind}-provider`);
     if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的聊天和嵌入模型，重排可以留空。");
     selection[`${kind}_provider_id`] = select.value;
   }
-  const response = await bridge.apiPost("models/save", selection);
-  if (response.saved !== true) throw new Error("模型配置未保存，请重试。");
-  settingsRevision = response.config_revision;
+  $("model-progress").hidden = false;
+  $("model-progress").textContent = "正在提交模型配置…";
+  let response;
+  try {
+    response = await bridge.apiPost("models/save", selection);
+  } catch (error) {
+    // A lost HTTP response does not prove the background operation failed.
+    const status = await bridge.apiGet("models/status").catch(() => null);
+    if (!status) {
+      $("model-progress").textContent = "请求结果暂未确认，正在重新获取处理进度。";
+      await watchModels(modelRequestId);
+      return;
+    }
+    if (status.request_id !== modelRequestId && status.status !== "running") {
+      modelRequestId = "";
+      $("model-progress").textContent = `${errorMessage(error)} 请点击「验证并保存模型」重试。`;
+      throw error;
+    }
+    response = status;
+  }
   $("installation").open = false;
-  await refreshBootstrap();
-  notify(response.message);
+  await watchModels(response.request_id);
 }));
 $("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", async () => {
   const command = $("install-command");
@@ -620,28 +797,33 @@ $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninsta
     if (!document.execCommand("copy")) throw new Error("请按 Ctrl+C 复制选中的命令。");
   }
   $("uninstallation").open = false;
-  notify("卸载命令已复制。请在运行 AstrBot 的 Linux 主机终端执行，完成后点击「刷新状态」。");
+  notify("卸载命令已复制。请在运行 AstrBot 的 Linux 主机终端执行。");
 }));
 $("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", async () => {
-  await refreshBootstrap({ hydrate: !data });
+  const firstLoad = !data;
+  await refreshBootstrap({ hydrate: firstLoad });
+  if (firstLoad) activateTab(data.config.configured ? "memories" : "setup");
   if (scopeId && !locks.has("memory")) await perform(null, "memory", loadMemories);
   notify("状态已刷新。");
+  $("update-error").hidden = true;
+  scheduleRefresh();
 }));
 $("go-setup").addEventListener("click", () => activateTab("setup", true));
 $("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = true; clearTimeout(feedbackTimer); });
 $("scope-picker").addEventListener("change", () => selectScope($("scope-picker").value));
-$("scope-mode").addEventListener("change", () => { $("mode-help").textContent = modeHelp[$("scope-mode").value]; });
+$("scope-mode").addEventListener("change", () => { modeDirty = true; $("mode-help").textContent = modeHelp[$("scope-mode").value]; });
 $("save-mode").addEventListener("click", () => void perform($("save-mode"), "memory", async () => {
   const mode = $("scope-mode").value;
   if (!modeLabels[mode]) throw new Error("请选择记忆模式。");
   const response = await bridge.apiPost(endpoint("action"), { action: "mode", mode });
+  modeDirty = false;
   await refreshBootstrap();
   notify(response.message || `已切换为${modeLabels[mode]}。`);
 }));
 $("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
   const response = await bridge.apiPost(endpoint("action"), { action: "retry" });
   await refreshBootstrap();
-  notify(response.message || "已提交重试，请稍后刷新查看结果。");
+  notify(response.message || "已提交重试，处理结果会自动更新。");
 }));
 $("export").addEventListener("click", () => void perform($("export"), "memory", async () => {
   await bridge.download(endpoint("export"));
@@ -657,12 +839,31 @@ $("search-form").addEventListener("submit", (event) => {
 $("show-all").addEventListener("click", () => {
   searchMode = false;
   page = 1;
-  pageCounts.clear();
+  listSignature = headSignature = "";
   $("query").value = "";
   void perform($("show-all"), "memory", loadMemories);
 });
 for (const [id, delta] of [["previous", -1], ["next", 1]]) $(id).addEventListener("click", () => {
   void perform(null, "memory", () => loadMemories(Math.max(1, page + delta)));
+});
+$("first").addEventListener("click", () => void perform(null, "memory", () => loadMemories(1)));
+$("last").addEventListener("click", () => void perform(null, "memory", () => loadMemories(totalPages)));
+$("page-size").addEventListener("change", () => {
+  pageSize = Number($("page-size").value);
+  page = 1;
+  listSignature = headSignature = "";
+  void perform(null, "memory", loadMemories);
+});
+$("page-jump").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!$("page-jump").reportValidity()) return;
+  void perform(null, "memory", () => loadMemories(Number($("page-input").value)));
+});
+$("memory-updates").addEventListener("click", () => {
+  page = 1;
+  searchMode = false;
+  $("query").value = "";
+  void perform(null, "memory", loadMemories);
 });
 $("close-detail").addEventListener("click", () => { if (!locks.has("correction")) $("detail-dialog").close(); });
 $("detail-dialog").addEventListener("cancel", (event) => { if (locks.has("correction")) event.preventDefault(); });
@@ -712,7 +913,7 @@ $("confirm-forget").addEventListener("click", () => {
       forgetState = null;
       $("forget-dialog").close();
       page = 1;
-      pageCounts.clear();
+      listSignature = headSignature = "";
       searchMode = false;
       $("query").value = "";
       await refreshBootstrap();
@@ -743,11 +944,19 @@ async function start() {
     await refreshBootstrap({ hydrate: true });
     $("refresh").disabled = false;
     activateTab(data.config.configured ? "memories" : "setup");
+    scheduleRefresh();
   } catch (error) {
     $("startup").textContent = errorMessage(error);
     $("startup").classList.add("error");
     $("startup").setAttribute("role", "alert");
     $("refresh").disabled = !bridge;
+    $("update-error").hidden = false;
+    $("update-error-message").textContent = "页面加载失败，请重试。";
   }
 }
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(refreshTimer);
+  if (!document.hidden) scheduleRefresh(0);
+});
+window.addEventListener("beforeunload", () => clearTimeout(refreshTimer), { once: true });
 void start();

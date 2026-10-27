@@ -138,13 +138,20 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .search-bar { display: flex; gap: 10px; }
 .search-bar input { flex: 1; min-width: 0; }
 .search-bar button { flex-shrink: 0; }
-.list-heading { color: var(--muted); font-size: 13px; margin: 18px 0 10px; }
+.list-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; margin: 18px 0 10px; }
 .memory-list { display: grid; gap: 10px; }
 .memory-card { padding: 18px 20px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .memory-card p { white-space: pre-wrap; }
 .memory-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; align-items: center; margin-bottom: 10px; }
 .memory-card button { margin-top: 14px; color: var(--accent); }
-.pagination { display: flex; align-items: center; justify-content: center; gap: 20px; margin-top: 22px; }
+.pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 22px; }
+.pagination button { padding-inline: 11px; }
+.page-links, .page-jump, .page-size-label { display: flex; align-items: center; gap: 6px; }
+.page-links button[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.page-size-label select { width: 88px; margin: 0 8px 0 0; }
+.page-jump input { width: 76px; margin: 0; }
+#page-number { color: var(--muted); }
+#update-error button { margin-left: 8px; }
 .empty { text-align: center; padding: 42px 20px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
 .empty h3 { color: var(--text); margin-bottom: 6px; }
 .empty button { margin-top: 16px; }
@@ -195,6 +202,9 @@ dialog::backdrop { background: #12223566; }
   .service-state > .badge { margin-left: 26px; }
   .scope-status-header button { margin-left: 0; }
   .memory-card { padding: 16px; }
+  .pagination { justify-content: flex-start; }
+  .page-links { flex-wrap: wrap; }
+  .page-jump { flex-basis: 100%; }
   .feedback { bottom: 8px; width: 100%; }
 }
 @media (prefers-reduced-motion: no-preference) {

@@ -33,12 +33,16 @@ class MemoryPanel:
     def __init__(self, plugin):
         self.plugin = plugin
         self.lock = asyncio.Lock()
+        self.model_task = None
+        self.model_job = None
+        self.model_selection = None
         routes = [
             ("bootstrap", "GET", self.bootstrap),
             ("connection/check", "POST", self.check),
             ("settings/save", "POST", self.save),
             ("install/prepare", "POST", self.prepare),
             ("models/save", "POST", self.save_models),
+            ("models/status", "GET", self.model_status),
             ("uninstall/prepare", "POST", self.prepare_uninstall),
             ("scopes/<scope_id>/memories", "GET", self.memories),
             ("scopes/<scope_id>/detail", "GET", self.detail),
@@ -162,6 +166,8 @@ class MemoryPanel:
             raise PanelError("服务地址格式无效，请填写完整的 HTTP 地址。") from None
 
     async def bootstrap(self):
+        if self.model_task and not self.model_task.done():
+            return await self._bootstrap()
         async with self.lock:
             return await self._bootstrap()
 
@@ -259,6 +265,7 @@ class MemoryPanel:
             },
             "platforms": self.platforms(),
             "managed_service": managed_status,
+            "model_job": self.model_job,
             "has_installation": bool(state.get("id")),
             "installation_api_url": state.get("api_url", ""),
             "providers": self.providers().options(),
@@ -329,6 +336,8 @@ class MemoryPanel:
                 }
         except PanelError:
             raise
+        except httpx.TimeoutException:
+            raise PanelError("配套服务响应超时，请稍后重试。") from None
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             raise PanelError("无法连接配套服务。请先执行安装命令；已安装则检查服务是否运行。") from None
 
@@ -351,6 +360,56 @@ class MemoryPanel:
 
     async def save_models(self):
         payload = await self.body()
+        selection = {key: payload.get(key, "") for key in (
+            "chat_provider_id", "embedding_provider_id", "rerank_provider_id",
+        )}
+        if self.model_task and not self.model_task.done():
+            if selection != self.model_selection:
+                raise PanelError("模型配置正在处理，请等待完成后再更换模型。")
+            return dict(self.model_job)
+        if payload.get("background") is True:
+            # Retrying a lost start response must not restart the service twice.
+            request_id = payload.get("request_id")
+            if not isinstance(request_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", request_id):
+                raise PanelError("请求标识无效，请重新保存模型。")
+            if self.model_job and self.model_job["request_id"] == request_id:
+                if selection != self.model_selection:
+                    raise PanelError("模型选择已变化，请重新提交配置。")
+                return dict(self.model_job)
+            self.check_revision(payload)
+            self.model_selection = selection
+            self.model_job = {
+                "request_id": request_id, "status": "running",
+                "message": "正在检查模型连接…",
+            }
+            self.model_task = asyncio.create_task(
+                self.run_model_job(payload), name="hindsight-model-setup",
+            )
+            return dict(self.model_job)
+        return await self.apply_models(payload)
+
+    async def model_status(self):
+        return dict(self.model_job) if self.model_job else {"status": "idle"}
+
+    async def run_model_job(self, payload):
+        try:
+            result = await self.apply_models(payload)
+            self.model_job.update(result, status="succeeded")
+        except asyncio.CancelledError:
+            self.model_job.update(status="interrupted", message="模型配置检查已中断，请重新检查服务状态后重试。")
+            raise
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, PanelError) else (
+                str(exc) if isinstance(exc, ValueError) else "模型验证或保存失败，请检查模型服务后重试。"
+            )
+            self.model_job.update(status="failed", message=message)
+
+    async def close(self):
+        if self.model_task and not self.model_task.done():
+            self.model_task.cancel()
+            await asyncio.gather(self.model_task, return_exceptions=True)
+
+    async def apply_models(self, payload):
         async with self.lock:
             self.check_revision(payload)
             state = self.state()
@@ -360,6 +419,8 @@ class MemoryPanel:
             )}
             environment = await self.providers().resolve_checked(selection)
             self.check_revision(payload)
+            if self.model_job and self.model_job["status"] == "running":
+                self.model_job["message"] = "正在验证模型并启动记忆服务…"
             plugin = self.plugin
             active = self.connection_url(plugin.config.get("api_url", "")) == self.connection_url(state.get("api_url", ""))
             if active:
@@ -368,14 +429,16 @@ class MemoryPanel:
             try:
                 result = await self.managed_request(state, environment)
                 if not result["ready"]:
-                    raise PanelError("模型配置已接收，服务尚未就绪，请稍后刷新。")
+                    raise PanelError("模型配置已接收，服务尚未就绪，请稍后重试。")
                 state.update(selection)
                 self.store_state(state)
             finally:
                 if active:
                     plugin.permissions = None
-                    plugin.stopping = False
-                    await plugin.initialize()
+                    # Plugin unload cancels this job and must not reopen resources.
+                    if not asyncio.current_task().cancelling():
+                        plugin.stopping = False
+                        await plugin.initialize()
             return {"saved": True, "config_revision": self.config_revision(), "message": "模型配置已保存并生效。"}
 
     async def prepare_uninstall(self):
@@ -484,7 +547,7 @@ class MemoryPanel:
         if not plugin.outbox or plugin.stopping:
             raise PanelError("请先在设置中完成记忆服务配置。")
         if scope_id.startswith("pending-"):
-            raise PanelError("请先连接所选 QQ 机器人，再刷新状态。")
+            raise PanelError("请先连接所选 QQ 机器人，连接后会自动更新。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
         if not scope or not plugin.outbox.can_recall(scope, manual=True):
@@ -500,12 +563,24 @@ class MemoryPanel:
 
         scope = self.scope(scope_id)
         page = request.query.get("page", 1, type=int)
-        if not isinstance(page, int) or not 1 <= page <= 1000:
-            raise PanelError("页码须在 1 到 1000 之间。")
+        page_size = request.query.get("page_size", 20, type=int)
+        if not isinstance(page, int) or page < 1:
+            raise PanelError("页码须为正整数。")
+        if page_size not in (10, 20, 50, 100):
+            raise PanelError("每页条数请选择 10、20、50 或 100。")
         async with self.plugin.using_resources(), asyncio.timeout(10):
-            data = await self.plugin.client.memory_page(scope["bank"], page=page)
+            data = await self.plugin.client.memory_page(scope["bank"], page=page, page_size=page_size)
             self.unchanged(scope)
-            return {**data, "page": page, "corrections": self.plugin.outbox.corrections(scope)}
+            total_pages = max(1, (data["total"] + page_size - 1) // page_size)
+            if page > total_pages:
+                page = total_pages
+                data = await self.plugin.client.memory_page(scope["bank"], page=page, page_size=page_size)
+                self.unchanged(scope)
+                total_pages = max(1, (data["total"] + page_size - 1) // page_size)
+            return {
+                **data, "page": page, "page_size": page_size, "total_pages": total_pages,
+                "corrections": self.plugin.outbox.corrections(scope),
+            }
 
     async def detail(self, scope_id):
         from astrbot.api.web import request
