@@ -5,15 +5,17 @@ import copy
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
+from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 
@@ -359,6 +361,231 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             await self.save(api_url=state["api_url"])
         self.assertEqual(self.config, before)
         self.profile.save_config.assert_not_called()
+
+    async def test_control_plane_address_is_independent_and_can_be_cleared(self):
+        await self.save(control_plane_url="https://memory.example.com/admin/")
+        self.assertEqual(self.config["api_url"], self.payload["api_url"])
+        snapshot = await self.panel.bootstrap()
+        self.assertEqual(snapshot["config"]["control_plane_url"], "https://memory.example.com/admin/")
+        await self.save()
+        self.assertEqual(self.config["control_plane_url"], "https://memory.example.com/admin/")
+        await self.save(control_plane_url="")
+        self.assertEqual(self.config["control_plane_url"], "")
+
+    async def test_control_plane_rejects_credentials_and_non_http_before_network(self):
+        for value in (
+            "javascript:alert(1)", "ftp://memory.example.com", "//memory.example.com",
+            "http:///missing", "https://admin:secret@memory.example.com",
+            "https://@memory.example.com", "https://memory.example.com/?api_key=secret",
+            "https://memory.example.com/#token", "https://memory.example.com\\@other",
+            "https://mem\nory.example.com", "https://memory.example.com/old-secret",
+            42,
+        ):
+            with self.subTest(value=value), self.assertRaises(module.PanelError):
+                await self.save(control_plane_url=value)
+        self.assertEqual(self.auth_calls, [])
+        self.assertNotIn("control_plane_url", self.config)
+        with self.assertRaises(module.PanelError):
+            await self.save(api_key="new-secret", control_plane_url="https://memory.example.com/new-secret")
+
+    async def test_bootstrap_hides_invalid_address_and_service_secrets(self):
+        self.panel.saved_state = {
+            "api_key": "setup-secret", "management_key": "manager-secret",
+            "control_plane_key": "cp-secret", "database_password": "db-secret",
+        }
+        self.config["control_plane_url"] = "https://memory.example.com/?key=cp-secret"
+        snapshot = await self.panel.bootstrap()
+        self.assertEqual(snapshot["config"]["control_plane_url"], "")
+        serialized = json.dumps(snapshot)
+        for secret in ("old-secret", "setup-secret", "manager-secret", "cp-secret", "db-secret"):
+            self.assertNotIn(secret, serialized)
+
+    async def test_installer_control_plane_hint_is_optional_and_safe(self):
+        for hint in (None, "http://127.0.0.1:9999"):
+            self.panel.body = AsyncMock(return_value={})
+            result = {
+                "api_url": "http://managed:8888", "management_url": "http://managed:8766",
+                "command": "installation-command", "message": "",
+            }
+            if hint is not None:
+                result["control_plane_url"] = hint
+            with patch.object(module, "installation", return_value=result):
+                response = await self.panel.prepare()
+            self.assertEqual(response["control_plane_url"], hint or "")
+            self.assertNotIn("management_key", response)
+            if hint:
+                self.assertEqual(self.panel.state()["control_plane_url"], hint)
+
+    def management_resources(self):
+        scope = {
+            "scope_id": "scope-1", "owner_id": "owner-1", "bank": "bank-1",
+            "revision": 7, "allowed": True, "mode": "active",
+        }
+        summary = {"counts": {}, "last_error": "", "maintenance": {"phase": "draining"}}
+        queue = SimpleNamespace(
+            recovering=False, connection_id="connection-1",
+            scope_owner=Mock(side_effect=lambda identifier: scope if identifier == "scope-1" else None),
+            control=SimpleNamespace(owner=Mock(return_value={"bank": "bank-1", "revision": 7})),
+            can_recall=Mock(return_value=False), summary=Mock(return_value=summary),
+            set_mode=Mock(), request_retry=Mock(return_value=2), forget=Mock(),
+        )
+        maintenance = SimpleNamespace(
+            begin=Mock(return_value={"phase": "draining"}),
+            status=AsyncMock(return_value={"phase": "ready", "ready": True}),
+            resume=AsyncMock(), check=AsyncMock(return_value=True),
+        )
+        self.plugin.outbox = queue
+        self.plugin.worker = SimpleNamespace(maintenance=maintenance, wake=asyncio.Event())
+
+        @asynccontextmanager
+        async def resources():
+            yield
+
+        self.plugin.using_resources = resources
+        return scope, queue, maintenance
+
+    async def action(self, action, *, method="POST", scope_id="scope-1", **payload):
+        self.panel.body = AsyncMock(return_value={"action": action, **payload})
+        request = SimpleNamespace(method=method, query={"action": action, **payload}, username="admin")
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}):
+            return await self.panel.action(scope_id)
+
+    async def test_maintenance_can_begin_poll_and_resume_without_recall_permission(self):
+        _, queue, maintenance = self.management_resources()
+        result = await self.action("maintenance_begin", discard_pending=True)
+        maintenance.begin.assert_called_once_with("scope-1", discard_pending=True)
+        self.assertEqual(result["maintenance"], {"phase": "draining"})
+        self.assertTrue(self.plugin.worker.wake.is_set())
+        self.plugin.worker.wake.clear()
+        result = await self.action("maintenance_status", method="GET")
+        maintenance.status.assert_awaited_once_with("scope-1")
+        self.assertEqual(result["maintenance"], {"phase": "ready", "ready": True})
+        self.assertTrue(self.plugin.worker.wake.is_set())
+        maintenance.status.return_value = {"phase": "inactive", "ready": False}
+        result = await self.action("maintenance_resume")
+        maintenance.resume.assert_awaited_once_with("scope-1")
+        self.assertEqual(result["maintenance"], {"phase": "inactive", "ready": False})
+        queue.can_recall.assert_not_called()
+
+    async def test_maintenance_defaults_to_drain_and_requires_boolean_discard(self):
+        _, _, maintenance = self.management_resources()
+        await self.action("maintenance_begin")
+        maintenance.begin.assert_called_once_with("scope-1", discard_pending=False)
+        for value in ("false", 1, None):
+            with self.subTest(value=value), self.assertRaises(module.PanelError):
+                await self.action("maintenance_begin", discard_pending=value)
+        self.assertEqual(maintenance.begin.call_count, 1)
+
+    async def test_management_scope_preserves_permission_and_mapping_checks(self):
+        scope, queue, maintenance = self.management_resources()
+        for change in ("disallowed", "recovering", "missing", "bank", "revision", "owner"):
+            scope["allowed"] = change != "disallowed"
+            queue.recovering = change == "recovering"
+            queue.scope_owner.side_effect = None
+            queue.scope_owner.return_value = None if change == "missing" else scope
+            queue.control.owner.return_value = None if change == "owner" else {
+                "bank": "other" if change == "bank" else "bank-1",
+                "revision": 8 if change == "revision" else 7,
+            }
+            with self.subTest(change=change), self.assertRaises(module.PanelError):
+                await self.action("maintenance_resume")
+        maintenance.resume.assert_not_awaited()
+
+    async def test_active_mode_cannot_bypass_maintenance_or_missing_bank(self):
+        _, queue, maintenance = self.management_resources()
+        for summary in ({"maintenance": {"phase": "ready"}}, {"bank_missing": True}):
+            queue.summary.return_value = summary
+            with self.subTest(summary=summary), self.assertRaisesRegex(module.PanelError, "维护"):
+                await self.action("mode", mode="active")
+        queue.set_mode.assert_not_called()
+        maintenance.check.assert_not_awaited()
+        queue.summary.side_effect = [{"maintenance": None}, {"bank_missing": True}]
+        with self.assertRaises(module.PanelError):
+            await self.action("mode", mode="active")
+        queue.set_mode.assert_not_called()
+        queue.summary.side_effect = None
+        queue.summary.return_value = {"maintenance": None, "bank_missing": False}
+        await self.action("mode", mode="active")
+        queue.set_mode.assert_called_once_with("scope-1", "active")
+
+    async def test_get_actions_are_read_only_and_content_actions_are_removed(self):
+        _, _, maintenance = self.management_resources()
+        for action in ("maintenance_begin", "maintenance_resume", "mode", "retry"):
+            with self.subTest(action=action), self.assertRaises(module.PanelError):
+                await self.action(action, method="GET")
+        for action in ("correct",):
+            with self.subTest(action=action), self.assertRaises(module.PanelError):
+                await self.action(action)
+        maintenance.begin.assert_not_called()
+        maintenance.resume.assert_not_awaited()
+
+    async def test_bank_rotation_requires_explicit_confirmation_bound_to_mapping(self):
+        scope, queue, _ = self.management_resources()
+        result = await self.action("forget_prepare")
+        queue.forget.assert_not_called()
+        await self.action("forget_confirm", confirmation=result["confirmation"])
+        queue.forget.assert_called_once_with("scope-1")
+        with self.assertRaises(module.PanelError):
+            await self.action("forget_confirm", confirmation=result["confirmation"])
+        result = await self.action("forget_prepare")
+        scope["bank"] = "bank-2"
+        queue.control.owner.return_value = {"bank": "bank-2", "revision": 7}
+        with self.assertRaisesRegex(module.PanelError, "确认已失效"):
+            await self.action("forget_confirm", confirmation=result["confirmation"])
+        self.assertEqual(queue.forget.call_count, 1)
+
+    async def test_registered_routes_only_expose_management_and_setup(self):
+        register = Mock()
+        self.plugin.context.register_web_api = register
+        module.MemoryPanel(self.plugin)
+        routes = {
+            (call.args[0].split("/")[-1], method)
+            for call in register.call_args_list for method in call.args[2]
+        }
+        self.assertIn(("action", "GET"), routes)
+        self.assertIn(("action", "POST"), routes)
+        for name in ("memories", "detail", "search", "export"):
+            self.assertNotIn((name, "GET"), routes)
+            self.assertNotIn((name, "POST"), routes)
+
+    async def test_real_maintenance_missing_bank_recovers_only_by_explicit_rotation(self):
+        @asynccontextmanager
+        async def resources():
+            yield
+
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = Outbox(
+                Path(temporary) / "runtime", self.config["service_id"], self.config["api_url"],
+                credential_fingerprint="test", control_directory=Path(temporary) / "control",
+            )
+            client = SimpleNamespace(
+                ensure_auth=AsyncMock(), list_operations=AsyncMock(return_value=[]),
+                bank_exists=AsyncMock(return_value=False), create_bank=AsyncMock(),
+            )
+            self.plugin.outbox = queue
+            self.plugin.using_resources = resources
+            self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
+            self.plugin.worker = SimpleNamespace(maintenance=Maintenance(queue, client), wake=asyncio.Event())
+            try:
+                self.plugin.refresh_permissions()
+                scope = queue.scope(Incoming("aiocqhttp", "qq", "20001", "123", "", 1, ""))
+                identifier, bank = scope["scope_id"], scope["bank"]
+                await self.action("maintenance_begin", scope_id=identifier)
+                self.assertFalse(queue.can_recall(queue.scope_owner(identifier), manual=True))
+                status = await self.action("maintenance_status", method="GET", scope_id=identifier)
+                self.assertTrue(status["maintenance"]["ready"])
+                with self.assertRaisesRegex(module.QueueError, "bank_missing"):
+                    await self.action("maintenance_resume", scope_id=identifier)
+                self.assertEqual(queue.scope_owner(identifier)["bank"], bank)
+                self.assertTrue(queue.summary(identifier)["bank_missing"])
+                client.create_bank.assert_not_awaited()
+                confirmation = await self.action("forget_prepare", scope_id=identifier)
+                await self.action("forget_confirm", scope_id=identifier, confirmation=confirmation["confirmation"])
+                self.assertNotEqual(queue.scope_owner(identifier)["bank"], bank)
+                self.assertEqual(queue.scope_owner(identifier)["mode"], "paused")
+                client.create_bank.assert_not_awaited()
+            finally:
+                queue.close()
 
 
 if __name__ == "__main__":

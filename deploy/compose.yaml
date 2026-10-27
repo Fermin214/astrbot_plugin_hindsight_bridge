@@ -32,6 +32,9 @@ services:
       HINDSIGHT_API_DATABASE_URL: postgresql://hindsight:${POSTGRES_PASSWORD:?}@db:5432/hindsight
       HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
       HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?Generate an API key}
+      HINDSIGHT_API_PORT: "8888"
+      HINDSIGHT_ENABLE_CP: "true"
+      HINDSIGHT_CP_PORT: "9999"
       HINDSIGHT_CP_DATAPLANE_API_URL: http://127.0.0.1:8888
       HINDSIGHT_CP_DATAPLANE_API_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?}
       HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?Generate a control plane access key}

@@ -6,8 +6,10 @@ import io
 import json
 from pathlib import Path
 import re
+import secrets
 import shlex
 import tarfile
+from urllib.parse import urlsplit
 
 
 COMPOSE = """\
@@ -67,12 +69,17 @@ services:
       HINDSIGHT_API_TEXT_SEARCH_EXTENSION: pgroonga
       HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "8192"
       HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS: "8192"
-      HINDSIGHT_ENABLE_CP: "false"
+      HINDSIGHT_ENABLE_CP: "true"
+      HINDSIGHT_CP_PORT: "9999"
+      HINDSIGHT_CP_DATAPLANE_API_URL: http://127.0.0.1:8888
+      HINDSIGHT_CP_DATAPLANE_API_KEY: ${HINDSIGHT_API_TENANT_API_KEY:?}
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:?}
       HINDSIGHT_API_LOG_LEVEL: warning
       HINDSIGHT_API_OTEL_ENABLED: "false"
     ports:
       - "127.0.0.1:${ASTRBOT_MEMORY_API_PORT:-8888}:8888"
       - "127.0.0.1:${ASTRBOT_MEMORY_MANAGEMENT_PORT:-8889}:8766"
+      - "127.0.0.1:${ASTRBOT_MEMORY_CP_PORT:-9999}:9999"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=3).close()"]
       interval: 5s
@@ -126,45 +133,68 @@ elif [ -n "$(ls -A "$target" | grep -v '^\.install\.' || true)" ]; then
   fail '安装目录非空且缺少服务标识，请检查路径。'
 fi
 if [ -f "$target/.env" ]; then
-  for field in POSTGRES_PASSWORD HINDSIGHT_API_TENANT_API_KEY HINDSIGHT_API_WORKER_ID; do
+  for field in POSTGRES_PASSWORD HINDSIGHT_API_TENANT_API_KEY ASTRBOT_MEMORY_MANAGEMENT_KEY HINDSIGHT_API_WORKER_ID; do
     old="$(grep -m1 "^${field}=" "$target/.env" || true)"
     new="$(grep -m1 "^${field}=" "$stage/.env" || true)"
     [ "$old" = "$new" ] || fail '服务身份发生变化，请沿用原来的插件配置。'
   done
+  for field in ASTRBOT_MEMORY_API_PORT ASTRBOT_MEMORY_MANAGEMENT_PORT ASTRBOT_MEMORY_CP_PORT; do
+    old="$(grep -m1 "^${field}=" "$target/.env" || true)"
+    new="$(grep -m1 "^${field}=" "$stage/.env" || true)"
+    [ -z "$old" ] || [ "$old" = "$new" ] || fail "端口配置不一致：$field。请按安装目录 .env 中的端口重新生成命令。"
+  done
+  # Preserve credentials and local settings; add only fields absent from older installs.
+  cp "$target/.env" "$stage/.env.saved"
+  for field in HINDSIGHT_CP_ACCESS_KEY ASTRBOT_MEMORY_CP_PORT; do
+    if ! grep -q "^${field}=" "$target/.env"; then
+      printf '\n%s\n' "$(grep -m1 "^${field}=" "$stage/.env")" >> "$stage/.env.saved"
+    fi
+  done
+  mv "$stage/.env.saved" "$stage/.env"
 fi
-printf '正在安装记忆服务。首次安装需要下载镜像和构建数据库，请保持终端打开。\n'
-cp -R "$stage/." "$target/"
-chmod 755 "$target/service"
-cd "$target"
 if [ -n "$astrbot_id" ]; then
   existing="$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$astrbot_id")"
-  index=0
-  printf 'services:\n  memory-api:\n    networks:\n' > compose.override.yaml
+  selected=''
   for shared in $existing; do
     [ "$shared" = NETWORK_VALUE ] && continue
     [[ "$shared" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || fail 'AstrBot 网络名称无法写入配置。'
-    [ "$shared" != host ] && [ "$shared" != none ] || fail '配套安装需要 AstrBot 使用 Docker 桥接网络。'
-    printf '      astrbot_%s:\n        aliases: [ALIAS_VALUE]\n' "$index" >> compose.override.yaml
-    index=$((index + 1))
+    [ -z "${HINDSIGHT_ASTRBOT_NETWORK:-}" ] || [ "$shared" = "$HINDSIGHT_ASTRBOT_NETWORK" ] || continue
+    [ "$shared" != bridge ] || continue
+    [ "$(docker network inspect --format '{{.Driver}} {{.Internal}}' "$shared")" = 'bridge false' ] || continue
+    selected="$shared"
+    break
   done
-  [ "$index" -gt 0 ] || fail 'AstrBot 没有可连接的 Docker 网络。'
-  printf 'networks:\n' >> compose.override.yaml
-  index=0
-  for shared in $existing; do
-    [ "$shared" = NETWORK_VALUE ] && continue
-    printf '  astrbot_%s:\n    external: true\n    name: "%s"\n' "$index" "$shared" >> compose.override.yaml
-    index=$((index + 1))
-  done
+  [ -n "$selected" ] || fail 'AstrBot 需要可出站的自定义 Docker 桥接网络；可用 HINDSIGHT_ASTRBOT_NETWORK 指定其中一个。'
+  printf 'services:\n  memory-api:\n    networks:\n      astrbot:\n        aliases: [ALIAS_VALUE]\nnetworks:\n  astrbot:\n    external: true\n    name: "%s"\n' "$selected" > "$stage/compose.override.yaml"
 fi
+owned_ports=''
+for container in $(docker ps -q --filter "label=com.docker.compose.project=$project" --filter 'label=com.docker.compose.service=memory-api'); do
+  owned_ports="$owned_ports
+$(docker inspect --format '{{range .NetworkSettings.Ports}}{{range .}}{{println .HostIp .HostPort}}{{end}}{{end}}' "$container")"
+done
+for port in HOST_PORTS; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    printf '%s\n' "$owned_ports" | grep -qx "127.0.0.1 $port" ||
+      fail "主机端口 $port 已占用。请释放该端口，或修改安装状态中的端口后重新生成命令；已有安装需同步修改 .env 中的端口。"
+  fi
+done
+printf '正在安装记忆服务。首次安装需要下载镜像和构建数据库，请保持终端打开。\n'
+cp -R "$stage/." "$target/"
+chmod 600 "$target/.env"
+chmod 755 "$target/service"
+chmod 644 "$target/service/managed_service.py" "$target/service/model_probe.py" "$target/service/model_transport.py"
+cd "$target"
 docker compose --project-name "$project" config --quiet
 if docker image inspect astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6 >/dev/null 2>&1; then
-  docker compose --project-name "$project" up -d --no-build
+  docker compose --project-name "$project" up -d --no-build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
 else
-  docker compose --project-name "$project" up -d --build
+  docker compose --project-name "$project" up -d --build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
 fi
 docker compose --project-name "$project" up -d --wait --wait-timeout 600
 printf '\n安装完成。回到插件的「设置」选择模型，点击「检查并保存模型」。\n'
 printf '服务文件位置：%s\n' "$target"
+printf '官方面板（服务器环回地址，远程访问需 SSH 隧道）：http://127.0.0.1:CP_PORT_VALUE\n'
+printf '面板登录 Key：安装目录 .env 中的 HINDSIGHT_CP_ACCESS_KEY；请在服务器私密终端读取。\n'
 """
 
 UNINSTALL = r"""#!/bin/bash
@@ -233,12 +263,28 @@ def command(script):
     return f"printf '%s' '{encoded}' | base64 -d | gzip -d | bash"
 
 
-def installation(root, state, *, container_hostname=""):
+def installation(root, state, *, container_hostname="", control_plane_url=""):
     identifier = state["id"]
     if not re.fullmatch(r"[0-9a-f]{12}", identifier):
         raise ValueError("invalid_installation_id")
     project = "astrbot-memory-" + identifier
     alias, network = "memory-" + identifier, project + "-clients"
+    ports = {}
+    for name, default in (("api_port", 8888), ("management_port", 8889), ("control_plane_port", 9999)):
+        value = state.get(name, default)
+        if isinstance(value, bool) or not re.fullmatch(r"[0-9]{1,5}", str(value)) or not 1 <= int(value) <= 65535:
+            raise ValueError("安装端口必须是 1 到 65535 的整数。")
+        ports[name] = int(value)
+    if len(set(ports.values())) != len(ports):
+        raise ValueError("API、模型管理和官方面板必须使用不同的主机端口。")
+    browser_url = control_plane_url or state.get("control_plane_url") or f"http://127.0.0.1:{ports['control_plane_port']}"
+    address = urlsplit(browser_url)
+    if (
+        address.scheme not in {"http", "https"} or not address.hostname
+        or address.username is not None or address.password is not None
+        or address.query or address.fragment
+    ):
+        raise ValueError("官方面板地址必须是独立的 HTTP/HTTPS 地址，不能包含密钥或登录信息。")
     values = {
         "POSTGRES_PASSWORD": state["database_password"],
         "HINDSIGHT_API_TENANT_API_KEY": state["api_key"],
@@ -246,13 +292,14 @@ def installation(root, state, *, container_hostname=""):
         "HINDSIGHT_API_WORKER_ID": project + "-worker",
         "HINDSIGHT_SETUP_ID": identifier,
         "HINDSIGHT_SETUP_FINGERPRINT": state.get("candidate_fingerprint", ""),
-        "ASTRBOT_MEMORY_API_PORT": state.get("api_port", 8888),
-        "ASTRBOT_MEMORY_MANAGEMENT_PORT": state.get("management_port", 8889),
+        "HINDSIGHT_CP_ACCESS_KEY": secrets.token_hex(32),
+        "ASTRBOT_MEMORY_API_PORT": ports["api_port"],
+        "ASTRBOT_MEMORY_MANAGEMENT_PORT": ports["management_port"],
+        "ASTRBOT_MEMORY_CP_PORT": ports["control_plane_port"],
     }
     compose = COMPOSE.replace("MEMORY_ALIAS", alias).replace("MEMORY_NETWORK", network)
     if container_hostname:
         compose = compose.replace(
-            '    ports:\n'
             '      - "127.0.0.1:${ASTRBOT_MEMORY_API_PORT:-8888}:8888"\n'
             '      - "127.0.0.1:${ASTRBOT_MEMORY_MANAGEMENT_PORT:-8889}:8766"\n', ""
         )
@@ -274,6 +321,10 @@ def installation(root, state, *, container_hostname=""):
     for marker, value in {
         "PROJECT_VALUE": shlex.quote(project), "HOST_VALUE": shlex.quote(container_hostname),
         "NETWORK_VALUE": shlex.quote(network), "ALIAS_VALUE": alias,
+        "HOST_PORTS": " ".join(str(ports[name]) for name in (
+            ("control_plane_port",) if container_hostname else ports
+        )),
+        "CP_PORT_VALUE": str(ports["control_plane_port"]),
         "ARCHIVE_VALUE": base64.b64encode(archive.getvalue()).decode("ascii"),
     }.items():
         script = script.replace(marker, value)
@@ -281,6 +332,10 @@ def installation(root, state, *, container_hostname=""):
         "command": command(script),
         "api_url": f"http://{alias}:8888" if container_hostname else f"http://127.0.0.1:{values['ASTRBOT_MEMORY_API_PORT']}",
         "management_url": f"http://{alias}:8766" if container_hostname else f"http://127.0.0.1:{values['ASTRBOT_MEMORY_MANAGEMENT_PORT']}",
+        "browser_url": browser_url,
+        "control_plane_url": browser_url,
+        "control_plane_key_file": "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/" + project + "/.env",
+        "control_plane_key_env": "HINDSIGHT_CP_ACCESS_KEY",
         "message": "在运行 AstrBot 的 Linux 主机执行，完成后回到设置中选择模型。",
     }
 

@@ -6,29 +6,18 @@ const modeHelp = {
   readonly: "读取已有记忆，不保存新的记忆。",
   paused: "不读取记忆，也不保存新的记忆。",
 };
-const memoryTypes = { world: "事实记忆", experience: "对话经历", observation: "归纳记忆" };
 let data = null;
 let settingsRevision = "";
 let scopeId = "";
-let page = 1;
-let pageSize = 20;
-let totalPages = 1;
-let searchMode = false;
-let total = 0;
-let listSignature = "";
-let headSignature = "";
 let modeDirty = false;
+let forgetState = null;
+let maintenanceState = null;
 let refreshTimer;
 let refreshRunning = false;
 let refreshFailures = 0;
 let modelRequestId = "";
 let modelWatch = null;
 let statusSignature = "";
-let listVersion = 0;
-let detailVersion = 0;
-let detailMemoryId = null;
-let detailScopeId = "";
-let forgetState = null;
 const locks = new Set();
 let feedbackTimer;
 
@@ -91,8 +80,7 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
 
 function activateTab(name, focus = false) {
   if (name !== "setup") {
-    $("installation").open = false;
-    $("uninstallation").open = false;
+    clearCommands();
   }
   document.querySelectorAll('[role="tab"]').forEach((tab) => {
     const selected = tab.id === `tab-${name}`;
@@ -223,6 +211,7 @@ function hydrateConfig() {
   settingsRevision = data.config_revision;
   $("api-url").value = config.api_url || "";
   $("api-key").value = "";
+  $("control-plane-url").value = config.control_plane_url || "";
   $("connection-result").hidden = true;
   $("api-key").placeholder = config.has_api_key ? "已保存，留空继续使用" : "填写记忆服务的 API Key";
   $("key-help").textContent = config.has_api_key ? "已保存 API Key。留空保留，填写新值则替换。" : "填写记忆服务的连接密钥。";
@@ -280,13 +269,13 @@ function renderStatus() {
   $("scope-statuses").replaceChildren();
   if (!data.scopes?.length) {
     const empty = el("div", "empty");
-    empty.append(el("h3", "", "还没有添加使用者"), el("p", "", "在下方添加使用者并保存。"));
+    empty.append(el("h3", "", "还没有添加使用者"), el("p", "", "在「设置」中添加使用者并保存。"));
     $("scope-statuses").append(empty);
   }
   (data.scopes || []).forEach((scope) => {
     const row = el("article", "scope-status");
     const heading = el("div", "scope-status-header");
-    const manage = el("button", "", "查看该用户记忆");
+    const manage = el("button", "", "管理此账号");
     manage.type = "button";
     manage.addEventListener("click", () => {
       if (locks.has("memory")) return;
@@ -295,15 +284,17 @@ function renderStatus() {
     });
     heading.append(el("strong", "", scopeName(scope)), el("span", "badge", scope.pending ? "等待连接" : modeLabels[scope.mode] || "模式未知"), manage);
     row.append(heading, el("p", "hint", scope.pending ? pendingScopeHelp(scope) : countDescription(scope.summary?.counts)));
+    if (scope.summary?.maintenance || scope.summary?.bank_missing) row.append(el("p", "hint", maintenanceDescription(scope.summary)));
     if (scope.summary?.error_message) row.append(el("p", "hint error-text", scope.summary.error_message));
     $("scope-statuses").append(row);
   });
 }
 
-async function refreshBootstrap({ hydrate = false, automatic = false } = {}) {
+async function refreshBootstrap({ hydrate = false, automatic = false, pollMaintenance = true } = {}) {
   const next = await bridge.apiGet("bootstrap");
   if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   data = next;
+  maintenanceState = null;
   if (hydrate) hydrateConfig();
   else if (!automatic) {
     for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, $(`${kind}-provider`).value);
@@ -344,31 +335,58 @@ async function refreshBootstrap({ hydrate = false, automatic = false } = {}) {
   $("memory-fields").hidden = !scopes.length;
   $("setup-fields").disabled = locks.has("setup");
   $("no-scopes").hidden = scopes.length > 0;
-  if (!modeDirty && !locks.has("memory")) renderScope();
-  if (previous !== scopeId) {
-    listSignature = headSignature = "";
-    page = 1;
-    searchMode = false;
-    $("query").value = "";
-    if (scopeId) await loadMemories();
-    else {
-      listVersion++;
-      $("memory-list").replaceChildren();
-      $("list-summary").textContent = "暂无用户。";
-      $("pagination").hidden = true;
-    }
-  }
+  if (previous !== scopeId) modeDirty = false;
+  if (!locks.has("memory")) renderScope();
+  if (pollMaintenance) await readMaintenanceStatus();
   $("startup").hidden = true;
   if (data.model_job?.status === "running" && !modelWatch) void watchModels();
 }
 
+function maintenanceDescription(summary = {}, state = null) {
+  if (summary.bank_missing || state?.bank_missing) return "映射失效：原 Bank 已不存在。恢复原 Bank 后可结束维护并核对映射；也可通过完整遗忘显式登记新 Bank。";
+  if (state?.phase === "inactive" || !summary.maintenance) return "未处于维护状态。";
+  if (state?.error) return `维护状态暂时无法确认：${state.error} 请保持暂停，刷新维护状态后再操作。`;
+  if (state?.ready === true && state.phase === "ready") return "可维护：服务已确认任务排空，可在官方管理页面操作此 Bank。";
+  if (state?.pending || state?.in_flight || state?.remote_active) return "排空中：仍有待办或远端任务。未提交的待办须明确勾选丢弃并应用维护选项；状态不明或取消结果无法确认时保持暂停，可使用完整遗忘轮换 Bank。";
+  return "排空中：等待服务确认。请刷新维护状态，确认可维护后再操作 Bank。";
+}
+
+async function readMaintenanceStatus() {
+  const snapshot = data;
+  const id = scopeId;
+  const scope = snapshot?.scopes.find((item) => item.scope_id === id);
+  if (!scope?.summary?.maintenance || scope.pending) return;
+  let state;
+  try {
+    const response = await bridge.apiGet(endpoint("action", id), { action: "maintenance_status" });
+    state = response.maintenance;
+  } catch (error) {
+    state = { phase: "draining", ready: false, error: errorMessage(error) };
+  }
+  if (snapshot !== data || id !== scopeId) return;
+  maintenanceState = state;
+  renderScope();
+}
+
 function renderScope() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
-  $("scope-mode").value = scope?.mode || "";
-  $("mode-help").textContent = scope?.pending ? pendingScopeHelp(scope) : modeHelp[scope?.mode] || "";
-  for (const id of ["scope-mode", "save-mode", "retry", "export", "forget"]) $(id).disabled = !scope || scope.pending === true;
-  $("scope-error").hidden = !scope?.summary?.error_message;
-  $("scope-error").textContent = text(scope?.summary?.error_message);
+  const summary = scope?.summary || {};
+  if (!modeDirty) $("scope-mode").value = scope?.mode || "";
+  $("mode-help").textContent = scope?.pending ? pendingScopeHelp(scope) : modeHelp[$("scope-mode").value] || "";
+  for (const id of ["scope-mode", "save-mode", "retry", "maintenance-begin", "maintenance-status", "maintenance-resume", "discard-pending", "forget"]) $(id).disabled = !scope || scope.pending === true;
+  const maintenanceActive = !!summary.maintenance;
+  $("scope-mode").querySelector('[value="active"]').disabled = maintenanceActive || !!summary.bank_missing;
+  $("scope-mode").querySelector('[value="readonly"]').disabled = maintenanceActive || !!summary.bank_missing;
+  $("maintenance-begin").textContent = maintenanceActive ? "应用维护选项" : "开始维护";
+  $("maintenance-resume").disabled ||= !maintenanceActive || maintenanceState?.ready !== true || maintenanceState.phase !== "ready";
+  $("retry").disabled ||= maintenanceActive || !!summary.bank_missing;
+  $("scope-error").hidden = !summary.error_message;
+  $("scope-error").textContent = text(summary.error_message);
+  $("control-plane-address").value = data?.config.control_plane_url || "";
+  $("control-plane-missing").hidden = !!data?.config.control_plane_url;
+  $("scope-bank").value = scope?.bank || "";
+  $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : countDescription(summary.counts);
+  $("maintenance-state").textContent = maintenanceDescription(summary, maintenanceState);
 }
 
 function pendingScopeHelp(scope) {
@@ -380,14 +398,11 @@ function pendingScopeHelp(scope) {
 function selectScope(id) {
   scopeId = id;
   $("scope-picker").value = id;
-  page = 1;
-  searchMode = false;
-  listSignature = headSignature = "";
   modeDirty = false;
-  $("memory-updates").hidden = true;
-  $("query").value = "";
+  maintenanceState = null;
+  $("discard-pending").checked = false;
   renderScope();
-  void perform(null, "memory", loadMemories);
+  void readMaintenanceStatus();
 }
 
 function endpoint(suffix, id = scopeId) {
@@ -395,153 +410,13 @@ function endpoint(suffix, id = scopeId) {
   return `scopes/${encodeURIComponent(id)}/${suffix}`;
 }
 
-function renderMemories(items, searching) {
-  const list = $("memory-list");
-  list.replaceChildren();
-  if (!items.length) {
-    const empty = el("div", "empty");
-    empty.append(
-      el("h3", "", searching ? "没有找到相关记忆" : page > 1 ? "这一页没有记忆" : "还没有保存的记忆"),
-      el("p", "", searching ? "换一个说法，或点击「查看全部」浏览。" : page > 1 ? "点击「上一页」返回。" : "与机器人正常私聊后，记忆会在后台整理，完成后自动显示。"),
-    );
-    list.append(empty);
-  }
-  items.forEach((item) => {
-    const card = el("article", "memory-card");
-    const meta = el("div", "memory-meta");
-    meta.append(el("span", "badge", memoryTypes[item.type] || text(item.type) || "记忆"));
-    if (item.date) meta.append(el("span", "", item.date));
-    const detail = el("button", "", "查看详情 / 更正");
-    detail.type = "button";
-    detail.disabled = item.id == null;
-    detail.addEventListener("click", () => void openDetail(item.id, scopeId));
-    card.append(meta, el("p", "", item.text || "此条记忆没有文本内容。"), detail);
-    list.append(card);
-  });
-}
-
-function memorySignature(response) {
-  return JSON.stringify([response.total, response.items, response.corrections]);
-}
-
-function deferMemoryUpdates() {
-  return searchMode || page > 1 || Boolean($("query").value.trim())
-    || $("detail-dialog").open || $("forget-dialog").open
-    || $("memory-fields").contains(document.activeElement);
-}
-
-function renderPagination() {
-  $("pagination").hidden = searchMode || total === 0;
-  $("page-number").textContent = `第 ${page} / ${totalPages} 页`;
-  $("previous").disabled = $("first").disabled = page <= 1;
-  $("next").disabled = $("last").disabled = page >= totalPages;
-  $("page-input").max = String(totalPages);
-  $("page-input").value = String(page);
-  const pages = [...new Set([1, totalPages, page - 2, page - 1, page, page + 1, page + 2])]
-    .filter((number) => number >= 1 && number <= totalPages).sort((a, b) => a - b);
-  const links = $("page-links");
-  links.replaceChildren();
-  pages.forEach((number, index) => {
-    if (index && number - pages[index - 1] > 1) links.append(el("span", "", "…"));
-    const button = el("button", "", String(number));
-    button.type = "button";
-    button.setAttribute("aria-label", `第 ${number} 页`);
-    if (number === page) button.setAttribute("aria-current", "page");
-    button.addEventListener("click", () => void perform(null, "memory", () => loadMemories(number)));
-    links.append(button);
-  });
-}
-
-async function loadMemories(requestedPage = page, { quiet = false } = {}) {
-  const version = ++listVersion;
-  const id = scopeId;
-  if (!id) return;
-  const scope = data.scopes.find((item) => item.scope_id === id);
-  if (scope?.pending) {
-    $("memory-list").setAttribute("aria-busy", "false");
-    renderMemories([], false);
-    $("memory-list").querySelector("h3").textContent = "还没有保存的记忆";
-    $("memory-list").querySelector("p").textContent = pendingScopeHelp(scope);
-    $("list-summary").textContent = "";
-    $("pagination").hidden = true;
-    return;
-  }
-  const searching = searchMode;
-  if (!quiet) {
-    $("memory-list").setAttribute("aria-busy", "true");
-    $("list-summary").textContent = "正在读取记忆…";
-  }
-  try {
-    const response = searching
-      ? await bridge.apiPost(endpoint("search", id), { query: $("query").value.trim() })
-      : await bridge.apiGet(endpoint("memories", id), { page: requestedPage, page_size: pageSize });
-    if (version !== listVersion || id !== scopeId) return;
-    if (quiet && (locks.size || document.hidden || deferMemoryUpdates())) {
-      if (headSignature && memorySignature(response) !== headSignature) $("memory-updates").hidden = false;
-      return;
-    }
-    const items = (searching ? response.results : response.items) || [];
-    if (!Array.isArray(items)) throw new Error("记忆列表格式不正确，请稍后刷新。");
-    total = searching ? items.length : Number(response.total);
-    page = searching ? 1 : Number(response.page) || requestedPage;
-    totalPages = Number(response.total_pages) || Math.max(1, Math.ceil(total / pageSize));
-    const signature = memorySignature(response);
-    if (!searching && page === 1) headSignature = signature;
-    if (quiet && signature === listSignature) return;
-    listSignature = signature;
-    renderMemories(items, searching);
-    $("list-summary").textContent = searching ? `找到 ${items.length} 条相关记忆` : Number.isFinite(total) ? `共 ${total} 条记忆` : "全部记忆";
-    renderPagination();
-    $("memory-updates").hidden = true;
-  } catch (error) {
-    if (!quiet && version === listVersion) $("list-summary").textContent = "记忆读取失败，请点击「查看全部」重试。";
-    throw error;
-  } finally {
-    if (version === listVersion) $("memory-list").setAttribute("aria-busy", "false");
-  }
-}
-
-function renderDetail(record, corrections = []) {
-  const content = $("detail-content");
-  content.replaceChildren();
-  if (typeof record !== "object" || !record) {
-    content.append(el("p", "", record || "未返回记忆内容。"));
-  } else {
-    const labels = { id: "记忆编号", text: "记忆内容", type: "类型", date: "时间", context: "相关语境", document_id: "来源文档" };
-    const description = el("dl");
-    Object.entries(record).forEach(([key, value]) => {
-      if (!labels[key] || value == null || value === "") return;
-      const row = el("div", "detail-field");
-      row.append(el("dt", "", labels[key]), el("dd", "", key === "type" ? memoryTypes[value] || value : value));
-      description.append(row);
-    });
-    content.append(description);
-  }
-  $("corrections-section").hidden = !corrections.length;
-  $("corrections").replaceChildren(...corrections.map((correction) => el("p", "", typeof correction === "object" ? correction.text || correction : correction)));
-}
-
-async function openDetail(memoryId, id) {
-  const version = ++detailVersion;
-  detailMemoryId = memoryId;
-  detailScopeId = id;
-  $("detail-content").textContent = "正在读取详情…";
-  $("corrections-section").hidden = true;
-  $("correction-text").value = "";
-  $("detail-feedback").textContent = "";
-  $("correction-fields").disabled = true;
-  $("detail-dialog").showModal();
-  try {
-    const response = await bridge.apiGet(endpoint("detail", id), { memory_id: memoryId });
-    if (version !== detailVersion || !$("detail-dialog").open) return;
-    renderDetail(response.record, response.corrections || []);
-    $("correction-fields").disabled = false;
-  } catch (error) {
-    if (version === detailVersion) {
-      $("detail-content").textContent = "详情读取失败。关闭后可以重新打开。";
-      notify(errorMessage(error), true, "detail-feedback");
-    }
-  }
+function controlPlaneUrl(value) {
+  value = value.trim();
+  if (!value) return "";
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error("请填写完整的官方管理地址。"); }
+  if (!/^https?:\/\//i.test(value) || !["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || /[@]/.test(value.split("/")[2]) || /[?#\\\s]/.test(value)) throw new Error("管理地址仅支持 HTTP/HTTPS，不能包含登录凭据、查询参数或片段。");
+  return value;
 }
 
 function connectionPayload() {
@@ -555,6 +430,7 @@ function connectionPayload() {
 function settingsPayload() {
   const payload = {
     ...connectionPayload(),
+    control_plane_url: controlPlaneUrl($("control-plane-url").value),
     allowed_accounts: [], config_revision: settingsRevision,
   };
   const seen = new Set();
@@ -647,20 +523,6 @@ async function autoRefresh() {
   refreshRunning = true;
   try {
     await refreshBootstrap({ automatic: true });
-    if (scopeId && !$("panel-memories").hidden && !data.scopes.find((scope) => scope.scope_id === scopeId)?.pending) {
-      const reading = deferMemoryUpdates();
-      if (reading) {
-        const id = scopeId;
-        const response = await bridge.apiGet(endpoint("memories", id), { page: 1, page_size: pageSize });
-        if (id === scopeId) {
-          const signature = memorySignature(response);
-          if (headSignature && signature !== headSignature) $("memory-updates").hidden = false;
-          headSignature = signature;
-        }
-      } else if (!locks.size) {
-        await loadMemories(1, { quiet: true });
-      }
-    }
     refreshFailures = 0;
     $("update-error").hidden = true;
   } catch {
@@ -715,7 +577,10 @@ document.querySelectorAll('[name="connection-mode"]').forEach((radio) => radio.a
 }));
 async function prepareInstallation(button) {
   await perform(button, "setup", async () => {
-    const response = await bridge.apiPost("install/prepare", { config_revision: settingsRevision });
+    const response = await bridge.apiPost("install/prepare", {
+      config_revision: settingsRevision,
+      control_plane_url: controlPlaneUrl($("control-plane-url").value),
+    });
     if (!response.command) throw new Error("未生成安装命令，请稍后重试。");
     if (response.config_revision) settingsRevision = response.config_revision;
     $("install-command").value = response.command;
@@ -726,6 +591,7 @@ async function prepareInstallation(button) {
     data.installation_api_url = response.api_url;
     updateConnectionMode();
     if (response.api_url) $("api-url").value = response.api_url;
+    if (response.control_plane_url && !$("control-plane-url").value.trim()) $("control-plane-url").value = controlPlaneUrl(response.control_plane_url);
     $("install-command").focus();
     notify("安装命令已生成。执行后在下方选择模型并保存。");
   });
@@ -803,7 +669,6 @@ $("refresh").addEventListener("click", () => void perform($("refresh"), "refresh
   const firstLoad = !data;
   await refreshBootstrap({ hydrate: firstLoad });
   if (firstLoad) activateTab(data.config.configured ? "memories" : "setup");
-  if (scopeId && !locks.has("memory")) await perform(null, "memory", loadMemories);
   notify("状态已刷新。");
   $("update-error").hidden = true;
   scheduleRefresh();
@@ -825,66 +690,42 @@ $("retry").addEventListener("click", () => void perform($("retry"), "memory", as
   await refreshBootstrap();
   notify(response.message || "已提交重试，处理结果会自动更新。");
 }));
-$("export").addEventListener("click", () => void perform($("export"), "memory", async () => {
-  await bridge.download(endpoint("export"));
-  notify("记忆 JSON 已交给浏览器下载。");
-}));
-$("search-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (!$("query").value.trim()) { notify("请先输入要搜索的内容。", true); $("query").focus(); return; }
-  searchMode = true;
-  page = 1;
-  void perform($("search"), "memory", loadMemories);
+async function maintenanceAction(button, action, extra = {}) {
+  await perform(button, "memory", async () => {
+    const id = scopeId;
+    maintenanceState = null;
+    renderScope();
+    const response = action === "maintenance_status"
+      ? await bridge.apiGet(endpoint("action", id), { action })
+      : await bridge.apiPost(endpoint("action", id), { action, ...extra });
+    await refreshBootstrap({ pollMaintenance: action !== "maintenance_status" });
+    if (scopeId === id && action === "maintenance_status") {
+      maintenanceState = response.maintenance;
+      renderScope();
+    }
+    if (action === "maintenance_begin") $("discard-pending").checked = false;
+    notify(response.message || maintenanceDescription(data.scopes.find((item) => item.scope_id === id)?.summary, maintenanceState));
+  });
+}
+$("maintenance-begin").addEventListener("click", () => void maintenanceAction($("maintenance-begin"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
+$("maintenance-status").addEventListener("click", () => void maintenanceAction($("maintenance-status"), "maintenance_status"));
+$("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
+
+for (const id of ["control-plane-address", "scope-bank"]) $(id).addEventListener("focus", () => $(id).select());
+for (const [details, field] of [["installation", "install-command"], ["uninstallation", "uninstall-command"]]) {
+  $(details).addEventListener("toggle", () => { if (!$(details).open) $(field).value = ""; });
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearCommands();
 });
-$("show-all").addEventListener("click", () => {
-  searchMode = false;
-  page = 1;
-  listSignature = headSignature = "";
-  $("query").value = "";
-  void perform($("show-all"), "memory", loadMemories);
-});
-for (const [id, delta] of [["previous", -1], ["next", 1]]) $(id).addEventListener("click", () => {
-  void perform(null, "memory", () => loadMemories(Math.max(1, page + delta)));
-});
-$("first").addEventListener("click", () => void perform(null, "memory", () => loadMemories(1)));
-$("last").addEventListener("click", () => void perform(null, "memory", () => loadMemories(totalPages)));
-$("page-size").addEventListener("change", () => {
-  pageSize = Number($("page-size").value);
-  page = 1;
-  listSignature = headSignature = "";
-  void perform(null, "memory", loadMemories);
-});
-$("page-jump").addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (!$("page-jump").reportValidity()) return;
-  void perform(null, "memory", () => loadMemories(Number($("page-input").value)));
-});
-$("memory-updates").addEventListener("click", () => {
-  page = 1;
-  searchMode = false;
-  $("query").value = "";
-  void perform(null, "memory", loadMemories);
-});
-$("close-detail").addEventListener("click", () => { if (!locks.has("correction")) $("detail-dialog").close(); });
-$("detail-dialog").addEventListener("cancel", (event) => { if (locks.has("correction")) event.preventDefault(); });
-$("detail-dialog").addEventListener("close", () => { detailVersion++; detailMemoryId = null; $("correction-text").value = ""; });
-$("correction-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const correction = $("correction-text").value.trim();
-  if (!correction) { notify("请填写准确的信息。", true, "detail-feedback"); return; }
-  const id = detailScopeId;
-  const memoryId = detailMemoryId;
-  if (memoryId == null) return;
-  void perform($("save-correction"), "correction", async () => {
-    const response = await bridge.apiPost(endpoint("action", id), { action: "correct", memory_id: memoryId, text: correction });
-    $("correction-text").value = "";
-    notify(response.message || "更正已保存。", false, "detail-feedback");
-    const detail = await bridge.apiGet(endpoint("detail", id), { memory_id: memoryId });
-    renderDetail(detail.record, detail.corrections || []);
-    await refreshBootstrap();
-    if (scopeId === id) await loadMemories();
-  }, "detail-feedback");
-});
+window.addEventListener("pagehide", clearCommands);
+function clearCommands() {
+  $("installation").open = false;
+  $("uninstallation").open = false;
+  $("install-command").value = "";
+  $("uninstall-command").value = "";
+}
+
 $("forget").addEventListener("click", () => void perform($("forget"), "memory", async () => {
   const id = scopeId;
   const response = await bridge.apiPost(endpoint("action", id), { action: "forget_prepare" });
@@ -912,13 +753,8 @@ $("confirm-forget").addEventListener("click", () => {
       const response = await bridge.apiPost(endpoint("action", pending.id), { action: "forget_confirm", confirmation: pending.confirmation });
       forgetState = null;
       $("forget-dialog").close();
-      page = 1;
-      listSignature = headSignature = "";
-      searchMode = false;
-      $("query").value = "";
       await refreshBootstrap();
-      if (scopeId) await loadMemories();
-      notify(response.message || "记忆已清空并暂停。需要重新记录时，选择「正常记忆」并点击「应用模式」。");
+      notify(response.message || "完整遗忘已登记。请等待旧 Bank 清理完成后，再开启记忆。");
     } finally {
       $("forget-agree").disabled = false;
       $("cancel-forget").disabled = false;
@@ -927,7 +763,7 @@ $("confirm-forget").addEventListener("click", () => {
         forgetState = null;
         $("forget-agree").checked = false;
         $("forget-agree").disabled = true;
-        $("forget-message").textContent = "操作未完成。请关闭此窗口，重新点击「完整遗忘此用户」获取确认信息。";
+        $("forget-message").textContent = "操作未完成。请关闭此窗口，重新点击「完整遗忘并轮换 Bank」获取确认信息。";
       }
     }
   }, "forget-feedback").finally(() => { $("confirm-forget").disabled = true; });

@@ -7,7 +7,6 @@ import tempfile
 import time
 import weakref
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -70,8 +69,12 @@ class HindsightBridge(Star):
             "payload_digest_conflict": "冻结材料摘要不一致，请检查业务库",
             "scope_not_active": "请先用 /hindsight on 开启采集",
             "scope_not_available": "记忆范围正在恢复或已变更，请稍后重试",
+            "bank_missing": "既有 Bank 已丢失，记忆保持暂停；请管理员恢复原 Bank 后显式结束维护，或确认完整遗忘并登记新 Bank",
+            "maintenance_active": "记忆正在维护，采集、召回、提交和重试已暂停；请管理员在插件管理页查看排空进度并完成维护",
+            "maintenance_pending": "维护仍有在途任务或未提交待办；请管理员等待已接受任务排空，并显式作废未提交旧待办",
+            "maintenance_unknown_operation": "任务接收或协作取消结果待核对，保持暂停且不重发；修复服务后核对原操作，或确认完整遗忘恢复",
+            "legacy_corrections_require_handover": "检测到历史本地更正，启动已阻止；请管理员备份业务库和最新控制库，完成数据交接后重载，勿删除原数据",
             "message_before_accept_from": "消息早于采集时间下限",
-            "invalid_correction": "更正格式无效；新内容最多 1000 字符",
             "invalid_capture": "内容为空或超出长度限制",
             "assistant_history_changed": "已保存的助手正文发生变化，请检查会话编辑记录",
             "conversation_history_not_saved": "助手正文尚未保存到会话历史，下一条消息继续核对",
@@ -123,7 +126,9 @@ class HindsightBridge(Star):
             self.status = "已配置"
         except Exception as exc:  # noqa: BLE001 -- plugin initialization must preserve chat
             self.status = "初始化失败：" + (
-                str(exc) if isinstance(exc, QueueError) else type(exc).__name__
+                self.diagnostic(str(exc))
+                if isinstance(exc, QueueError)
+                else type(exc).__name__
             )
             logger.error("Hindsight: %s", self.status)
             await self._close_resources()
@@ -184,7 +189,7 @@ class HindsightBridge(Star):
             logger.warning("Hindsight: %s", label)
             self.last_warning = time.monotonic()
 
-    async def recall_text(self, bank, current, history=(), *, timestamp, scope=None):
+    async def recall_text(self, bank, current, history=(), *, timestamp):
         timeout = max(0.2, min(4.0, float(self.config.get("recall_timeout", 4))))
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         result_tokens = max(
@@ -204,11 +209,7 @@ class HindsightBridge(Star):
                 result_tokens,
                 timestamp=timestamp,
             )
-            return memory_block(
-                results,
-                limit=limit,
-                corrections=self.outbox.corrections(scope) if scope else (),
-            )
+            return memory_block(results, limit=limit)
 
     async def conversation_history(self, event, conversation_id):
         manager = self.context.conversation_manager
@@ -389,7 +390,6 @@ class HindsightBridge(Star):
                 if capture
                 else (),
                 timestamp=incoming.iso_timestamp,
-                scope=scope,
             )
             self.refresh_permissions()
             if (
@@ -425,7 +425,7 @@ class HindsightBridge(Star):
 
     @filter.command_group("hindsight")
     def hindsight(self):
-        """个人记忆查看、导出、更正、模式、任务控制与完整遗忘。"""
+        """个人记忆查看、导出、模式、任务控制与完整遗忘。"""
 
     def command_scope(self, event):
         if self.outbox is None or not self.allowed(event):
@@ -468,6 +468,14 @@ class HindsightBridge(Star):
     def readable(self, event, scope):
         return self.allowed(event) and self.outbox.can_recall(scope, manual=True)
 
+    def unavailable_message(self, scope):
+        summary = self.outbox.summary(scope["scope_id"])
+        if summary.get("bank_missing"):
+            return self.diagnostic("bank_missing")
+        if summary.get("maintenance"):
+            return self.diagnostic("maintenance_active")
+        return self.diagnostic("scope_not_available")
+
     @hindsight.command("help")
     async def memory_help(self, event: AstrMessageEvent):
         yield event.plain_result(
@@ -476,12 +484,13 @@ class HindsightBridge(Star):
             "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
             "/hindsight show 记忆ID：查看类型、时间与来源\n"
             "/hindsight recall 问题：检索本人记忆\n"
-            "/hindsight export：导出 JSON 文件（事实、整合观察、源文档与更正）\n"
-            "/hindsight correct 记忆ID 更正原文：提交更正，最多 1000 字符\n"
+            "/hindsight export：导出 JSON 文件（事实、整合观察与源文档）\n"
+            "更正记忆：请管理员在插件管理页复制 Bank，在官方 Control Plane 中操作\n"
             "/hindsight on | readonly | pause：开启、只读、暂停\n"
             "/hindsight retry：重试失败任务\n"
             "/hindsight cancel 任务编号：取消上传，已形成的记忆保留\n"
             "/hindsight forget：查看完整遗忘范围并取得确认码\n"
+            "维护期间采集、召回、提交和重试暂停；已接受任务继续排空。\n"
             "自动记录用户原文和标准会话历史中的助手正文；助手正文不证明送达或操作执行。"
         )
 
@@ -496,7 +505,7 @@ class HindsightBridge(Star):
             return
         async with self.using_resources():
             if not self.readable(event, scope):
-                yield event.plain_result("记忆范围正在恢复，请稍后查看。")
+                yield event.plain_result(self.unavailable_message(scope))
                 return
             try:
                 async with asyncio.timeout(8):
@@ -504,19 +513,13 @@ class HindsightBridge(Star):
                     offset = (page - 1) * 10
                     data = await self.client.memory_page(scope["bank"], page=page)
                 if not self.readable(event, scope):
-                    yield event.plain_result("记忆范围已变化，请重新查看。")
+                    yield event.plain_result(self.unavailable_message(scope))
                     return
-                changes = len(self.outbox.corrections(scope))
                 yield event.plain_result(
                     render_page(data, offset=offset)
                     + (
                         f"\n下一页：/hindsight view {page + 1}"
                         if offset + len(data["items"]) < data["total"]
-                        else ""
-                    )
-                    + (
-                        f"\n已登记 {changes} 项显式更正；用 show 查看有效更正。"
-                        if changes
                         else ""
                     )
                 )
@@ -531,23 +534,16 @@ class HindsightBridge(Star):
             return
         async with self.using_resources():
             if not self.readable(event, scope):
-                yield event.plain_result("记忆范围正在恢复，请稍后查看。")
+                yield event.plain_result(self.unavailable_message(scope))
                 return
             try:
                 async with asyncio.timeout(8):
                     await self.client.ensure_auth()
                     record = await self.client.get_memory(scope["bank"], memory_id)
                 if not self.readable(event, scope):
-                    yield event.plain_result("记忆范围已变化，请重新查看。")
+                    yield event.plain_result(self.unavailable_message(scope))
                     return
-                text = render_memory(record)
-                for change in self.outbox.corrections(scope):
-                    if change["memory_id"] == memory_id:
-                        text += (
-                            f"\n用户显式更正（{change['occurred_at']}）：{change['text']}"
-                            f"\n更正任务：{change['task_id']}，状态：{change['state']}"
-                        )
-                yield event.plain_result(text)
+                yield event.plain_result(render_memory(record))
             except (HindsightError, QueueError, TimeoutError) as exc:
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
@@ -565,16 +561,15 @@ class HindsightBridge(Star):
             return
         async with self.using_resources():
             if not self.readable(event, scope):
-                yield event.plain_result("记忆范围正在恢复，请稍后导出。")
+                yield event.plain_result(self.unavailable_message(scope))
                 return
             try:
                 async with asyncio.timeout(30):
                     await self.client.ensure_auth()
                     payload = await self.client.export_memories(scope["bank"])
                 if not self.readable(event, scope):
-                    yield event.plain_result("记忆范围已变化，请重新导出。")
+                    yield event.plain_result(self.unavailable_message(scope))
                     return
-                payload["corrections"] = self.outbox.corrections(scope)
                 data = export_bytes(payload)
                 if len(data) > 8 * 1024 * 1024:
                     raise HindsightError("export_too_large")
@@ -588,7 +583,7 @@ class HindsightBridge(Star):
                         MessageChain([File(name=path.name, file=str(path))])
                     )
                 yield event.plain_result(
-                    "本人记忆 JSON 已交给平台发送。范围包含事实、整合观察、源文档与显式更正；"
+                    "本人记忆 JSON 已交给平台发送。范围包含事实、整合观察与源文档；"
                     "上传队列和 AstrBot 聊天历史不在导出范围内。"
                 )
             except (HindsightError, QueueError, TimeoutError) as exc:
@@ -600,50 +595,17 @@ class HindsightBridge(Star):
                 )
 
     @hindsight.command("correct")
-    async def memory_correct(self, event: AstrMessageEvent, memory_id: str, text: str):
+    async def memory_correct(
+        self, event: AstrMessageEvent, memory_id: str = "", text: str = ""
+    ):
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
             return
-        source = native_snapshot(event, Plain, ())
-        arguments = source.text.split(None, 3) if source else []
-        if len(arguments) != 4 or arguments[2] != memory_id:
-            yield event.plain_result("请发送：/hindsight correct 记忆ID 更正原文")
-            return
-        text = arguments[3]
-        if not text.strip() or len(text) > 1000:
-            yield event.plain_result("请填写 1 到 1000 字符的更正原文。")
-            return
-        async with self.using_resources():
-            if not self.readable(event, scope) or scope["mode"] != "active":
-                yield event.plain_result("请先用 /hindsight on 开启采集，再提交更正。")
-                return
-            try:
-                async with asyncio.timeout(8):
-                    await self.client.ensure_auth()
-                    record = await self.client.get_memory(scope["bank"], memory_id)
-                if not self.readable(event, scope):
-                    yield event.plain_result("记忆范围已变化，请重新提交更正。")
-                    return
-                incoming = replace(source, text=text)
-                target = {
-                    "id": memory_id,
-                    "text": record["text"],
-                    "document_id": record.get("document_id") or "",
-                }
-                capture = self.outbox.capture(
-                    incoming, "manual-corrections", correction=target
-                )
-                self.outbox.release(capture.task_id)
-                self.worker.wake.set()
-                yield event.plain_result(
-                    f"更正已保存，任务 {capture.task_id}；后续召回以新陈述为准。"
-                    "后台写入进度见 /hindsight status；旧事实保留来源关联。"
-                )
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
-            except (OSError, sqlite3.DatabaseError):
-                yield event.plain_result("本地保存失败，请检查业务数据目录。")
+        yield event.plain_result(
+            "记忆更正请联系管理员：在 AstrBot 插件管理页复制对应 Bank，"
+            "独立登录官方 Control Plane 完成更正；修改前先进入维护并处理旧待办。"
+        )
 
     @hindsight.command("status")
     async def memory_status(self, event: AstrMessageEvent):
@@ -668,6 +630,13 @@ class HindsightBridge(Star):
                 else "执行器尚未适配"
             )
             summary = self.outbox.summary(scope["scope_id"])
+            maintenance = (
+                self.diagnostic("bank_missing")
+                if summary.get("bank_missing")
+                else self.diagnostic("maintenance_active")
+                if summary.get("maintenance")
+                else "无"
+            )
             counts = summary["counts"]
             waiting = counts.get("ready", 0)
             tracking = sum(
@@ -698,6 +667,7 @@ class HindsightBridge(Star):
                 f"Observation：{stats.get('total_observations', '未知')}；"
                 f"待整合：{stats.get('pending_consolidation', '未知')}\n"
                 f"清空：{cleanup}\n"
+                f"维护：{maintenance}\n"
                 f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
                 f"最近队列错误：{self.diagnostic(summary['last_error'])}\n"
                 f"最近采集提示：{self.status}\n"
@@ -717,22 +687,22 @@ class HindsightBridge(Star):
             query = arguments[2]
         async with self.using_resources():
             if not self.outbox.can_recall(scope, manual=True):
-                yield event.plain_result("记忆范围正在恢复，请稍后查询。")
+                yield event.plain_result(self.unavailable_message(scope))
                 return
             try:
                 from .core.materials import utc_timestamp
 
                 result = await self.recall_text(
-                    scope["bank"], query, timestamp=utc_timestamp(), scope=scope
+                    scope["bank"], query, timestamp=utc_timestamp()
                 )
                 if not self.outbox.can_recall(scope, manual=True) or not self.allowed(
                     event
                 ):
-                    yield event.plain_result("记忆范围已变化，请重新查询。")
+                    yield event.plain_result(self.unavailable_message(scope))
                     return
                 yield event.plain_result(result or "没有找到相关记忆。")
-            except (HindsightError, TimeoutError):
-                yield event.plain_result("记忆服务暂时不可用。")
+            except (HindsightError, QueueError, TimeoutError) as exc:
+                yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
     async def mode(self, event, mode):
         scope = self.command_scope(event)
@@ -741,6 +711,9 @@ class HindsightBridge(Star):
         async with self.using_resources():
             try:
                 if mode == "active":
+                    summary = self.outbox.summary(scope["scope_id"])
+                    if summary.get("maintenance") or summary.get("bank_missing"):
+                        return self.unavailable_message(scope)
                     if not await self.worker.maintenance.check(
                         force=True, owner_id=scope["owner_id"]
                     ):
@@ -756,7 +729,7 @@ class HindsightBridge(Star):
                 self.outbox.set_mode(scope["scope_id"], mode)
                 self.worker.wake.set()
             except QueueError as exc:
-                return "模式切换失败：" + str(exc)
+                return "模式切换失败：" + self.diagnostic(str(exc))
         return {
             "active": "记忆已开启，从新消息开始采集；暂停前的同代次队列继续处理。",
             "readonly": "记忆已设为只读：继续召回，停止采集，未提交队列冻结。",
@@ -782,11 +755,15 @@ class HindsightBridge(Star):
             yield event.plain_result("此私聊未开放记忆。")
             return
         try:
+            summary = self.outbox.summary(scope["scope_id"])
+            if summary.get("maintenance") or summary.get("bank_missing"):
+                yield event.plain_result(self.unavailable_message(scope))
+                return
             count = self.outbox.request_retry(scope["scope_id"])
             self.worker.wake.set()
             yield event.plain_result(f"已登记 {count} 条失败任务重试。")
         except QueueError as exc:
-            yield event.plain_result("无法重试：" + str(exc))
+            yield event.plain_result("无法重试：" + self.diagnostic(str(exc)))
 
     @hindsight.command("cancel")
     async def memory_cancel(self, event: AstrMessageEvent, task_id: int):
@@ -801,7 +778,7 @@ class HindsightBridge(Star):
                 f"任务 {task_id} 已登记取消，后台继续核对根任务和子任务。已产生的记忆保留。"
             )
         except QueueError as exc:
-            yield event.plain_result("无法取消：" + str(exc))
+            yield event.plain_result("无法取消：" + self.diagnostic(str(exc)))
 
     @hindsight.command("forget")
     async def memory_forget(self, event: AstrMessageEvent, confirmation: str = ""):
@@ -813,6 +790,23 @@ class HindsightBridge(Star):
         async with self.using_resources():
             if self.outbox.recovering:
                 yield event.plain_result("记忆范围正在恢复，请稍后清空。")
+                return
+            latest = self.outbox.scope_owner(scope["scope_id"])
+            owner = self.outbox.control.owner(
+                self.outbox.connection_id, scope["owner_id"]
+            )
+            if (
+                not self.allowed(event)
+                or not latest
+                or not latest["allowed"]
+                or latest["owner_id"] != scope["owner_id"]
+                or latest["bank"] != scope["bank"]
+                or latest["revision"] != scope["revision"]
+                or not owner
+                or owner["bank"] != scope["bank"]
+                or owner["revision"] != scope["revision"]
+            ):
+                yield event.plain_result(self.diagnostic("scope_not_available"))
                 return
             if not confirmation:
                 self.confirmations = {

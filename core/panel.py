@@ -1,8 +1,7 @@
-"""AstrBot plugin-view setup and administrator memory management."""
+"""AstrBot plugin-view connection, account and maintenance management."""
 
 import asyncio
 import copy
-from datetime import datetime, UTC
 import json
 from pathlib import Path
 import re
@@ -10,14 +9,13 @@ import secrets
 import socket
 import sqlite3
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
-from .catalog import export_bytes
 from .client import HindsightClient, HindsightError
 from .identity import Incoming, sha256
 from .installer import installation, uninstallation
-from .materials import recall_query
 from .outbox import QueueError
 from .permissions import pairs
 from .source import local_runner
@@ -44,16 +42,13 @@ class MemoryPanel:
             ("models/save", "POST", self.save_models),
             ("models/status", "GET", self.model_status),
             ("uninstall/prepare", "POST", self.prepare_uninstall),
-            ("scopes/<scope_id>/memories", "GET", self.memories),
-            ("scopes/<scope_id>/detail", "GET", self.detail),
-            ("scopes/<scope_id>/search", "POST", self.search),
-            ("scopes/<scope_id>/export", "GET", self.export),
-            ("scopes/<scope_id>/action", "POST", self.action),
+            ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
         ]
         if hasattr(plugin.context, "register_web_api"):
             for route, method, handler in routes:
                 plugin.context.register_web_api(
-                    f"/{NAME}/{route}", self.endpoint(handler), [method], "Hindsight 记忆管理"
+                    f"/{NAME}/{route}", self.endpoint(handler),
+                    [method] if isinstance(method, str) else method, "Hindsight 记忆管理"
                 )
 
     def endpoint(self, handler):
@@ -165,6 +160,40 @@ class MemoryPanel:
         except (TypeError, ValueError, httpx.InvalidURL):
             raise PanelError("服务地址格式无效，请填写完整的 HTTP 地址。") from None
 
+    def control_plane_url(self, value, *, api_key=""):
+        if not isinstance(value, str):
+            raise PanelError("管理地址须为 HTTP 或 HTTPS 地址。")
+        value = value.strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlsplit(value)
+            url = httpx.URL(value)
+            if (
+                parsed.scheme.lower() not in {"http", "https"} or not url.host
+                or parsed.username is not None or parsed.password is not None
+                or "?" in value or "#" in value or "\\" in value
+                or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+            ):
+                raise ValueError
+            # Management addresses are public display data, never credential transport.
+            state = self.state()
+            if any(str(secret) in value for secret in (
+                self.plugin.config.get("api_key"), state.get("api_key"),
+                state.get("management_key"), state.get("control_plane_key"),
+                api_key,
+            ) if secret):
+                raise ValueError
+            return str(url)
+        except (ValueError, httpx.InvalidURL):
+            raise PanelError("管理地址仅支持 HTTP/HTTPS，不能包含登录凭据、查询参数或片段。") from None
+
+    def displayed_control_plane_url(self, value):
+        try:
+            return self.control_plane_url(value)
+        except PanelError:
+            return ""
+
     async def bootstrap(self):
         if self.model_task and not self.model_task.done():
             return await self._bootstrap()
@@ -252,6 +281,10 @@ class MemoryPanel:
             "config": {
                 "configured": configured,
                 "api_url": config.get("api_url", "") or state.get("api_url", ""),
+                "control_plane_url": self.displayed_control_plane_url(
+                    config.get("control_plane_url")
+                    or (state.get("control_plane_url", "") if not configured else "")
+                ),
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": bool(state.get("id")) and (
@@ -346,16 +379,22 @@ class MemoryPanel:
         async with self.lock:
             self.check_revision(payload)
             state = self.state(create=True)
+            if "control_plane_url" in payload:
+                state["control_plane_url"] = self.control_plane_url(payload["control_plane_url"])
             result = installation(
                 Path(__file__).resolve().parent.parent, state,
                 container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
             )
             state["api_url"] = result["api_url"]
             state["management_url"] = result["management_url"]
+            control_plane_url = self.control_plane_url(result.get("control_plane_url", ""))
+            if control_plane_url:
+                state["control_plane_url"] = control_plane_url
             self.store_state(state)
             return {
                 "command": result["command"], "message": result["message"],
                 "api_url": result["api_url"], "config_revision": self.config_revision(),
+                "control_plane_url": control_plane_url,
             }
 
     async def save_models(self):
@@ -457,6 +496,10 @@ class MemoryPanel:
             return await self._save(payload, revision)
 
     async def _save(self, payload, revision):
+        control_plane_url = self.control_plane_url(
+            payload.get("control_plane_url", self.plugin.config.get("control_plane_url", "")),
+            api_key=payload.get("api_key", ""),
+        )
         accounts = payload.get("allowed_accounts", [])
         selected = pairs(accounts)
         valid_platforms = {row["id"] for row in self.platforms()}
@@ -509,6 +552,7 @@ class MemoryPanel:
         self.store_state(state)
         updates = {
             "api_url": client.url, "api_key": key,
+            "control_plane_url": control_plane_url,
             "service_id": service,
             "allowed_accounts": [
                 {"platform_instance_id": platform, "user_id": user}
@@ -550,133 +594,65 @@ class MemoryPanel:
             raise PanelError("请先连接所选 QQ 机器人，连接后会自动更新。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
-        if not scope or not plugin.outbox.can_recall(scope, manual=True):
+        if not scope or not scope["allowed"] or plugin.outbox.recovering:
             raise PanelError("这个用户的记忆正在恢复或已停用，请稍后刷新。")
-        return scope
-
-    def unchanged(self, scope):
-        if not self.plugin.outbox.can_recall(scope, manual=True):
+        owner = plugin.outbox.control.owner(plugin.outbox.connection_id, scope["owner_id"])
+        if not owner or owner["bank"] != scope["bank"] or owner["revision"] != scope["revision"]:
             raise PanelError("记忆范围已变化，请刷新后重试。")
-
-    async def memories(self, scope_id):
-        from astrbot.api.web import request
-
-        scope = self.scope(scope_id)
-        page = request.query.get("page", 1, type=int)
-        page_size = request.query.get("page_size", 20, type=int)
-        if not isinstance(page, int) or page < 1:
-            raise PanelError("页码须为正整数。")
-        if page_size not in (10, 20, 50, 100):
-            raise PanelError("每页条数请选择 10、20、50 或 100。")
-        async with self.plugin.using_resources(), asyncio.timeout(10):
-            data = await self.plugin.client.memory_page(scope["bank"], page=page, page_size=page_size)
-            self.unchanged(scope)
-            total_pages = max(1, (data["total"] + page_size - 1) // page_size)
-            if page > total_pages:
-                page = total_pages
-                data = await self.plugin.client.memory_page(scope["bank"], page=page, page_size=page_size)
-                self.unchanged(scope)
-                total_pages = max(1, (data["total"] + page_size - 1) // page_size)
-            return {
-                **data, "page": page, "page_size": page_size, "total_pages": total_pages,
-                "corrections": self.plugin.outbox.corrections(scope),
-            }
-
-    async def detail(self, scope_id):
-        from astrbot.api.web import request
-
-        scope = self.scope(scope_id)
-        async with self.plugin.using_resources(), asyncio.timeout(10):
-            record = await self.plugin.client.get_memory(
-                scope["bank"], request.query.get("memory_id", "")
-            )
-            self.unchanged(scope)
-            return {"record": record, "corrections": [
-                row for row in self.plugin.outbox.corrections(scope)
-                if row["memory_id"] == record["id"]
-            ]}
-
-    async def search(self, scope_id):
-        payload = await self.body()
-        query = payload.get("query")
-        if not isinstance(query, str) or not query.strip() or len(query) > 4000:
-            raise PanelError("请输入 1 到 4000 字符的查询。")
-        scope = self.scope(scope_id)
-        async with self.plugin.using_resources(), asyncio.timeout(10):
-            query = recall_query(query, budget=380, name=self.plugin.client.tokenizer)
-            results = await self.plugin.client.recall(
-                scope["bank"], query, timestamp=datetime.now(UTC).isoformat()
-            )
-            self.unchanged(scope)
-            return {"results": results}
-
-    async def export(self, scope_id):
-        from astrbot.api.web import stream_response
-
-        scope = self.scope(scope_id)
-        async with self.plugin.using_resources(), asyncio.timeout(35):
-            payload = await self.plugin.client.export_memories(scope["bank"])
-            self.unchanged(scope)
-            payload["corrections"] = self.plugin.outbox.corrections(scope)
-            content = export_bytes(payload)
-            if len(content) > 8 * 1024 * 1024:
-                raise HindsightError("export_too_large")
-
-        async def chunks():
-            yield content
-
-        return stream_response(chunks(), content_type="application/json", headers={
-            "Content-Disposition": 'attachment; filename="hindsight-memory.json"',
-            "Cache-Control": "no-store",
-        })
+        return scope
 
     async def action(self, scope_id):
         from astrbot.api.web import request
 
-        payload = await self.body()
+        reading = request.method == "GET"
+        payload = dict(request.query) if reading else await self.body()
+        action = payload.get("action")
+        if reading and action != "maintenance_status":
+            raise PanelError("GET 仅支持查询维护状态。")
         async with self.lock, self.plugin.using_resources():
             scope = self.scope(scope_id)
-            action = payload.get("action")
             plugin, queue = self.plugin, self.plugin.outbox
+            maintenance = plugin.worker.maintenance
+            if action == "maintenance_begin":
+                discard = payload.get("discard_pending", False)
+                if not isinstance(discard, bool):
+                    raise PanelError("discard_pending 须为布尔值。")
+                state = maintenance.begin(scope_id, discard_pending=discard)
+                plugin.worker.wake.set()
+                return {"maintenance": state, "message": "维护已开始；远端已接受的任务继续排空。"}
+            if action == "maintenance_status":
+                state = await maintenance.status(scope_id)
+                plugin.worker.wake.set()
+                return {"maintenance": state}
+            if action == "maintenance_resume":
+                await maintenance.resume(scope_id)
+                plugin.worker.wake.set()
+                state = await maintenance.status(scope_id)
+                return {"maintenance": state, "message": "维护已结束，请确认记忆模式。"}
             if action == "mode":
                 mode = payload.get("mode")
                 if mode not in {"active", "readonly", "paused"}:
                     raise PanelError("请选择开启、只读或暂停。")
                 if mode == "active":
-                    if not await plugin.worker.maintenance.check(
-                        force=True, owner_id=scope["owner_id"]
-                    ):
+                    summary = queue.summary(scope_id)
+                    if summary.get("maintenance") or summary.get("bank_missing"):
+                        raise PanelError("请先完成维护并恢复 Bank 映射，再开启记忆。")
+                    if not await maintenance.check(force=True, owner_id=scope["owner_id"]):
                         raise PanelError("旧范围仍在清理，请稍后开启。")
-                    self.unchanged(scope)
+                    latest = self.scope(scope_id)
+                    if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
+                        raise PanelError("记忆范围已变化，请刷新后重试。")
+                    summary = queue.summary(scope_id)
+                    if summary.get("maintenance") or summary.get("bank_missing"):
+                        raise PanelError("请先完成维护并恢复 Bank 映射，再开启记忆。")
                 queue.set_mode(scope_id, mode)
+                message = "记忆模式已更新。"
             elif action == "retry":
                 count = queue.request_retry(scope_id)
-                plugin.worker.wake.set()
-                return {"message": f"已登记 {count} 条失败任务重试。"}
-            elif action == "correct":
-                text = payload.get("text")
-                if not isinstance(text, str) or not text.strip() or len(text) > 1000:
-                    raise PanelError("更正内容需要 1 到 1000 字符。")
-                if scope["mode"] != "active":
-                    raise PanelError("请先开启记忆，再提交更正。")
-                administrator = request.username
-                if not administrator:
-                    raise PanelError("请使用 AstrBot 管理账号登录后提交更正。")
-                async with asyncio.timeout(10):
-                    record = await plugin.client.get_memory(scope["bank"], payload.get("memory_id", ""))
-                self.unchanged(scope)
-                identity = json.loads(scope["identity_json"])
-                incoming = Incoming(
-                    *identity[1:5], "panel-correction-" + secrets.token_hex(16),
-                    int(time.time()), text,
-                )
-                captured = queue.capture(incoming, "management-corrections", correction={
-                    "id": record["id"], "text": record["text"],
-                    "document_id": record.get("document_id") or "",
-                    "source": "administrator", "submitted_by": administrator,
-                })
-                queue.release(captured.task_id)
+                message = f"已登记 {count} 条失败任务重试。"
             elif action == "forget_prepare":
+                if not request.username:
+                    raise PanelError("请使用 AstrBot 管理账号登录。")
                 token = secrets.token_hex(6)
                 plugin.confirmations["panel:" + scope["owner_id"]] = {
                     "token": token, "source": scope_id, "bank": scope["bank"],
@@ -685,8 +661,8 @@ class MemoryPanel:
                 }
                 return {
                     "confirmation": token,
-                    "message": "同时删除聊天来源和待处理任务。若绑定了其他账号，"
-                    "这些账号共用的记忆也会清空。清空后保持暂停。",
+                    "message": "完整遗忘会清除旧 Bank、聊天来源和待办，显式登记新 Bank 并保持暂停。"
+                    "旧 Bank 的远端清理仍可能需要时间；清理完成后再开启记忆。",
                 }
             elif action == "forget_confirm":
                 confirmation = str(payload.get("confirmation", ""))
@@ -700,11 +676,8 @@ class MemoryPanel:
                 ):
                     raise PanelError("确认已失效，请重新选择完整遗忘。")
                 queue.forget(scope_id)
+                message = "完整遗忘已登记，新 Bank 保持暂停。请等待旧 Bank 清理完成后再开启记忆。"
             else:
                 raise PanelError("操作无效。")
             plugin.worker.wake.set()
-            return {"message": {
-                "mode": "记忆模式已更新。", "correct": "管理员更正已保存，后台正在整理。",
-                "forget_confirm": "记忆已暂停，后台正在清理。清理完成后，"
-                "选择「正常记忆」并点击「应用模式」可重新记录。",
-            }[action]}
+            return {"message": message}

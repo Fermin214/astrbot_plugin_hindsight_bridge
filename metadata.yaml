@@ -1,7 +1,7 @@
 name: astrbot_plugin_hindsight_bridge
 display_name: Hindsight Memory
 short_desc: 用 Hindsight 保存双方对话，跨会话召回长期记忆。
-desc: Hindsight 私聊长期记忆，支持可靠写入、用户隔离、查看导出、显式更正和完整遗忘。
+desc: Hindsight 私聊长期记忆桥接，支持可靠写入、用户隔离和故障恢复，记忆内容由官方面板管理。
 version: 0.1.0
 author: Fermin214
 repo: https://github.com/Fermin214/astrbot_plugin_hindsight_bridge

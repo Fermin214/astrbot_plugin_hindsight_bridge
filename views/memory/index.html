@@ -4,34 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>记忆管理</title>
+  <title>记忆服务管理</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <main class="shell">
     <header class="page-header">
       <div>
-        <h1>记忆管理</h1>
-        <p>在 AstrBot 中设置服务、查看和更正记忆。</p>
+        <h1>记忆服务管理</h1>
+        <p>连接记忆服务，管理账号、队列与维护状态。</p>
       </div>
     </header>
     <div id="update-error" class="notice error" role="status" hidden><span id="update-error-message"></span> <button id="refresh" type="button" disabled>重新获取</button></div>
     <div id="startup" class="notice" role="status">正在连接 AstrBot…</div>
-    <nav class="tabs" role="tablist" aria-label="记忆管理">
-      <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">记忆管理</button>
+    <nav class="tabs" role="tablist" aria-label="记忆服务管理">
+      <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">运行管理</button>
       <button id="tab-setup" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1" type="button">设置</button>
     </nav>
 
     <section id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
       <div id="setup-intro" class="notice" hidden>先安装或连接记忆服务，再选择模型、添加使用者并保存。</div>
-      <div class="section-heading"><h2>运行状态</h2></div>
-      <div class="service-state surface">
-        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-        <div><h3 id="status-label">状态未知</h3><p id="status-description" class="hint">等待服务返回状态。</p></div>
-      </div>
-      <div class="section-heading"><h2>用户运行状态</h2></div>
-      <div id="scope-statuses" class="scope-statuses"></div>
-
       <fieldset id="setup-fields" disabled>
         <legend class="sr-only">记忆服务设置</legend>
         <div class="section-heading">
@@ -71,6 +63,8 @@
               <label>API 地址<input id="api-url" type="url" inputmode="url" placeholder="http://hindsight:8888" required autocomplete="off"></label>
               <label id="api-key-field">连接密钥<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
             </div>
+            <label class="control-plane-setting">官方管理地址<input id="control-plane-url" type="url" inputmode="url" placeholder="https://memory.example.com 或 http://127.0.0.1:9999" autocomplete="off"></label>
+            <p class="hint">填写管理员浏览器可访问的 Control Plane 地址，可与 API 地址不同。不填写密钥、查询参数或片段；官方管理员单独登录。</p>
             <p id="key-help" class="hint">填写记忆服务的连接密钥。</p>
             <button id="check-connection" type="button">测试服务连接</button>
             <p id="connection-result" role="status" class="hint" hidden></p>
@@ -121,9 +115,17 @@
     </section>
 
     <section id="panel-memories" role="tabpanel" aria-labelledby="tab-memories">
-      <div class="section-heading"><h2>按用户管理记忆</h2><p>查看记住了什么，更正不准确的内容，或调整记忆的使用方式。</p></div>
+      <div class="section-heading"><h2>运行状态</h2></div>
+      <div class="service-state surface">
+        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+        <div><h3 id="status-label">状态未知</h3><p id="status-description" class="hint">等待服务返回状态。</p></div>
+      </div>
+      <div class="section-heading"><h2>用户运行状态</h2></div>
+      <div id="scope-statuses" class="scope-statuses"></div>
+
+      <div class="section-heading"><h2>账号与维护</h2><p>选择使用者，查看 Bank 映射并管理记忆模式与后台任务。</p></div>
       <fieldset id="memory-fields" disabled>
-        <legend class="sr-only">用户记忆操作</legend>
+        <legend class="sr-only">账号运行管理</legend>
         <div class="memory-toolbar surface">
           <label class="scope-picker">选择用户<select id="scope-picker"></select></label>
           <label>记忆模式<select id="scope-mode">
@@ -132,35 +134,33 @@
             <option value="paused">暂停记忆</option>
           </select></label>
           <button id="save-mode" type="button">应用模式</button>
-          <p id="mode-help" class="hint full-width">正常记忆会读取已有记忆，并保存新的记忆。</p>
+          <p id="mode-help" class="hint full-width"></p>
         </div>
-        <div id="scope-error" class="notice error" hidden></div>
-        <div class="memory-actions">
-          <button id="retry" type="button">重试后台任务</button>
-          <button id="export" type="button">导出记忆 JSON</button>
-          <button id="forget" type="button" class="danger-quiet">完整遗忘此用户</button>
+        <div id="scope-error" class="notice error" role="status" hidden></div>
+        <div class="surface settings-section">
+          <h3>官方内容管理</h3>
+          <div class="form-grid">
+            <label>官方管理地址<input id="control-plane-address" readonly spellcheck="false" aria-describedby="control-plane-help"></label>
+            <label>此用户的 Bank<input id="scope-bank" readonly spellcheck="false"></label>
+          </div>
+          <p id="control-plane-help" class="hint">选中并复制地址，在浏览器中访问；官方管理员单独登录后，使用此 Bank 浏览、搜索、更正、删除或导出记忆。</p>
+          <p id="control-plane-missing" class="hint" hidden>请在「设置」中填写官方管理地址。</p>
         </div>
-        <form id="search-form" class="search-bar" role="search">
-          <label class="sr-only" for="query">搜索记忆内容</label>
-          <input id="query" type="search" maxlength="4000" placeholder="输入想找的记忆，例如：饮食偏好" autocomplete="off">
-          <button type="submit" id="search" class="primary">搜索记忆</button>
-          <button type="button" id="show-all">查看全部</button>
-        </form>
-        <div class="list-heading">
-          <p id="list-summary" role="status">请选择用户。</p>
-          <button id="memory-updates" type="button" hidden>记忆有更新，点击查看</button>
+        <div class="surface settings-section">
+          <h3>队列与维护</h3>
+          <p id="queue-summary" class="hint"></p>
+          <p id="maintenance-state" class="hint" role="status"></p>
+          <p class="hint">维护会暂停采集与召回，等待任务排空。远端已接受的任务继续处理；显示「可维护」后，再到官方管理页面修改或删除 Bank。完成后点击「结束维护并恢复」。</p>
+          <label class="check-label"><input id="discard-pending" type="checkbox">丢弃尚未提交的待办（无法撤销，远端已接受的任务继续排空）</label>
+          <div class="actions">
+            <button id="maintenance-begin" type="button">开始维护</button>
+            <button id="maintenance-status" type="button">刷新维护状态</button>
+            <button id="maintenance-resume" type="button">结束维护并恢复</button>
+            <button id="retry" type="button">重试后台任务</button>
+          </div>
+          <p class="hint">Bank 已删除时，结束维护不会自动重建。任务状态不明或取消结果无法确认时，继续暂停；需要舍弃旧记忆并建立新映射，可使用完整遗忘。</p>
+          <button id="forget" class="danger-quiet" type="button">完整遗忘并轮换 Bank</button>
         </div>
-        <div id="memory-list" class="memory-list" aria-busy="false"></div>
-        <nav class="pagination" id="pagination" aria-label="记忆分页" hidden>
-          <label class="page-size-label">每页<select id="page-size"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label>
-          <button id="first" type="button">首页</button>
-          <button id="previous" type="button">上一页</button>
-          <div id="page-links" class="page-links"></div>
-          <span id="page-number"></span>
-          <button id="next" type="button">下一页</button>
-          <button id="last" type="button">末页</button>
-          <form id="page-jump" class="page-jump"><label for="page-input">跳至</label><input id="page-input" type="number" min="1" step="1" required aria-label="跳转页码"><button type="submit">跳转</button></form>
-        </nav>
       </fieldset>
       <div id="no-scopes" class="empty" hidden><h3>还没有添加使用者</h3><p>在「设置」中添加使用者并保存。</p><button id="go-setup" type="button">前往设置</button></div>
     </section>
@@ -170,28 +170,12 @@
     </div>
   </main>
 
-  <dialog id="detail-dialog" aria-labelledby="detail-heading">
-    <div class="dialog-header"><h2 id="detail-heading">记忆详情</h2><button type="button" id="close-detail" aria-label="关闭记忆详情">关闭</button></div>
-    <div id="detail-content" class="detail-content"></div>
-    <section id="corrections-section" hidden><h3>更正记录</h3><div id="corrections"></div></section>
-    <form id="correction-form">
-      <fieldset id="correction-fields">
-        <legend class="sr-only">更正这条记忆</legend>
-        <label for="correction-text">这条记忆哪里不准确？</label>
-        <textarea id="correction-text" rows="4" maxlength="1000" required placeholder="写下准确的信息，例如：我现在不喝咖啡，改喝茶了。"></textarea>
-        <p class="hint">更正会作为补充说明用于之后的记忆查询，原记忆仍会保留。</p>
-        <button type="submit" id="save-correction" class="primary">保存更正</button>
-      </fieldset>
-    </form>
-    <p id="detail-feedback" role="status" class="hint"></p>
-  </dialog>
-
   <dialog id="forget-dialog" aria-labelledby="forget-heading" aria-describedby="forget-description">
-    <div class="dialog-header"><h2 id="forget-heading">完整遗忘此用户？</h2></div>
-    <p id="forget-description">此操作会清除此用户的全部记忆和更正记录，无法撤销。请确认选择的用户无误。</p>
+    <div class="dialog-header"><h2 id="forget-heading">完整遗忘并轮换 Bank？</h2></div>
+    <p id="forget-description">此操作会清除此用户的全部记忆、聊天来源和待办，并登记新的 Bank，无法撤销。远端清理完成前保持暂停。</p>
     <p id="forget-user" class="forget-user"></p>
     <p id="forget-message" class="hint"></p>
-    <label class="check-label"><input id="forget-agree" type="checkbox">我确认清空这个用户的全部记忆</label>
+    <label class="check-label"><input id="forget-agree" type="checkbox">我确认清空这个用户的全部记忆并轮换 Bank</label>
     <div class="actions dialog-actions"><button type="button" id="cancel-forget" autofocus>取消</button><button type="button" id="confirm-forget" class="danger" disabled>确认完整遗忘</button></div>
     <p id="forget-feedback" class="hint" role="status"></p>
   </dialog>

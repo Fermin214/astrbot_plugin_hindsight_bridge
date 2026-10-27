@@ -264,18 +264,10 @@ class HindsightClient:
                 raise HindsightError("server_auth_not_enforced")
             self.auth_until = time.monotonic() + 60
 
-    async def ensure_bank(self, bank: str) -> None:
-        await self.ensure_auth()
+    async def create_bank(self, bank: str) -> None:
         if not bank.startswith("abm-v1-"):
             raise HindsightError("unowned_bank", permanent=True)
-        try:
-            await self.request("GET", self.bank_path(bank) + "/config")
-        except HindsightError as exc:
-            if exc.code != "http_404":
-                raise
-            await self.request(
-                "PUT", self.bank_path(bank), body={"name": "AstrBot Memory"}
-            )
+        await self.request("PUT", self.bank_path(bank), body={"name": "AstrBot Memory"})
 
     async def recall(
         self,

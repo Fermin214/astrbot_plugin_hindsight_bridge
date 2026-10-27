@@ -78,6 +78,7 @@ class Worker:
 
     async def process(self, row):
         task_id = row["id"]
+        self.outbox.in_flight.add(task_id)
         try:
             if not self.outbox.current(row, writing=False):
                 return
@@ -98,10 +99,29 @@ class Worker:
             if root.status == "not_found":
                 if row["accepted"] or row["state"] == "cancel_requested":
                     raise QueueError("accepted_operation_missing")
+                if self.outbox.control.maintenance(row["connection_id"], row["bank"]):
+                    raise QueueError("maintenance_unknown_operation")
                 if not self.outbox.current(row):
                     self.outbox.update(task_id, "unknown", delay=self.poll_interval)
                     return
-                await self.client.ensure_bank(row["bank"])
+                first_creation = self.outbox.control.bank_state(
+                    row["connection_id"], row["bank"]
+                ) == "new"
+                await self.client.ensure_auth()
+                exists = await self.client.bank_exists(row["bank"])
+                if not self.outbox.current(row):
+                    self.outbox.update(task_id, "unknown", delay=self.poll_interval)
+                    return
+                if exists or first_creation:
+                    self.outbox.control.set_bank_state(
+                        row["connection_id"], row["bank"], "established"
+                    )
+                else:
+                    raise HindsightError("bank_missing", permanent=True)
+                if not exists:
+                    # Only the creation PUT crosses the durable first-creation
+                    # boundary; a failed read must leave a new Bank retryable.
+                    await self.client.create_bank(row["bank"])
                 if not self.outbox.current(row, writing=False):
                     self.outbox.control.retired_request_returned(
                         row["connection_id"], row["bank"]
@@ -167,6 +187,11 @@ class Worker:
         except HindsightError as exc:
             current = self.outbox.get(task_id)
             attempts = current["attempts"] + 1
+            if exc.code == "bank_missing":
+                self.outbox.control.set_bank_state(
+                    row["connection_id"], row["bank"], "missing"
+                )
+                self.outbox.apply_control()
             if exc.authentication:
                 self.outbox.pause_connection(exc.code)
             state = current["state"]
@@ -194,6 +219,8 @@ class Worker:
                 retry_requested=0,
             )
             self.logger.error("Hindsight worker: %s", type(exc).__name__)
+        finally:
+            self.outbox.in_flight.discard(task_id)
 
     async def retry_failed(self, row, root: Operation, nodes: dict):
         failed = {key for key, node in nodes.items() if node["status"] == "failed"}

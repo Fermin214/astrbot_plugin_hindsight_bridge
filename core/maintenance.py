@@ -15,6 +15,113 @@ class Maintenance:
         self.attempted_startup = False
         self.next_startup = 0.0
 
+    def _scope(self, scope_id):
+        scope = self.outbox.scope_owner(scope_id)
+        if not scope or not scope["allowed"]:
+            raise QueueError("scope_not_available")
+        return scope
+
+    def begin(self, scope_id, *, discard_pending=False):
+        scope, queue = self._scope(scope_id), self.outbox
+        if queue.recovering:
+            raise QueueError("scope_not_available")
+        record = queue.control.begin_maintenance(
+            queue.connection_id, scope["owner_id"], discard_pending=discard_pending
+        )
+        queue.apply_control()
+        # Remove history anchors at the boundary so a late assistant callback
+        # cannot attach an earlier turn after maintenance ends.
+        with queue.db:
+            queue.db.execute(
+                "DELETE FROM window WHERE connection_id=? AND scope_id IN "
+                "(SELECT scope_id FROM scopes WHERE connection_id=? AND bank=?)",
+                (queue.connection_id, queue.connection_id, scope["bank"]),
+            )
+        if record["discard_pending"]:
+            rows = queue.db.execute(
+                "SELECT * FROM outbox WHERE connection_id=? AND bank=? "
+                "AND state NOT IN ('done','discarded')",
+                (queue.connection_id, scope["bank"]),
+            ).fetchall()
+            for row in rows:
+                if row["id"] in queue.in_flight:
+                    continue
+                request = queue.control.request(row["operation_id"])
+                sent = bool(request and request["dispatched"])
+                if (not sent and not row["accepted"]) or (
+                    row["state"] == "failed" and row["accepted"]
+                ):
+                    queue.control.record_request(row, scope["owner_id"], cancel=True)
+                    queue.update(row["id"], "discarded", retry_requested=0)
+        return queue.control.maintenance(queue.connection_id, scope["bank"])
+
+    async def status(self, scope_id):
+        scope, queue = self._scope(scope_id), self.outbox
+        record = queue.control.maintenance(queue.connection_id, scope["bank"])
+        if record is None:
+            return {"phase": "inactive", "ready": False}
+        rows = queue.db.execute(
+            "SELECT id,operation_id,state,accepted,cancel_intent FROM outbox "
+            "WHERE connection_id=? AND bank=? AND state NOT IN ('done','discarded')",
+            (queue.connection_id, scope["bank"]),
+        ).fetchall()
+        pending = [
+            row for row in rows
+            if row["state"] != "cancelled" or row["accepted"] or (
+                (request := queue.control.request(row["operation_id"]))
+                and (request["dispatched"] or request["accepted"])
+            )
+        ]
+        bank_tasks = {
+            row["id"] for row in queue.db.execute(
+                "SELECT id FROM outbox WHERE connection_id=? AND bank=?",
+                (queue.connection_id, scope["bank"]),
+            )
+        }
+        inflight = bool(bank_tasks & queue.in_flight)
+        remote_active = []
+        if not pending and not inflight:
+            async with asyncio.timeout(10):
+                await self.client.ensure_auth()
+                remote_active = [
+                    op.id for op in await self.client.list_operations(scope["bank"])
+                    if op.status in {"pending", "processing", "cancelled"}
+                ]
+        ready = not pending and not inflight and not remote_active
+        phase = "ready" if ready else "draining"
+        with queue.control.db:
+            queue.control.db.execute(
+                "UPDATE maintenance SET phase=? WHERE connection_id=? AND bank=?",
+                (phase, queue.connection_id, scope["bank"]),
+            )
+        return {
+            **record, "phase": phase, "ready": ready,
+            "pending": len(pending), "in_flight": inflight,
+            "remote_active": len(remote_active),
+            "bank_missing": queue.control.bank_state(queue.connection_id, scope["bank"]) == "missing",
+        }
+
+    async def resume(self, scope_id):
+        scope, queue = self._scope(scope_id), self.outbox
+        if queue.recovering:
+            raise QueueError("scope_not_available")
+        state = await self.status(scope_id)
+        if not state["ready"]:
+            raise QueueError("maintenance_pending")
+        async with asyncio.timeout(10):
+            exists = await self.client.bank_exists(scope["bank"])
+        if not exists:
+            queue.control.set_bank_state(queue.connection_id, scope["bank"], "missing")
+            queue.apply_control()
+            raise QueueError("bank_missing")
+        latest = self._scope(scope_id)
+        if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
+            raise QueueError("scope_not_available")
+        queue.control.set_bank_state(queue.connection_id, scope["bank"], "established")
+        queue.control.finish_maintenance(queue.connection_id, scope["owner_id"])
+        queue.apply_control()
+        return {"phase": "inactive", "ready": False}
+
     async def cancel_active(self, bank, operation):
         if operation.status not in {"pending", "processing"}:
             return

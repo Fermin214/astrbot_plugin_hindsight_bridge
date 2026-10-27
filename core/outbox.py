@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from .control import Control, QueueError
 from .identity import Incoming, Scope, canonical, sha256
 from .locking import exclusive_lock
-from .materials import Message, correction_payload, request_digest, retain_payload
+from .materials import Message, request_digest, retain_payload
 
 SCHEMA_VERSION = 5
 ACTIVE_STATES = ("ready", "submitting", "unknown", "tracking", "cancel_requested")
@@ -57,6 +57,7 @@ class Outbox:
         self.agent_id = agent_id.strip()
         self.permission_pairs = None
         self.recovering = False
+        self.in_flight = set()
         self.max_tasks, self.max_bytes = max_tasks, max_bytes
         if zone is not None:
             ZoneInfo(zone)
@@ -143,6 +144,12 @@ class Outbox:
             raise
 
     def _schema(self):
+        if self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corrections'"
+        ).fetchone():
+            if self.db.execute("SELECT 1 FROM corrections LIMIT 1").fetchone():
+                raise QueueError("legacy_corrections_require_handover")
+            self.db.execute("DROP TABLE corrections")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -195,12 +202,6 @@ class Outbox:
                 operation_id TEXT NOT NULL, parent_id TEXT, status TEXT NOT NULL,
                 PRIMARY KEY(task_id,operation_id)
             );
-            CREATE TABLE IF NOT EXISTS corrections (
-                task_id INTEGER PRIMARY KEY REFERENCES outbox(id),
-                memory_id TEXT NOT NULL, document_id TEXT NOT NULL,
-                original_text TEXT NOT NULL, text TEXT NOT NULL,
-                occurred_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS replies (
                 user_task_id INTEGER PRIMARY KEY REFERENCES window(task_id) ON DELETE CASCADE,
                 task_id INTEGER NOT NULL REFERENCES outbox(id),
@@ -220,8 +221,6 @@ class Outbox:
             ("scopes", "principal_id", "TEXT NOT NULL DEFAULT ''"),
             ("scopes", "revision", "INTEGER NOT NULL DEFAULT 0"),
             ("outbox", "cancel_intent", "INTEGER NOT NULL DEFAULT 0"),
-            ("corrections", "source", "TEXT NOT NULL DEFAULT 'user'"),
-            ("corrections", "submitted_by", "TEXT NOT NULL DEFAULT ''"),
         ):
             columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
             if column not in columns:
@@ -324,10 +323,6 @@ class Outbox:
                         changed,
                     ),
                 )
-            self.db.execute(
-                "DELETE FROM corrections WHERE task_id IN "
-                "(SELECT id FROM outbox WHERE state='discarded')"
-            )
             for task in self.db.execute(
                 "SELECT o.*,s.owner_id FROM outbox o JOIN scopes s USING(connection_id,scope_id) "
                 "WHERE o.state<>'discarded'"
@@ -503,6 +498,8 @@ class Outbox:
                     not self.recovering
                     and row["allowed"]
                     and row["mode"] == "active"
+                    and not self.control.maintenance(self.connection_id, row["bank"])
+                    and self.control.bank_state(self.connection_id, row["bank"]) != "missing"
                     and not self.get(task["id"])["cancel_intent"]
                 )
             )
@@ -515,7 +512,6 @@ class Outbox:
         incoming: Incoming,
         conversation_id: str,
         *,
-        correction=None,
         history_before="",
     ) -> Capture:
         if (
@@ -525,33 +521,9 @@ class Outbox:
         ):
             raise QueueError("invalid_capture")
         scope = self.scope(incoming)
-        if self.recovering or not scope["allowed"] or scope["mode"] != "active":
+        if not self.can_recall(scope) or scope["mode"] != "active":
             raise QueueError("scope_not_active")
-        if correction is not None and (
-            not isinstance(correction, dict)
-            or not isinstance(correction.get("id"), str)
-            or not correction["id"]
-            or not isinstance(correction.get("text"), str)
-            or len(incoming.text) > 1000
-            or len(correction["text"]) > 8000
-        ):
-            raise QueueError("invalid_correction")
-        source_digest = sha256(
-            incoming.text
-            if correction is None
-            else canonical({"text": incoming.text, "target": correction["id"]})
-        )
-        if correction is not None and correction.get("source") == "administrator":
-            if (
-                not isinstance(correction.get("submitted_by"), str)
-                or not correction["submitted_by"].strip()
-                or len(correction["submitted_by"]) > 200
-            ):
-                raise QueueError("invalid_correction")
-            source_digest = sha256(canonical({
-                "text": incoming.text, "target": correction["id"],
-                "source": "administrator", "submitted_by": correction["submitted_by"],
-            }))
+        source_digest = sha256(incoming.text)
         identity = incoming.scope(self.deployment_id)
         key = identity.event_key(incoming.message_id)
         args = (self.connection_id, identity.id, key)
@@ -627,8 +599,6 @@ class Outbox:
                 owner_id=scope["owner_id"],
                 agent_id=self.agent_id,
             )
-            if correction is not None:
-                payload = correction_payload(payload, correction, incoming.text)
             task_id = self._store_task(scope, payload, now)
             self.db.execute(
                 "INSERT INTO events(connection_id,scope_id,event_key,text_sha256,task_id,"
@@ -641,22 +611,6 @@ class Outbox:
                     incoming.received_at,
                 ),
             )
-            if correction is not None:
-                self.db.execute(
-                    "INSERT INTO corrections "
-                    "(task_id,memory_id,document_id,original_text,text,occurred_at,source,submitted_by) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        task_id,
-                        correction["id"],
-                        correction.get("document_id") or "",
-                        correction["text"],
-                        incoming.text,
-                        incoming.iso_timestamp,
-                        correction.get("source", "user"),
-                        correction.get("submitted_by", ""),
-                    ),
-                )
             self.db.execute(
                 "INSERT INTO window VALUES (?,?,?,?,?,?,?,?,?)",
                 (
@@ -805,24 +759,6 @@ class Outbox:
             (self.connection_id, scope_id, conversation_id),
         ).fetchone()
 
-    def corrections(self, scope):
-        if not self.can_recall(scope, manual=True):
-            raise QueueError("scope_not_available")
-        rows = self.db.execute(
-            "SELECT c.*,o.state FROM corrections c JOIN outbox o ON o.id=c.task_id "
-            "JOIN scopes s ON s.connection_id=o.connection_id AND s.scope_id=o.scope_id "
-            "WHERE o.connection_id=? AND s.owner_id=? AND o.bank=? AND o.generation=? "
-            "AND o.state<>'discarded' ORDER BY c.task_id",
-            (
-                self.connection_id,
-                scope["owner_id"],
-                scope["bank"],
-                scope["generation"],
-            ),
-        ).fetchall()
-        # A second correction to the same source supersedes the earlier local overlay.
-        return list({r["memory_id"]: dict(r) for r in rows}.values())
-
     def prune_window(self, now=None):
         self.db.execute(
             "DELETE FROM window WHERE received_at<?", ((now or time.time()) - 1800,)
@@ -843,6 +779,19 @@ class Outbox:
     def _due(self, exclude_scopes):
         exclusion = ""
         args = [self.connection_id, time.time()]
+        blocked = {
+            row["bank"] for row in self.control.db.execute(
+                "SELECT bank FROM maintenance WHERE connection_id=? UNION "
+                "SELECT bank FROM banks WHERE connection_id=? AND state='missing'",
+                (self.connection_id, self.connection_id),
+            )
+        }
+        if blocked:
+            exclusion += (
+                " AND (o.state NOT IN ('ready','failed') OR o.bank NOT IN ("
+                + ",".join("?" for _ in blocked) + "))"
+            )
+            args.extend(sorted(blocked))
         active = self.db.execute(
             "SELECT COUNT(*) FROM outbox WHERE connection_id=? AND state IN "
             "('submitting','unknown','tracking','cancel_requested')",
@@ -980,7 +929,7 @@ class Outbox:
 
     def request_retry(self, scope_id: str) -> int:
         scope = self.scope_owner(scope_id)
-        if not scope or self.recovering or scope["mode"] != "active":
+        if not scope or not self.can_recall(scope, manual=True) or scope["mode"] != "active":
             raise QueueError("scope_not_active")
         with self.db:
             cursor = self.db.execute(
@@ -1024,6 +973,8 @@ class Outbox:
             "last_error": row["last_error"] if row else "",
             "oldest_seconds": max(0, int(time.time() - oldest)) if oldest else 0,
             "tasks": [{"id": r["id"], "state": r["state"]} for r in tasks],
+            "maintenance": self.control.maintenance(self.connection_id, scope["bank"]),
+            "bank_missing": self.control.bank_state(self.connection_id, scope["bank"]) == "missing",
         }
 
     def scope_owner(self, scope_id):
@@ -1044,6 +995,8 @@ class Outbox:
             and owner["revision"] == scope["revision"]
             and latest["revision"] == scope["revision"]
             and latest["bank"] == scope["bank"]
+            and not self.control.maintenance(self.connection_id, scope["bank"])
+            and self.control.bank_state(self.connection_id, scope["bank"]) != "missing"
             and (manual or latest["mode"] in {"active", "readonly"})
         )
 
@@ -1051,6 +1004,11 @@ class Outbox:
         row = self.scope_owner(scope_id)
         if not row or not row["allowed"] or self.recovering:
             raise QueueError("scope_not_available")
+        if mode != "paused":
+            if self.control.maintenance(self.connection_id, row["bank"]):
+                raise QueueError("maintenance_active")
+            if self.control.bank_state(self.connection_id, row["bank"]) == "missing":
+                raise QueueError("bank_missing")
         self.control.set_mode(self.connection_id, row["owner_id"], mode, now=now)
         self.apply_control()
         return self.scope_owner(scope_id)

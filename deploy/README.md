@@ -6,7 +6,39 @@ Hindsight 负责保存、整理和查找记忆，AstrBot 插件通过 API 连接
 
 下文是服务维护者可选的 **手工 Linux 部署方式**，适合自行维护后端模型、网络和数据库的场景。完成后，在设置中选择「连接已有 Hindsight」，填写服务 **API 地址**和 **连接密钥**。
 
-向导生成的配套服务文件位于执行账号的 `~/.local/share/astrbot-memory-服务编号/`，准确路径由安装命令显示。配套部署使用独立的 Compose 项目和数据卷，AstrBot 在 Docker 中时不开放主机 API 端口，也不开放独立管理网页端口。下文的端口、服务名和数据卷名称适用于手工部署模板；维护配套服务时应使用其安装目录中的配置。
+向导生成的配套服务文件位于执行账号的 `~/.local/share/astrbot-memory-服务编号/`，准确路径由安装命令显示。设置 `HINDSIGHT_INSTALL_ROOT` 可改变安装根目录；重跑和卸载必须使用同一根目录。配套部署使用独立的 Compose 项目和数据卷。
+
+| AstrBot 运行方式 | 插件数据 API | 模型配置接口 | 官方 Control Plane |
+| --- | --- | --- | --- |
+| Linux 原生 | 主机环回 `8888` | 主机环回 `8889` | 主机环回 `9999` |
+| Docker 桥接网络 | 同网络 `memory-服务编号:8888` | 同网络 `memory-服务编号:8766` | 主机环回 `9999` |
+
+Docker 安装器只为 Hindsight 加入 AstrBot 的一个可出站自定义桥接网络。需要选择时，在执行生成命令的终端先设置 `export HINDSIGHT_ASTRBOT_NETWORK=网络名`；网络必须已连接 AstrBot。模型服务地址在该网络及 Hindsight 的出站网络中需要可达。
+
+两种方式的官方面板都能通过 SSH 隧道从管理员电脑访问。容器名称与 `8766` 接口用于插件通信，不能作为浏览器管理地址。面板随模型配置成功后的 Hindsight 进程启动；安装结束后先完成模型设置，再打开面板。
+
+重跑沿用数据库、模型配置卷和 `.env` 中的全部已有凭据，只为缺少 CP 配置的安装补入独立 CP Key 和端口。数据库密码、API Key、模型管理 Key、Worker 身份或已保存端口与生成命令不一致时，安装器报错，需使用一致的安装状态重新生成命令。端口被其他进程占用时，释放端口或通过调用方修改安装状态中的 `api_port`、`management_port`、`control_plane_port` 后重新生成；已有安装改端口时，安装目录 `.env` 中的对应端口也需改为同一个值。安装器不自动改用另一个端口。
+
+下文的端口、服务名和数据卷名称适用于手工部署模板；维护配套服务时应使用其安装目录中的配置。
+
+### 安装器接口
+
+`core.installer.installation()` 的返回值约定：
+
+| 字段 | 含义 |
+| --- | --- |
+| `command` | 在 AstrBot 所在 Linux Docker 主机执行的安装命令，包含部署凭据，应按敏感内容保存和显示 |
+| `api_url` | AstrBot 后台访问 Hindsight 的数据 API 地址 |
+| `management_url` | 插件后台调用模型配置进程的内部接口地址 |
+| `control_plane_url`、`browser_url` | 同一个浏览器地址，默认 `http://127.0.0.1:9999`；远程使用时需建立 SSH 隧道 |
+| `control_plane_key_file` | 服务 `.env` 的路径表达式，使用执行账号的 HOME 或 `HINDSIGHT_INSTALL_ROOT` 展开 |
+| `control_plane_key_env` | 固定为 `HINDSIGHT_CP_ACCESS_KEY`，指明 `.env` 中的面板登录 Key |
+
+端口由安装状态的 `api_port`、`management_port`、`control_plane_port` 设置，默认分别为 `8888`、`8889`、`9999`。调用方可通过 `control_plane_url` 关键字参数传入手填浏览器地址，也可使用安装状态中的同名字段；关键字参数优先。此地址独立于 `api_url`，支持 SSH 本地转发地址和独立 HTTPS 地址，不包含登录信息或密钥。
+
+CP Key 在生成安装命令时独立随机生成，落盘于该安装所属 `.env`，权限为 `0600`，服务目录权限为 `0700`；已有 CP Key 在重跑时沿用。安装结果只返回获取位置，不返回明文 CP Key。调用方只在用户主动生成命令时显示命令，不把它或 CP Key 放进 bootstrap、普通状态响应、诊断日志、URL 或剪贴板自动操作。
+
+需要登录时，在服务器的私密终端进入安装命令显示的目录，用文本编辑器打开 `.env`，读取 `HINDSIGHT_CP_ACCESS_KEY` 的值。不要把行首变量名或值两侧的引号复制进登录框。它与插件连接 API 的 `HINDSIGHT_API_TENANT_API_KEY`、模型管理接口的 `ASTRBOT_MEMORY_MANAGEMENT_KEY` 分别使用。
 
 ## 准备条件
 
@@ -38,7 +70,7 @@ cd astrbot_plugin_hindsight_bridge/deploy
 python3 init-env.py
 ```
 
-脚本会生成 `.env` 文件，并填好数据库密码、服务 API Key 和管理面板登录 Key。提示 `.env already exists` 表示配置文件已存在，直接编辑已有文件即可。
+脚本会生成权限为 `0600` 的 `.env` 文件，并分别生成数据库密码、服务 API Key 和管理面板登录 Key。再次执行会提示使用已有 `.env`，凭据、Worker 身份和端口继续沿用；需要修改时直接编辑该文件。
 
 用文本编辑器打开 `deploy/.env`；文件名以点开头，Linux 文件管理器可能需要打开“显示隐藏文件”才能看到。
 
@@ -96,7 +128,7 @@ docker compose logs --tail 100 hindsight db
 
 API 默认使用主机的 `8888` 端口，网页管理面板使用 `9999`。二者默认只允许从这台主机访问，数据库不对外开放端口。
 
-如果启动提示端口已占用，修改 `.env` 中的 `HINDSIGHT_API_PORT` 或 `HINDSIGHT_UI_PORT`，再执行启动命令。同一 Docker 网络中的 API 地址仍使用容器端口 `8888`。
+如果启动提示端口已占用，修改 `.env` 中的 `HINDSIGHT_API_PORT` 或 `HINDSIGHT_UI_PORT`，再执行启动命令。这两个变量只改变主机映射，容器内的 API 和 CP 仍分别使用 `8888`、`9999`。保留已有密码、Key、Worker 和数据卷。
 
 ## 让 AstrBot 容器连接 Hindsight
 
@@ -141,19 +173,37 @@ docker compose up -d
 
 AstrBot 位于另一台主机时，需要给它提供可访问的 HTTPS API 地址，具体网络入口由服务维护者配置。
 
-## 可选：打开 Hindsight 管理面板
+## 五、打开官方 Control Plane
 
-在部署主机的浏览器中打开 `http://127.0.0.1:9999`，输入 `.env` 中的 `HINDSIGHT_CP_ACCESS_KEY` 登录。
+官方面板负责浏览、搜索、更正、删除、Bank 内容和原生导入导出。Bridge 页面负责连接、使用账号与 Bank 映射、模式、队列、诊断、维护和恢复。面板中的破坏性操作前，先在 Bridge 中暂停相关范围并处理队列，具体步骤见[数据维护](../docs/DATA-MAINTENANCE.md)。
 
-服务部署在远程 Linux 主机时，可在自己电脑的终端建立转发：
+在部署主机的浏览器中打开 `http://127.0.0.1:9999`，输入 `.env` 中的 `HINDSIGHT_CP_ACCESS_KEY` 登录。配套安装器和手工 Compose 都提供此环回入口，修改过网页主机端口时使用修改后的值。
+
+### 无域名：SSH 隧道
+
+服务部署在远程 Linux 主机时，在管理员电脑的终端执行；Linux 原生 AstrBot 与 Docker AstrBot 使用相同步骤，不需要域名：
 
 ```bash
-ssh -N -L 9999:127.0.0.1:9999 your-user@your-server
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9999:127.0.0.1:9999 your-user@your-server
 ```
 
-把 `your-user@your-server` 换成服务器登录信息，保持终端打开，再访问自己电脑的 `http://127.0.0.1:9999`。改过服务端网页端口时，替换命令中第二个 `9999`。
+把 `your-user@your-server` 换成服务器登录信息，保持终端打开，在自己电脑访问 `http://127.0.0.1:9999`。登录 Key 仍从服务器的受限 `.env` 读取。
 
-这个独立管理面板用于后端维护。日常查看、搜索、更正、导出、模式切换和完整遗忘都在 AstrBot 插件的「记忆管理」视图中完成。
+命令中第一个 `9999` 是管理员电脑的端口，最后一个是服务器 CP 主机端口。电脑的 `9999` 已占用时，第一个改为 `19999`，浏览器地址也改为 `http://127.0.0.1:19999`；服务器使用其他端口时修改最后一个值。将实际浏览器地址填入 `control_plane_url`，不改动插件的 API 地址。
+
+### 有域名：独立 HTTPS 入口
+
+反向代理与 Hindsight 位于同一台 Linux 主机时，为官方面板分配独立域名，例如 `memory.example.com`。保留 CP 的环回绑定，反向代理接入服务器 `127.0.0.1:9999`，公开入口使用 HTTPS。Caddy 可使用如下独立站点：
+
+```caddyfile
+memory.example.com {
+    reverse_proxy 127.0.0.1:9999
+}
+```
+
+将域名解析到服务器，按所用反向代理配置证书和 HTTPS，浏览器管理地址填写 `https://memory.example.com`，登录仍使用 CP Key。AstrBot 使用自己的独立入口。反向代理若运行在容器内，它的 `127.0.0.1` 指向代理容器，需要为代理单独配置可到达 CP 的网络或主机访问方式。
+
+只代理 CP 的网页端口，API 与模型配置接口继续用于内部通信。CP 通过容器内 `HINDSIGHT_CP_DATAPLANE_API_URL` 和数据面 Key 访问 API，浏览器不需要取得数据面 Key。使用独立站点根路径，避免将 CP 塞入 AstrBot 的子路径。
 
 ## 日常维护
 
@@ -172,3 +222,9 @@ ssh -N -L 9999:127.0.0.1:9999 your-user@your-server
 完整备份需要包含数据库和 `.env`，以及插件数据。操作步骤见 [备份与恢复](../docs/DATA-MAINTENANCE.md)。数据库密码只在空数据库首次初始化时生效，已有数据库改密要使用 PostgreSQL 的密码修改流程。
 
 模板设置 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0`，持续保留后台操作记录，供任务重试和数据恢复使用。磁盘维护通过数据库备份和管理工具进行，不直接删除数据卷。
+
+## 卸载边界
+
+配套安装在插件的服务维护入口生成专属卸载命令。它核对安装身份、目录和 Compose 资源标签，仅删除该安装所属的容器、数据卷、专属网络和安装目录；其中记忆数据会全部删除。共享的 AstrBot 网络、镜像、Docker、AstrBot 本身及外部已有 Hindsight 服务均独立管理。
+
+手工 Compose 由部署者维护，在自己的部署目录运行 `docker compose stop` 可停止服务并保留数据。决定删除该手工部署的记忆数据前先完成备份，再核实 Compose 项目、卷名和归属；不要使用全局 Docker 清理命令。

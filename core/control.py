@@ -34,7 +34,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -58,6 +58,7 @@ class Control:
                 CREATE TABLE IF NOT EXISTS banks(
                     connection_id TEXT NOT NULL, owner_id TEXT NOT NULL,
                     generation INTEGER NOT NULL, bank TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'established',
                     PRIMARY KEY(connection_id,bank),
                     UNIQUE(connection_id,owner_id,generation)
                 );
@@ -85,9 +86,21 @@ class Control:
                     accepted INTEGER NOT NULL DEFAULT 0,
                     cancel_intent INTEGER NOT NULL DEFAULT 0
                 );
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS maintenance(
+                    connection_id TEXT NOT NULL, bank TEXT NOT NULL,
+                    started_at REAL NOT NULL, discard_pending INTEGER NOT NULL DEFAULT 0,
+                    phase TEXT NOT NULL DEFAULT 'draining',
+                    PRIMARY KEY(connection_id,bank)
+                );
             """)
+            if "state" not in {
+                row["name"] for row in self.db.execute("PRAGMA table_info(banks)")
+            }:
+                self.db.execute(
+                    "ALTER TABLE banks ADD COLUMN state TEXT NOT NULL DEFAULT 'established'"
+                )
             with self.db:
+                self.db.execute("PRAGMA user_version=2")
                 for key, value in (
                     ("deployment_id", deployment_id or str(uuid.uuid4())),
                     ("control_id", str(uuid.uuid4())),
@@ -162,8 +175,8 @@ class Control:
                 ),
             )
             self.db.execute(
-                "INSERT INTO banks VALUES (?,?,?,?)",
-                (connection, owner_id, generation, bank),
+                "INSERT INTO banks(connection_id,owner_id,generation,bank,state) VALUES (?,?,?,?,?)",
+                (connection, owner_id, generation, bank, "established" if legacy else "new"),
             )
             self.db.execute(
                 "INSERT INTO accounts VALUES (?,?,?,?,?,?)",
@@ -256,8 +269,8 @@ class Control:
             )
             self.add_refs(fid, refs)
             self.db.execute(
-                "INSERT INTO banks VALUES (?,?,?,?)",
-                (connection, owner_id, generation, bank),
+                "INSERT INTO banks(connection_id,owner_id,generation,bank,state) VALUES (?,?,?,?,?)",
+                (connection, owner_id, generation, bank, "new"),
             )
             self.db.execute(
                 "UPDATE owners SET bank=?,generation=?,mode='paused',accept_from=?,"
@@ -275,6 +288,69 @@ class Control:
             "INSERT OR IGNORE INTO erasure_refs VALUES (?,?,?)",
             ((forget_id, kind, ref) for kind, ref in refs),
         )
+
+    def bank_state(self, connection, bank):
+        row = self.db.execute(
+            "SELECT state FROM banks WHERE connection_id=? AND bank=?", (connection, bank)
+        ).fetchone()
+        if row is None:
+            raise QueueError("bank_mapping_missing")
+        return row["state"]
+
+    def set_bank_state(self, connection, bank, state):
+        if state not in {"new", "established", "missing"}:
+            raise QueueError("invalid_bank_state")
+        with self.db:
+            self.db.execute(
+                "UPDATE banks SET state=? WHERE connection_id=? AND bank=?",
+                (state, connection, bank),
+            )
+            if state == "missing":
+                self.db.execute(
+                    "UPDATE owners SET revision=revision+1 WHERE connection_id=? AND bank=?",
+                    (connection, bank),
+                )
+                self.bump()
+
+    def maintenance(self, connection, bank):
+        row = self.db.execute(
+            "SELECT * FROM maintenance WHERE connection_id=? AND bank=?", (connection, bank)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def begin_maintenance(self, connection, owner_id, *, discard_pending=False):
+        owner = self.owner(connection, owner_id)
+        if not owner:
+            raise QueueError("memory_owner_missing")
+        with self.db:
+            self.db.execute(
+                "INSERT INTO maintenance(connection_id,bank,started_at,discard_pending) "
+                "VALUES (?,?,?,?) ON CONFLICT(connection_id,bank) DO UPDATE SET "
+                "discard_pending=MAX(discard_pending,excluded.discard_pending),phase='draining'",
+                (connection, owner["bank"], time.time(), int(discard_pending)),
+            )
+            self.db.execute(
+                "UPDATE owners SET revision=revision+1 WHERE connection_id=? AND owner_id=?",
+                (connection, owner_id),
+            )
+            self.bump()
+        return self.maintenance(connection, owner["bank"])
+
+    def finish_maintenance(self, connection, owner_id):
+        owner = self.owner(connection, owner_id)
+        if not owner:
+            raise QueueError("memory_owner_missing")
+        with self.db:
+            self.db.execute(
+                "DELETE FROM maintenance WHERE connection_id=? AND bank=?",
+                (connection, owner["bank"]),
+            )
+            self.db.execute(
+                "UPDATE owners SET revision=revision+1,accept_from=MAX(accept_from,?) "
+                "WHERE connection_id=? AND owner_id=?",
+                (math.ceil(time.time()), connection, owner_id),
+            )
+            self.bump()
 
     def refs(self, forget_id, kind):
         return [

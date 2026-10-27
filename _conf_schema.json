@@ -12,6 +12,12 @@
     "secret": true,
     "hint": "填写记忆服务的 API Key。仓库部署模板对应 .env 中的 HINDSIGHT_API_TENANT_API_KEY，不是模型 Key 或网页登录 Key。"
   },
+  "control_plane_url": {
+    "description": "官方 Control Plane 管理地址",
+    "type": "string",
+    "default": "",
+    "hint": "填写管理员浏览器可访问的 HTTP/HTTPS 地址，与 API 地址独立。地址不能包含登录凭据、查询参数或片段；官方管理员单独登录。"
+  },
   "service_id": {
     "description": "稳定服务标识",
     "type": "string",

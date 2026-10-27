@@ -7,16 +7,21 @@
 | 项目 | 适用范围 |
 | --- | --- |
 | AstrBot | **4.29.1**，使用内置执行器 `local` |
-| Hindsight | **1.1.0**，开启 API Key 认证 |
+| Hindsight | **1.1.0**，开启 API Key 认证，官方 Control Plane 使用匹配版本和独立访问密钥 |
 | QQ 接入 | **OneBot v11**，AstrBot 中的平台类型为 `aiocqhttp` |
 | 对话类型 | QQ 私聊纯文字 |
-| 部署方式 | Linux 原生 AstrBot，或使用桥接网络的 Docker AstrBot；Hindsight 运行于 Linux Docker |
+| 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 桥接网络，Hindsight 运行于 Linux Docker |
+| 管理访问 | 官方 Control Plane 独立 HTTPS；无域名时使用 SSH 隧道访问服务器环回端口 |
 
-首发面向 Linux。Windows 原生运行、Windows AstrBot 连接 Linux Hindsight 及其他 Windows 部署方式安排在后续版本。Docker Desktop 仅用于开发和 Linux 容器验证，不作为用户部署方式。
+首发面向 Linux 服务端，管理员电脑不受系统限制。Windows 原生运行、Windows AstrBot 连接 Linux Hindsight 及其他 Windows 服务端部署方式安排在后续版本。Docker Desktop 仅用于开发和 Linux 容器验证，不作为用户部署方式。
+
+生产服务器的 AstrBot 4.29.3 仅作为实际使用版本记录，不扩大 AstrBot 4.29.1 的首发兼容矩阵。
 
 ## 安装与管理
 
-记忆管理视图位于 AstrBot 插件详情内，分为「记忆管理」与「设置」两个标签。配套 Linux 安装命令自动处理密钥、服务和网络，主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写地址与 Key 连接。
+记忆管理视图位于 AstrBot 插件详情内，分为「记忆管理」与「设置」两个标签，负责连接、账号、Bank 映射、模式、队列、诊断、维护与完整遗忘。内容浏览、搜索、更正、删除与原生导入导出使用独立官方 Control Plane。
+
+配套 Linux 安装命令处理密钥、服务和网络，包含官方 CP 及其独立访问密钥，主机端口仅绑定环回地址；主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写 API 地址与 Key，并单独配置 `control_plane_url`。管理地址和 Bank 可选择复制，不要求 iframe、SSO 或一键外链，不向普通用户传递 CP/API Key。详细访问步骤见 [部署说明](../deploy/README.md)。
 
 ### 模型供应商复用
 
@@ -34,7 +39,7 @@
 
 设置向导会检查实际嵌入向量并读取或自动检测维数。多模态嵌入、未实现的第三方适配器，以及含用户名密码的代理地址不在支持范围，列表会说明原因，不会换用其他模型。已有 Hindsight 的模型由该服务维护，插件中的模型选择仅用于安装配套服务。
 
-协议检查使用 Hindsight **1.1.0** 的 SDK 和本机模拟接口，覆盖请求路径、参数、认证与响应解析。真实模型链路使用 WorkBuddy DeepSeek 与百炼验证；协议兼容不等于逐个验证所有厂商、模型和代理服务。开发者可在 Hindsight 镜像内运行 `python tools/check-model-protocols.py` 复现协议检查。
+已有协议检查使用 Hindsight **1.1.0** 的 SDK 和本机模拟接口，覆盖请求路径、参数、认证与响应解析。已有真实模型链路检查组合为 Magpie 的 WorkBuddy DeepSeek（Chat Completions）、百炼 `text-embedding-v4`（1024 维）和 `qwen3-rerank`；协议兼容不等于逐个验证所有厂商、模型和代理服务。开发者可在 Hindsight 镜像内运行 `python tools/check-model-protocols.py` 复现协议检查。模型适配、配置管理器与原子回退继续沿用，不新增供应商或协议分支。
 
 详细步骤见 [安装指南](INSTALL.md)，手工维护见 [Linux 部署](../deploy/README.md)。
 
@@ -53,6 +58,8 @@
 
 机器人提出的建议会按机器人陈述保存，不会直接当成用户已经同意。机器人说“已完成”的文字也不会当成实际操作成功的凭据。
 
+助手最终正文必须能与用户交互关联，并保存到标准持久化 history。普通、分段和流式发送均不能仅凭完成钩子认定送达；材料保留 `delivery=unknown`，不新增发送确认框架。
+
 ## 其他执行器与平台
 
 Dify、Coze、百炼、DeerFlow 等执行器，以及 QQ 官方机器人、其他聊天平台和 AstrBot WebChat，没有适配自动记录与记忆注入。
@@ -64,12 +71,19 @@ QQ 文件导出使用 AstrBot 的文件发送功能。AstrBot 和 OneBot 程序�
 | 项目 | 限制 |
 | --- | --- |
 | 单条新对话文字 | 最多 8,000 个字符 |
-| 单次更正 | 最多 1,000 个字符 |
 | 每次自动提供给模型的记忆 | 最多 4,000 个字符，查询最长等待 4 秒 |
 | 本地尚未完成的记录 | 默认最多 10,000 条，请求正文总量最多 64 MiB |
 | 单次 JSON 导出 | 最多 10,000 条记忆、8 MiB |
 
 自动查询超时后继续普通聊天。队列达到上限时，暂时停止接收新记录，已入队的内容继续处理；错误提示可从 `/hindsight status` 查看。
+
+## 内容与维护契约
+
+官方内容是召回、查看和导出的唯一内容来源，本地更正不参与过滤、排序或强制注入。旧 `/hindsight correct` 仅引导管理员使用官方 CP；QQ view/show/export 保留本人范围内的官方只读 API 调用。
+
+维护冻结新采集、助手回调、召回注入、提交和重试；已接受任务正常排空，未提交旧待办须显式作废。响应不明或协作取消仍不确定时保持暂停，可用完整遗忘的独立控制日志、新 Bank 代次和持续清理恢复。既有 Bank 被官方删除后禁止自动重建，须恢复原 Bank 后显式恢复维护，或完整遗忘登记新 Bank。普通浏览搜索不用维护。
+
+恢复保留全局安全暂停与手工恢复路径。历史更正非空时启动报告 `legacy_corrections_require_handover` 并保留数据，不为首发引入通用迁移框架。错误码与恢复步骤见 [数据维护](DATA-MAINTENANCE.md#异常提示)。
 
 ## 开发参考
 

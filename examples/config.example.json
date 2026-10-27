@@ -1,5 +1,6 @@
 {
   "api_url": "http://hindsight:8888",
+  "control_plane_url": "http://127.0.0.1:9999",
   "api_key": "",
   "service_id": "home-hindsight",
   "service_address_revision": 1,

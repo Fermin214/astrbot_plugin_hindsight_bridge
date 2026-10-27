@@ -20,7 +20,8 @@ def main():
             destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
         )
     except FileExistsError:
-        raise SystemExit(".env already exists; edit it to keep existing identities.")
+        print("Using existing .env; credentials, worker identity and ports are preserved.")
+        return
     with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
         stream.write(template)
     print("Created .env. Fill in your LLM and embedding provider credentials.")

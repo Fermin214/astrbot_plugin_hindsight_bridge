@@ -143,42 +143,6 @@ def export_bytes(payload) -> bytes:
         "memories": memories,
         "documents": documents,
     }
-    changes = payload.get("corrections", [])
-    if not isinstance(changes, list):
-        raise HindsightError(code)
-    clean["corrections"] = []
-    for row in changes:
-        if not isinstance(row, dict) or any(
-            not isinstance(row.get(key), str)
-            for key in (
-                "memory_id",
-                "document_id",
-                "original_text",
-                "text",
-                "occurred_at",
-                "state",
-            )
-        ):
-            raise HindsightError(code)
-        _identifier(row["memory_id"])
-        clean["corrections"].append(
-            {
-                key: row[key]
-                for key in (
-                    "memory_id",
-                    "document_id",
-                    "original_text",
-                    "text",
-                    "occurred_at",
-                    "state",
-                )
-            }
-        )
-        for key in ("source", "submitted_by"):
-            if key in row:
-                if not isinstance(row[key], str):
-                    raise HindsightError(code)
-                clean["corrections"][-1][key] = row[key]
     try:
         return json.dumps(clean, ensure_ascii=False, allow_nan=False, indent=2).encode(
             "utf-8"
