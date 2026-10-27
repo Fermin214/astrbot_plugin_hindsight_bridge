@@ -1,6 +1,6 @@
 # 安装与连接
 
-首发环境为同一台 Linux 服务器上的 AstrBot 4.29.1、内置执行器 `local`、OneBot v11（`aiocqhttp`）QQ 私聊纯文字和 Hindsight 1.1.0。AstrBot 可原生运行或使用 Docker 桥接网络；Hindsight 使用 Linux Docker。配套服务主机需安装 Docker Engine 与 Compose v2。管理员电脑不受 Linux 限制。
+需要 AstrBot **4.29.1 及以上**，使用内置执行器 `local`、OneBot v11（`aiocqhttp`）QQ 私聊纯文字和 Hindsight **1.1.0**。目前支持 Linux 服务端，默认在同一台服务器部署：AstrBot 可原生运行或使用 Docker 桥接网络，Hindsight 使用 Docker。配套服务主机需安装 Docker Engine 与 Compose v2。
 
 ## 一、安装插件
 
@@ -82,7 +82,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ### 找不到「记忆管理」视图
 
-检查 AstrBot 版本是否为 4.29.1，插件是否安装成功并处于启用状态。更新插件后可先重载，再重新打开插件详情。
+检查 AstrBot 版本是否为 4.29.1 或更高，插件是否安装成功并处于启用状态。更新插件后可先重载，再重新打开插件详情。
 
 ### 模型列表中没有嵌入模型
 
@@ -94,7 +94,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ### 供应商显示不兼容
 
-向导支持 OpenAI Chat、Responses、Claude、Gemini，以及百炼和 Ollama 原生嵌入。常用代理、请求头和额外参数可以沿用。模型类型未知、使用多模态嵌入或请求参数覆盖记忆处理所需字段时，会显示具体原因，见 [模型兼容范围](SUPPORT.md#模型供应商复用)。
+支持的模型接口见 [模型兼容范围](SUPPORT.md#模型供应商复用)。模型类型未适配、使用多模态嵌入或请求参数冲突时，页面会显示具体原因。
 
 ### 安装命令提示无法使用 Docker
 

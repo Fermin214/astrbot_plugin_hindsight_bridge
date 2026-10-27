@@ -2,7 +2,7 @@
 
 让 AstrBot 在新会话中也能记得你。
 
-正常聊天，插件就会把 QQ 私聊文字交给 Hindsight 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
+正常聊天，插件就会把 QQ 私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
 
 在 AstrBot 插件页配置连接、添加使用者、调整记忆模式和处理保存任务。查看和管理记忆使用 Hindsight 1.1.0 原生官方管理页面（Control Plane）。配套服务可以复用 AstrBot 已配置的模型，初次安装需在 Linux 主机执行向导生成的命令。
 
@@ -10,7 +10,7 @@
 
 ## 安装
 
-首发范围为 **同一台 Linux 服务器**、**AstrBot 4.29.1 内置执行器 `local`**、**OneBot v11（`aiocqhttp`）QQ 私聊纯文字**和 **Hindsight 1.1.0**。已有服务、配套安装和手工 Compose 均有连接路径。Linux 限定服务端环境，管理员电脑可使用其他系统。
+目前支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`**、**OneBot v11（`aiocqhttp`）QQ 私聊纯文字**和 **Hindsight 1.1.0**。默认在同一台服务器部署 AstrBot 与 Hindsight，可连接已有服务，也可使用配套安装器。
 
 1. 在 AstrBot 打开 **插件管理 → 安装 → 从链接安装**，粘贴：
 

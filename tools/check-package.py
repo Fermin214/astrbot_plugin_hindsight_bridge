@@ -55,7 +55,7 @@ def main():
     )
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", metadata["version"])
     assert metadata["support_platforms"] == ["aiocqhttp"]
-    assert metadata["astrbot_version"] == ">=4.29.1,<4.30"
+    assert metadata["astrbot_version"] == ">=4.29.1"
     for name in (
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",

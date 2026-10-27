@@ -31,7 +31,7 @@ python tests/run.py
 python tools/check-package.py
 ```
 
-核心回归不启动 AstrBot 或 Hindsight，不调用模型服务。实际集成另用 Linux 上的 AstrBot 4.29.1 和独立 Hindsight 1.1.0，记录具体执行器、平台、模型服务及数据版本。
+核心回归不启动 AstrBot 或 Hindsight，不调用模型服务。集成验证使用 Linux 上的 AstrBot 和独立 Hindsight，版本须符合[兼容范围](docs/SUPPORT.md)，并记录实际版本、执行器、平台和模型组合。
 
 涉及采集、临时注入或生命周期的改动，通过正式插件管理器安装与重载，检查最终模型请求和持久历史。涉及网络故障、遗忘或恢复的改动，使用隔离账号、Bank 和数据副本覆盖相关边界。
 

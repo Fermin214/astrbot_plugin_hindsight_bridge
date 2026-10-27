@@ -8,7 +8,7 @@
 
 记忆内容的浏览、搜索、更正、删除、Bank 管理和原生导入导出由独立打开的 Hindsight 原生 Control Plane 提供。插件不实现内容列表、详情、更正表单或下载页面。QQ view/show/export 只提供本人范围内的官方只读 API 转发。
 
-首发为同机 Linux、AstrBot 4.29.1 内置执行器 `local`、OneBot v11（`aiocqhttp`）私聊纯文字和 Hindsight 1.1.0。模型配置使用协议适配、配置管理器和原子回退。
+支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、OneBot v11（`aiocqhttp`）私聊纯文字和 Hindsight 1.1.0，默认同机部署。模型配置使用协议适配、配置管理器和原子回退。
 
 插件总开关使用 AstrBot 插件面板的启停。空配置可加载，完成配置前不采集；关闭插件通过终止钩子停止队列与采集并释放资源。
 

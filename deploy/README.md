@@ -52,8 +52,6 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' .env | tr -d '\047\042'
 
 服务包含 Hindsight **1.1.0 Slim** 与 PostgreSQL **17**，数据库构建包含 pgvector 和 PGroonga。模型通过远程接口调用，模板不需要本地显卡；API 调用费用按所用模型服务计费。
 
-服务端支持 Linux；管理员电脑可以使用 Windows、macOS 或 Linux。
-
 ## 一、下载部署文件
 
 在安装 Docker 的主机上打开终端，执行：

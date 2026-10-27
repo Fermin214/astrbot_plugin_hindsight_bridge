@@ -6,7 +6,7 @@
 
 AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。Hindsight 负责抽取记忆、检索、整合观察和内容管理。插件负责消息来源校验、用户隔离、材料构造、持久队列、临时注入、连接与维护协调。
 
-首发范围为同机 Linux、AstrBot 4.29.1 内置执行器 `local`、OneBot v11（`aiocqhttp`）QQ 私聊纯文字与 Hindsight 1.1.0。兼容声明和模型检查边界见 [兼容范围](SUPPORT.md)。
+支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、OneBot v11（`aiocqhttp`）QQ 私聊纯文字与 Hindsight 1.1.0，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
 
 插件只调用 Hindsight 的公开 HTTP API，不把 Hindsight 安装进 AstrBot 的 Python 环境，也不额外调用摘要模型；自动 reflect 关闭。
 
@@ -18,7 +18,7 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 账号配置只接受 `allowed_accounts` 中明确填写的平台实例与用户组合，空列表关闭所有账号的记忆访问。插件启停由 AstrBot 生命周期管理。
 
-身份层保存 `principal_id` 和 Bank 归属。首发为每个稳定用户范围建立独立 Bank，记忆空间固定为 `default`。跨账号绑定、账号转移与历史 Bank 合并属于后续扩展。
+身份层保存 `principal_id` 和 Bank 归属。每个稳定用户范围使用独立 Bank，记忆空间固定为 `default`。不提供跨账号绑定、账号转移或历史 Bank 合并。
 
 ## 用户消息与助手正文
 

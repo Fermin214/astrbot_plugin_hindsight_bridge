@@ -6,42 +6,34 @@
 
 | 项目 | 适用范围 |
 | --- | --- |
-| AstrBot | **4.29.1**，使用内置执行器 `local` |
-| Hindsight | **1.1.0**，开启 API Key 认证，官方 Control Plane 使用匹配版本和独立访问密钥 |
+| AstrBot | **4.29.1 及以上**，使用内置执行器 `local` |
+| Hindsight | **1.1.0**，启用 API Key 认证，官方管理面板也使用 1.1.0 |
 | QQ 接入 | **OneBot v11**，AstrBot 中的平台类型为 `aiocqhttp` |
 | 对话类型 | QQ 私聊纯文字 |
 | 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 桥接网络，Hindsight 运行于 Linux Docker |
-| 管理访问 | 官方 Control Plane 独立 HTTPS；无域名时使用 SSH 隧道访问服务器环回端口 |
-
-首发面向 Linux 服务端，管理员电脑不受系统限制。Windows 原生运行、Windows AstrBot 连接 Linux Hindsight 及其他 Windows 服务端部署方式安排在后续版本。Docker Desktop 仅用于开发和 Linux 容器验证，不作为用户部署方式。
-
-自动化验证基线为 AstrBot 4.29.1；4.29.3 有 Linux 服务器实际使用记录。
+| 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
 
 ## 安装与管理
 
-管理视图位于 AstrBot 插件详情内，分为「运行管理」与「设置」两个标签，负责连接、账号、Bank 映射、模式、队列、诊断、维护与完整遗忘。内容浏览、搜索、更正、删除与原生导入导出使用独立的 Hindsight 原生 Control Plane。
+插件详情中的「记忆管理」分为「运行管理」与「设置」：配置连接、添加使用者、调整记忆模式、查看保存进度和处理错误。查看、更正、删除及导入导出记忆，使用独立的 Hindsight 官方面板。
 
-配套 Linux 安装命令处理密钥、服务和网络，包含官方 CP 及其独立访问密钥，主机端口仅绑定环回地址；主机需已安装 Docker Engine 与 Compose v2，执行账号需能管理 Docker。已有 Hindsight 可直接填写 API 地址与 Key，并单独配置 `control_plane_url`。插件页提供可复制的官方管理地址和记忆库编号，Control Plane 在浏览器中独立登录。详细访问步骤见 [部署说明](../deploy/README.md)。
+配套安装需要 Docker Engine 和 Compose v2，会安装记忆服务和官方管理面板。已有 Hindsight 可直接填写 API 地址与连接密钥。官方面板通过域名反向代理或 SSH 隧道访问，地址和登录密钥与 API 连接分开配置，见 [部署说明](../deploy/README.md)。
 
 ### 模型供应商复用
 
 | 用途 | 支持范围 |
 | --- | --- |
-| 对话 | OpenAI Chat Completions、OpenAI Responses、Azure OpenAI、Anthropic Messages、Google Gemini |
-| 嵌入 | OpenAI Embeddings、百炼 DashScope 原生文本嵌入、Google Gemini、Ollama `/api/embed` |
-| 重排 | 百炼原生及兼容接口、Cohere 格式接口（含硅基流动、Jina、vLLM）、Hugging Face TEI；也可不选，使用 RRF |
+| 对话 | OpenAI Chat Completions、OpenAI Responses、Azure OpenAI Chat Completions、Anthropic Messages、Gemini API |
+| 嵌入 | OpenAI Embeddings、DashScope Text Embedding、Gemini Embedding、Ollama Embed |
+| 重排 | DashScope Rerank、Cohere Rerank 及兼容接口、Hugging Face TEI；可不选 |
 
-供应商地址与 Key 由服务端读取。DeepSeek 官方的 Chat Completions 和 Responses 配置均可复用，包括 `temperature` 等额外请求参数。OpenRouter、Groq、智谱、小米等 AstrBot 内置 OpenAI 兼容适配器也可选择。
+配套服务可使用 AstrBot 已配置的模型，无需重复填写地址和密钥。
 
-支持自定义 HTTP(S) 地址、HTTP(S) 代理、额外请求头和请求参数。Azure 沿用部署名称、`api-version` 和 API Key；Claude 与 Gemini 沿用思考参数。覆盖模型、输入、工具或结构化输出的参数会给出冲突提示，避免影响记忆抽取。
+可沿用供应商的 HTTP(S) 地址、代理、额外请求头和请求参数。与记忆处理冲突的参数会在保存时提示修改。
 
-百炼、Gemini、Ollama 等原生接口通过随配套服务安装的内部转换服务接入，不需要重新添加供应商。转换服务不开放主机端口，按所选供应商分别调用原来的地址，不经过 Magpie 或其他模型网关；只有所选供应商本身配置了网关时才使用它。Gemini 嵌入不额外归一化；OpenAI 嵌入遵循 AstrBot 的维度发送设置，存储维数另行检查。
+选择嵌入模型时会检查实际向量维数。多模态嵌入、未适配的供应商和含用户名密码的代理地址暂不支持，模型列表会说明原因。
 
-设置向导会检查实际嵌入向量并读取或自动检测维数。多模态嵌入、未实现的第三方适配器，以及含用户名密码的代理地址不在支持范围，列表会说明原因，不会换用其他模型。已有 Hindsight 的模型由该服务维护，插件中的模型选择仅用于安装配套服务。
-
-协议检查使用 Hindsight **1.1.0** 的 SDK 和本机模拟接口，覆盖请求路径、参数、认证与响应解析。已完成真实模型链路检查的组合为 Magpie 的 WorkBuddy DeepSeek（Chat Completions）、百炼 `text-embedding-v4`（1024 维）和 `qwen3-rerank`；其他厂商、模型和代理服务未逐一验证。开发者可在 Hindsight 镜像内运行 `python tools/check-model-protocols.py` 复现协议检查。
-
-详细步骤见 [安装指南](INSTALL.md)，手工维护见 [Linux 部署](../deploy/README.md)。
+连接已有 Hindsight 时，模型由该服务维护，插件中的模型选择只用于配套服务。操作步骤见 [安装指南](INSTALL.md)。
 
 ## 哪些内容会自动记忆
 
@@ -57,8 +49,6 @@
 | 聊天消息的编辑与撤回 | 不自动同步为记忆修改或删除 |
 
 机器人提出的建议会按机器人陈述保存，不会直接当成用户已经同意。机器人说“已完成”的文字也不会当成实际操作成功的凭据。
-
-助手最终正文必须能与用户交互关联，并保存到标准持久化 history。普通、分段和流式发送均不能仅凭完成钩子认定送达；材料保留 `delivery=unknown`，插件没有额外的发送确认机制。
 
 ## 其他执行器与平台
 
@@ -77,13 +67,11 @@ QQ 文件导出使用 AstrBot 的文件发送功能。AstrBot 和 OneBot 程序�
 
 自动查询超时后继续普通聊天。队列达到上限时，暂时停止接收新记录，已入队的内容继续处理；错误提示可从 `/hindsight status` 查看。
 
-## 内容与维护契约
+## 记忆管理
 
-官方内容是召回、查看和导出的唯一内容来源，本地更正不参与过滤、排序或强制注入。旧 `/hindsight correct` 仅引导管理员使用官方 CP；QQ view/show/export 保留本人范围内的官方只读 API 调用。
+查看、搜索和导出记忆无需维护。修改、删除或导入前，先在插件页开始维护，等待已有记录处理完成；官方面板操作结束后，再恢复记忆功能。步骤见 [使用指南](USAGE.md#官方内容维护)。
 
-维护冻结新采集、助手回调、召回注入、提交和重试；未提交记录不会自动发送，已接受任务继续核对直至结束，未提交旧待办须显式作废。提交响应、操作结果或协作取消仍不确定时保持暂停，可用完整遗忘的独立控制日志、新 Bank 代次和持续清理恢复。既有 Bank 被官方删除后禁止自动重建，须恢复原 Bank 后显式结束维护，或完整遗忘登记新 Bank。普通浏览、搜索无需维护。
-
-恢复核对失败可触发全局暂停，由管理员手工恢复。历史更正非空时启动报告 `legacy_corrections_require_handover` 并保留数据，须按实际数据交接；首发不提供通用迁移框架。错误码与恢复步骤见 [数据维护](DATA-MAINTENANCE.md#异常提示)。
+删除整个记忆库后，该用户的记忆功能会暂停。需要恢复原库，或清空旧记忆重新开始，具体操作见 [数据维护](DATA-MAINTENANCE.md#异常提示)。
 
 ## 开发参考
 

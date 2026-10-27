@@ -1,11 +1,11 @@
 name: astrbot_plugin_hindsight_bridge
 display_name: Hindsight Memory
-short_desc: 用 Hindsight 保存双方对话，跨会话召回长期记忆。
-desc: Hindsight 私聊长期记忆桥接，支持可靠写入、用户隔离和故障恢复，记忆内容由官方面板管理。
+short_desc: 保存 QQ 私聊记忆，在新会话中自动回忆。
+desc: 将双方的 QQ 私聊对话保存到 Hindsight，在新会话中自动查找相关记忆。不同用户的记忆分开保存，支持断线重试，通过 Hindsight 官方面板管理记忆。
 version: 0.1.0
 author: Fermin214
 repo: https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
-astrbot_version: ">=4.29.1,<4.30"
+astrbot_version: ">=4.29.1"
 support_platforms:
   - aiocqhttp
 tags:
