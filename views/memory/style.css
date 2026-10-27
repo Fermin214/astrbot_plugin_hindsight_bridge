@@ -169,6 +169,17 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
   .feedback { bottom: 8px; width: 100%; }
 }
 .control-plane-setting { margin-top: 16px; }
+.control-plane-setting > input { margin-top: 6px; }
+.with-help { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.connection-form .with-help h3 { margin-bottom: 0; }
+.help { position: relative; flex-shrink: 0; }
+.help > summary { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 50%; color: var(--accent); cursor: pointer; font-weight: 650; list-style: none; }
+.help > summary::-webkit-details-marker { display: none; }
+.help > summary:hover, .help[open] > summary { background: var(--tint); border-color: var(--accent); }
+.help-content { position: absolute; z-index: 5; top: calc(100% + 8px); right: 0; width: min(420px, calc(100vw - 96px)); max-height: 60vh; overflow-y: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 6px 24px #00000020; color: var(--text); font-size: 13px; font-weight: 400; }
+.help-content p + p { margin-top: 8px; }
+.help-content h4 { margin: 14px 0 6px; font-size: 13px; }
+.help-content textarea { margin-top: 10px; font: 12px/1.6 Consolas, monospace; }
 #control-plane-address, #scope-bank { font-family: Consolas, monospace; user-select: text; }
 #scope-error { margin-top: 18px; }
 #discard-pending { flex-shrink: 0; }

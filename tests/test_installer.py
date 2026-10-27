@@ -141,7 +141,13 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(configuration.stat().st_mode & 0o777, 0o600)
             self.assertEqual((target / "keep-data").read_text(), "keep")
             self.assertIn('name: "second"', (target / "compose.override.yaml").read_text())
-            self.assertNotIn("HINDSIGHT_CP_ACCESS_KEY=", completed.stdout)
+            cp_key = re.search(r"HINDSIGHT_CP_ACCESS_KEY='([0-9a-f]{64})'", configuration.read_text())[1]
+            self.assertNotIn(cp_key, completed.stdout)
+            lookup = subprocess.run(
+                ["bash", "-c", completed.stdout.splitlines()[-1]],
+                env=env, text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(lookup.stdout.strip(), cp_key)
             # Older installs acquire CP fields without rotating their existing credentials.
             configuration.write_text("\n".join(
                 row for row in original.decode().splitlines()

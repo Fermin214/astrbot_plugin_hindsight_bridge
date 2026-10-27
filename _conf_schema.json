@@ -3,50 +3,50 @@
     "description": "Hindsight API 地址",
     "type": "string",
     "default": "",
-    "hint": "填写记忆服务的 API 地址，不是网页管理面板地址。同一 Docker 网络中通常为 http://hindsight:8888。"
+    "hint": "供插件连接记忆服务，例如 http://hindsight:8888。浏览器访问的网页地址填在「官方管理地址」。"
   },
   "api_key": {
-    "description": "Hindsight API Key",
+    "description": "Hindsight 连接密钥（API Key）",
     "type": "string",
     "default": "",
     "secret": true,
-    "hint": "填写记忆服务的 API Key。仓库部署模板对应 .env 中的 HINDSIGHT_API_TENANT_API_KEY，不是模型 Key 或网页登录 Key。"
+    "hint": "填写记忆服务的 API Key。使用仓库部署模板时，取安装目录 .env 中的 HINDSIGHT_API_TENANT_API_KEY。"
   },
   "control_plane_url": {
-    "description": "官方 Control Plane 管理地址",
+    "description": "官方管理地址",
     "type": "string",
     "default": "",
-    "hint": "填写管理员浏览器可访问的 HTTP/HTTPS 地址，与 API 地址独立。地址不能包含登录凭据、查询参数或片段；官方管理员单独登录。"
+    "hint": "填写浏览器中打开 Hindsight 官方记忆面板的地址。远程服务器需先配置域名反向代理或 SSH 隧道；127.0.0.1 是你自己的电脑。"
   },
   "service_id": {
     "description": "稳定服务标识",
     "type": "string",
     "default": "",
-    "hint": "设置页面自动维护。同一套记忆服务一直沿用这个名字，手工迁移时按数据维护指南操作。"
+    "hint": "由设置页面自动生成，用于识别同一套记忆服务。手工迁移时按数据维护指南操作。"
   },
   "service_address_revision": {
     "description": "服务地址版本",
     "type": "int",
     "default": 1,
-    "hint": "首次安装保持默认。同一服务搬迁地址时递增此值，具体步骤见备份与恢复文档。"
+    "hint": "同一服务搬迁地址时递增此值，步骤见数据维护指南。新安装保持默认。"
   },
   "control_state_dir": {
     "description": "独立控制目录",
     "type": "string",
     "default": "",
-    "hint": "首次安装可留空，插件会在 AstrBot 数据目录下自动创建 astrbot_plugin_hindsight_bridge_control。备份恢复时保留最新控制数据。"
+    "hint": "留空时在 AstrBot 数据目录下创建 astrbot_plugin_hindsight_bridge_control。恢复备份时须保留此目录中的最新数据，以免重新上传已删除的记忆。"
   },
   "agent_id": {
     "description": "稳定 Agent 标识",
     "type": "string",
     "default": "default",
-    "hint": "首次安装保持 default。已有记忆后不要随意修改；它用于区分记忆归属，不是机器人的显示名称。"
+    "hint": "用于区分记忆归属，默认 default。修改后会影响记忆库对应关系；修改机器人显示名称无需改此项。"
   },
   "allowed_accounts": {
-    "description": "允许使用记忆的平台账号",
+    "description": "使用记忆的用户",
     "type": "template_list",
     "default": [],
-    "hint": "在「记忆管理 → 设置」中选择机器人并填写自己的 QQ 号。列表为空时所有人都不启用记忆。",
+    "hint": "在「记忆管理 → 设置」中选择机器人，填写与它私聊的用户 QQ 号。未添加的用户不使用记忆。",
     "templates": {
       "account": {
         "name": "平台账号",
@@ -71,37 +71,37 @@
     "description": "召回总超时（秒）",
     "type": "float",
     "default": 4,
-    "hint": "首次安装保持默认。自动查找记忆最多等待 4 秒，超时后继续普通聊天。"
+    "hint": "查找记忆的最长等待时间，默认 4 秒。超时后继续普通聊天。"
   },
   "recall_max_tokens": {
-    "description": "召回结果 token 预算",
+    "description": "召回结果长度（token）",
     "type": "int",
     "default": 1200,
-    "hint": "首次安装保持默认，用于限制每次取回的记忆文字量。"
+    "hint": "限制每次从 Hindsight 取回的记忆长度。"
   },
   "recall_query_tokens": {
     "description": "查询 token 上限",
     "type": "int",
     "default": 380,
-    "hint": "首次安装保持默认。限制发送给记忆服务的查询长度，优先使用本条问题，最多 400 token。"
+    "hint": "限制发送给 Hindsight 的查询长度，优先保留这条消息，最多 400 token。"
   },
   "query_tokenizer": {
-    "description": "查询编码",
+    "description": "查询分词编码",
     "type": "string",
     "default": "o200k_base",
-    "hint": "首次安装保持默认。服务采用其他编码时，再由维护者调整。"
+    "hint": "用于计算查询的 token 数量。与 Hindsight 配置不同时，由维护者调整。"
   },
   "queue_max_tasks": {
-    "description": "未完成队列条数上限",
+    "description": "待保存记录数量上限",
     "type": "int",
     "default": 10000,
-    "hint": "首次安装保持默认。积压达到 10,000 条时停止接收新记录，已有任务继续处理。"
+    "hint": "积压达到上限时停止接收新记录，已有记录继续处理。默认 10,000 条。"
   },
   "queue_max_mib": {
-    "description": "队列请求正文上限（MiB）",
+    "description": "待保存内容容量上限（MiB）",
     "type": "int",
     "default": 64,
-    "hint": "首次安装保持默认。本地待处理记录的正文总容量上限，默认 64 MiB。"
+    "hint": "本地待处理记录的正文总容量上限，默认 64 MiB。"
   },
   "command_prefixes": {
     "description": "额外排除的命令前缀",
@@ -110,9 +110,9 @@
     "hint": "以 / 开头的消息自动排除。使用其他命令前缀时，可在这里补充；普通使用留空。"
   },
   "context_max_chars": {
-    "description": "注入记忆最大字符数",
+    "description": "提供给聊天模型的记忆字符上限",
     "type": "int",
     "default": 4000,
-    "hint": "首次安装保持默认。限制每次聊天提供给模型的记忆文字长度。"
+    "hint": "限制每次聊天附带的记忆文字长度。"
   }
 }

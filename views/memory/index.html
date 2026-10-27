@@ -12,7 +12,7 @@
     <header class="page-header">
       <div>
         <h1>记忆服务管理</h1>
-        <p>连接记忆服务，管理账号、队列与维护状态。</p>
+        <p>设置记忆服务，查看每个用户的记忆保存情况。</p>
       </div>
     </header>
     <div id="update-error" class="notice error" role="status" hidden><span id="update-error-message"></span> <button id="refresh" type="button" disabled>重新获取</button></div>
@@ -37,7 +37,7 @@
           </label>
           <label class="choice">
             <input type="radio" name="connection-mode" value="existing">
-            <span><strong>连接已有 Hindsight</strong><small>已经有记忆服务，填写连接地址即可。</small></span>
+            <span><strong>连接已有 Hindsight</strong><small>填写已有服务的 API 地址和连接密钥。</small></span>
           </label>
         </fieldset>
         <div id="managed-settings" class="surface">
@@ -63,8 +63,22 @@
               <label>API 地址<input id="api-url" type="url" inputmode="url" placeholder="http://hindsight:8888" required autocomplete="off"></label>
               <label id="api-key-field">连接密钥<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
             </div>
-            <label class="control-plane-setting">官方管理地址<input id="control-plane-url" type="url" inputmode="url" placeholder="https://memory.example.com 或 http://127.0.0.1:9999" autocomplete="off"></label>
-            <p class="hint">填写管理员浏览器可访问的 Control Plane 地址，可与 API 地址不同。不填写密钥、查询参数或片段；官方管理员单独登录。</p>
+            <div class="control-plane-setting">
+              <div class="with-help">
+                <label for="control-plane-url">官方管理地址</label>
+                <details class="help" name="page-help">
+                  <summary aria-label="官方管理地址怎么填" title="官方管理地址怎么填">?</summary>
+                  <div class="help-content">
+                    <p>填写你在浏览器中打开 Hindsight 官方记忆面板的地址。</p>
+                    <p>有域名：先配置反向代理，再填对应的 HTTPS 地址。</p>
+                    <p>没有域名：先建立 SSH 隧道，再填本机隧道地址。浏览器中的 127.0.0.1 指你自己的电脑，建立隧道后才能用它访问服务器。</p>
+                    <p>隧道命令和反向代理示例见安装文档。</p>
+                  </div>
+                </details>
+              </div>
+              <input id="control-plane-url" type="url" inputmode="url" placeholder="https://memory.example.com 或 http://127.0.0.1:9999" autocomplete="off">
+            </div>
+            <p class="hint">供浏览器打开记忆面板。远程访问需配置域名反向代理或 SSH 隧道。</p>
             <p id="key-help" class="hint">填写记忆服务的连接密钥。</p>
             <button id="check-connection" type="button">测试服务连接</button>
             <p id="connection-result" role="status" class="hint" hidden></p>
@@ -123,14 +137,14 @@
       <div class="section-heading"><h2>用户运行状态</h2></div>
       <div id="scope-statuses" class="scope-statuses"></div>
 
-      <div class="section-heading"><h2>账号与维护</h2><p>选择使用者，查看 Bank 映射并管理记忆模式与后台任务。</p></div>
+      <div class="section-heading"><h2>用户记忆</h2><p>选择用户，设置是否保存和使用记忆，或查看保存进度。</p></div>
       <fieldset id="memory-fields" disabled>
         <legend class="sr-only">账号运行管理</legend>
         <div class="memory-toolbar surface">
           <label class="scope-picker">选择用户<select id="scope-picker"></select></label>
           <label>记忆模式<select id="scope-mode">
             <option value="active">正常记忆</option>
-            <option value="readonly">只读记忆</option>
+            <option value="readonly">只用已有记忆</option>
             <option value="paused">暂停记忆</option>
           </select></label>
           <button id="save-mode" type="button">应用模式</button>
@@ -138,28 +152,53 @@
         </div>
         <div id="scope-error" class="notice error" role="status" hidden></div>
         <div class="surface settings-section">
-          <h3>官方内容管理</h3>
+          <div class="with-help">
+            <h3>查看和管理记忆</h3>
+            <details class="help" name="page-help">
+              <summary aria-label="怎样访问记忆面板和获取登录密钥" title="访问方式与登录密钥">?</summary>
+              <div class="help-content">
+                <p>首次保存聊天时会自动创建记忆库，无需手动建库。登录后按下方编号选择对应的记忆库。</p>
+                <p>服务装在远程服务器上时，先配置域名反向代理或 SSH 隧道。127.0.0.1 指你自己的电脑，建立隧道后才能用它访问服务器。</p>
+                <h4>登录密钥</h4>
+                <p id="control-plane-key-help">连接已有 Hindsight 时，请向服务维护者获取网页登录密钥。</p>
+                <textarea id="control-plane-key-command" aria-label="读取面板登录密钥的命令" rows="3" readonly spellcheck="false" hidden></textarea>
+              </div>
+            </details>
+          </div>
           <div class="form-grid">
             <label>官方管理地址<input id="control-plane-address" readonly spellcheck="false" aria-describedby="control-plane-help"></label>
-            <label>此用户的 Bank<input id="scope-bank" readonly spellcheck="false"></label>
+            <label>记忆库编号<input id="scope-bank" readonly spellcheck="false"></label>
           </div>
-          <p id="control-plane-help" class="hint">选中并复制地址，在浏览器中访问；官方管理员单独登录后，使用此 Bank 浏览、搜索、更正、删除或导出记忆。</p>
+          <p id="control-plane-help" class="hint">复制地址到浏览器打开。远程访问需域名反向代理或 SSH 隧道，访问说明和登录密钥见问号。</p>
           <p id="control-plane-missing" class="hint" hidden>请在「设置」中填写官方管理地址。</p>
         </div>
         <div class="surface settings-section">
-          <h3>队列与维护</h3>
+          <div class="with-help">
+            <h3>记忆保存与维护</h3>
+            <details class="help" name="page-help">
+              <summary aria-label="什么时候需要维护，怎样操作" title="什么时候需要维护">?</summary>
+              <div class="help-content">
+                <p>聊天记录会在后台发送给 Hindsight，再整理成记忆。这里显示保存进度；保存失败时，修复问题后点击「重试失败记录」。</p>
+                <h4>修改记忆前</h4>
+                <p>查看、搜索和导出记忆无需维护。修改、删除或导入前，先等需要保留的记录保存完成，再点击「开始维护」。新记录和记忆查询会暂停，Hindsight 已接收的记录继续处理。</p>
+                <p>勾选下方选项会放弃尚未发送或保存失败的记录；已发送并在处理的记录会继续处理。已开始维护时，勾选后再次点击「开始维护」。放弃后无法恢复。</p>
+                <p>等到显示「可以修改记忆」，再去官方面板操作。完成后点击「结束维护并恢复」。</p>
+                <h4>删除整个记忆库后</h4>
+                <p>需从备份恢复原记忆库，或点击「清空此用户的记忆」重新开始。清空会删除这个用户的全部记忆，AstrBot 聊天记录保留。</p>
+              </div>
+            </details>
+          </div>
           <p id="queue-summary" class="hint"></p>
           <p id="maintenance-state" class="hint" role="status"></p>
-          <p class="hint">维护会暂停采集与召回，等待任务排空。远端已接受的任务继续处理；显示「可维护」后，再到官方管理页面修改或删除 Bank。完成后点击「结束维护并恢复」。</p>
-          <label class="check-label"><input id="discard-pending" type="checkbox">丢弃尚未提交的待办（无法撤销，远端已接受的任务继续排空）</label>
+          <p class="hint">修改或删除记忆前，先开始维护。具体步骤见右上角问号。</p>
+          <label class="check-label"><input id="discard-pending" type="checkbox">放弃尚未发送或保存失败的记录（不可恢复）</label>
           <div class="actions">
             <button id="maintenance-begin" type="button">开始维护</button>
             <button id="maintenance-status" type="button">刷新维护状态</button>
             <button id="maintenance-resume" type="button">结束维护并恢复</button>
-            <button id="retry" type="button">重试后台任务</button>
+            <button id="retry" type="button">重试失败记录</button>
           </div>
-          <p class="hint">Bank 已删除时，结束维护不会自动重建。任务状态不明或取消结果无法确认时，继续暂停；需要舍弃旧记忆并建立新映射，可使用完整遗忘。</p>
-          <button id="forget" class="danger-quiet" type="button">完整遗忘并轮换 Bank</button>
+          <button id="forget" class="danger-quiet" type="button">清空此用户的记忆</button>
         </div>
       </fieldset>
       <div id="no-scopes" class="empty" hidden><h3>还没有添加使用者</h3><p>在「设置」中添加使用者并保存。</p><button id="go-setup" type="button">前往设置</button></div>
@@ -171,12 +210,12 @@
   </main>
 
   <dialog id="forget-dialog" aria-labelledby="forget-heading" aria-describedby="forget-description">
-    <div class="dialog-header"><h2 id="forget-heading">完整遗忘并轮换 Bank？</h2></div>
-    <p id="forget-description">此操作会清除此用户的全部记忆、聊天来源和待办，并登记新的 Bank，无法撤销。远端清理完成前保持暂停。</p>
+    <div class="dialog-header"><h2 id="forget-heading">清空此用户的全部记忆？</h2></div>
+    <p id="forget-description">删除这个用户在 Hindsight 中的全部记忆、用于生成记忆的聊天内容，以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。</p>
     <p id="forget-user" class="forget-user"></p>
     <p id="forget-message" class="hint"></p>
-    <label class="check-label"><input id="forget-agree" type="checkbox">我确认清空这个用户的全部记忆并轮换 Bank</label>
-    <div class="actions dialog-actions"><button type="button" id="cancel-forget" autofocus>取消</button><button type="button" id="confirm-forget" class="danger" disabled>确认完整遗忘</button></div>
+    <label class="check-label"><input id="forget-agree" type="checkbox">我确认删除这个用户的全部记忆</label>
+    <div class="actions dialog-actions"><button type="button" id="cancel-forget" autofocus>取消</button><button type="button" id="confirm-forget" class="danger" disabled>确认清空记忆</button></div>
     <p id="forget-feedback" class="hint" role="status"></p>
   </dialog>
   <script type="module" src="./app.js"></script>

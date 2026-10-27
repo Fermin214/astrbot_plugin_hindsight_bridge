@@ -67,23 +67,23 @@ QQ 的 view、show、export 保留本人范围检查，作为官方只读 API �
 
 维护结束前核对任务结果与 Bank 映射，清理过时的短期语境，再显式恢复。提交响应不明、操作记录不明或协作取消仍有不确定性时保持暂停，不把 `cancelled` 当作在途批次退出的证明。无法确认时使用已有完整遗忘流程：独立控制日志、旧任务作废、新 Bank 代次和持续清理。
 
-首次建库与既有 Bank 丢失分别处理。已经建立的 Bank 被官方删除后，停止读写并报告 `bank_missing`，禁止按首次建库路径自动重建。恢复原 Bank 后需显式恢复维护；放弃旧范围则用完整遗忘登记新 Bank。普通浏览与搜索无需维护。
+首次保存记忆时自动创建 Bank。已经建立的 Bank 被官方删除后，停止读写并报告 `bank_missing`，禁止按首次建库路径自动重建。恢复原 Bank 后需显式结束维护；放弃旧范围则用完整遗忘登记新 Bank。普通浏览与搜索无需维护。
 
-全局恢复仍可在删除记录核对失败时安全暂停，不要求重构为所有 Bank 独立恢复。人工处理方法见 [数据维护](DATA-MAINTENANCE.md#异常提示)。
+删除记录核对失败可触发全局恢复暂停。人工处理方法见 [数据维护](DATA-MAINTENANCE.md#异常提示)。
 
 ## 数据格式与恢复
 
 业务库 `runtime.sqlite3` 保存窗口、队列和去重。独立 `control.sqlite3` 保存身份、Bank、代次、模式、维护状态、删除日志、采集下限、操作接收凭据和取消意图，不保存聊天正文。
 
-格式演进沿用既有部署、逻辑身份、Bank、代次、摘要与 operation UUID。缺少历史基线的旧任务不从后来的历史补造助手锚点。退出本地更正时，只移除空的 `corrections` 表；若存在历史记录，启动报告 `legacy_corrections_require_handover` 并保留原数据，完成实际数据交接后再升级，不提供通用迁移框架。
+格式演进沿用既有部署、逻辑身份、Bank、代次、摘要与 operation UUID。缺少历史基线的旧任务不从后来的历史补造助手锚点。格式升级只移除空的 `corrections` 表；若存在历史记录，启动报告 `legacy_corrections_require_handover` 并保留原数据，完成实际数据交接后再升级，不提供通用迁移框架。
 
 ## AstrBot 管理视图与安装
 
-`views/memory/` 使用 AstrBot 插件视图 bridge 调用 `core/panel.py` 注册的管理 API，继承 Dashboard 登录与插件访问权限。页面管理连接、账号、Bank 映射、队列、诊断和维护，不提供自制内容管理。模型选项只输出名称与兼容结论，服务端通过公开供应商接口生成 Hindsight 配置。
+`views/memory/` 使用 AstrBot 插件视图 bridge 调用 `core/panel.py` 注册的管理 API，继承 Dashboard 登录与插件访问权限。页面分为「运行管理」与「设置」，管理连接、账号、Bank 映射、队列、诊断和维护；内容管理使用 Hindsight 原生 Control Plane。模型选项只输出标识、名称与兼容结论，服务端通过公开供应商接口生成 Hindsight 配置。
 
-`config.control_plane_url` 保存独立浏览器管理地址，与 `api_url` 分开配置。管理员页面显示可选择复制的地址与 Bank；普通用户命令不输出 CP/API Key。官方 Control Plane 独立登录，采用独立 HTTPS 或 SSH 隧道，不依赖 iframe、SSO、一键外链或插件反代。
+`config.control_plane_url` 保存浏览器可访问的「官方管理地址」，与 `api_url` 分开配置。管理员页面显示可选择复制的地址与「记忆库编号」（Bank ID）；普通用户命令不输出 CP/API Key。官方 Control Plane 独立登录，采用独立 HTTPS 或 SSH 隧道，不依赖 iframe、SSO、一键外链或插件反代。
 
-配套安装命令打包固定服务模板及服务自身凭据，在 Linux Docker 主机创建独立服务与数据卷，并交付匹配版本的官方 Control Plane；模型配置通过安装后的管理接口提交。容器部署按 AstrBot hostname 识别已有网络，只将配套服务接入该网络。`setup.json` 保存安装标识、服务连接、独立管理密钥和供应商选择。CP 的数据 API Key 与页面访问 Key 分别配置，主机端口仅绑定环回地址，访问步骤见 [部署说明](../deploy/README.md)。
+配套安装器封装 Hindsight 原生启动与配置，不修改 AstrBot 或 Hindsight 的上游源代码。安装命令打包固定服务模板及服务自身凭据，在 Linux Docker 主机创建独立服务与数据卷，并交付匹配版本的官方 Control Plane；模型配置通过安装后的管理接口提交。容器部署按 AstrBot hostname 识别已有网络，只将配套服务接入该网络。`setup.json` 保存安装标识、服务连接、独立管理密钥和供应商选择。CP 的数据 API Key 与页面访问 Key 分别配置，主机端口仅绑定环回地址，访问步骤见 [部署说明](../deploy/README.md)。
 
 `deploy/managed_service.py` 在配套容器的 8766 端口提供鉴权管理接口，只能配置本容器的 Hindsight 子进程与私有设置卷。它不挂载 Docker socket。应用配置前从服务侧检查模型，启动失败时恢复先前配置；模型文件原子写入 `models.json`，进程重启后恢复。嵌入身份独立于密钥，指纹变化时拒绝直接复用数据。
 

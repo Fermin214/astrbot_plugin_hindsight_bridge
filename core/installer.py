@@ -191,10 +191,11 @@ else
   docker compose --project-name "$project" up -d --build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
 fi
 docker compose --project-name "$project" up -d --wait --wait-timeout 600
-printf '\n安装完成。回到插件的「设置」选择模型，点击「检查并保存模型」。\n'
+printf '\n安装完成。回到插件的「设置」选择模型，点击「验证并保存模型」。\n'
 printf '服务文件位置：%s\n' "$target"
-printf '官方面板（服务器环回地址，远程访问需 SSH 隧道）：http://127.0.0.1:CP_PORT_VALUE\n'
-printf '面板登录 Key：安装目录 .env 中的 HINDSIGHT_CP_ACCESS_KEY；请在服务器私密终端读取。\n'
+printf '官方面板：http://127.0.0.1:CP_PORT_VALUE（远程电脑需先建立 SSH 隧道，或配置域名反向代理）\n'
+printf '在此服务器执行下面的命令，获取面板登录密钥：\n'
+printf '%s %q %s\n' "sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p'" "$target/.env" "| tr -d '\047\042'"
 """
 
 UNINSTALL = r"""#!/bin/bash

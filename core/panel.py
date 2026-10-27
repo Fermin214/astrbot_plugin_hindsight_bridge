@@ -73,9 +73,9 @@ class MemoryPanel:
 
     def error_message(self, code):
         messages = {
-            "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试后台任务」。",
-            "remote_cancelled": "后台任务已取消。",
-            "cancellation_registered": "正在取消后台任务。",
+            "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试失败记录」。",
+            "remote_cancelled": "这条记录的保存已取消。",
+            "cancellation_registered": "正在取消这条记录的保存。",
             "retry_state_changed": "任务状态已变化，请刷新状态。",
             "cancel_target_missing": "需要取消的任务已不存在，请刷新状态。",
         }
@@ -162,7 +162,7 @@ class MemoryPanel:
 
     def control_plane_url(self, value, *, api_key=""):
         if not isinstance(value, str):
-            raise PanelError("管理地址须为 HTTP 或 HTTPS 地址。")
+            raise PanelError("请填写以 http:// 或 https:// 开头的面板地址。")
         value = value.strip()
         if not value:
             return ""
@@ -186,7 +186,10 @@ class MemoryPanel:
                 raise ValueError
             return str(url)
         except (ValueError, httpx.InvalidURL):
-            raise PanelError("管理地址仅支持 HTTP/HTTPS，不能包含登录凭据、查询参数或片段。") from None
+            raise PanelError(
+                "请填写面板首页地址（以 http:// 或 https:// 开头），去掉 ? 或 # 后面的内容。"
+                "登录密钥请在面板登录页输入。"
+            ) from None
 
     def displayed_control_plane_url(self, value):
         try:
@@ -269,6 +272,14 @@ class MemoryPanel:
                 connection_message = self.error_message(plugin.error_code(exc))
         scopes = await self.user_scopes()
         state = self.state()
+        key_command = ""
+        if re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", ""))):
+            key_command = (
+                "sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "
+                '"${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/'
+                f'astrbot-memory-{state["id"]}/.env"'
+                r" | tr -d '\047\042'"
+            )
         managed_status = None
         if state.get("management_url") and state.get("management_key"):
             try:
@@ -301,6 +312,7 @@ class MemoryPanel:
             "model_job": self.model_job,
             "has_installation": bool(state.get("id")),
             "installation_api_url": state.get("api_url", ""),
+            "control_plane_key_command": key_command,
             "providers": self.providers().options(),
             "status": {
                 "label": connection_message or plugin.status,
@@ -619,7 +631,10 @@ class MemoryPanel:
                     raise PanelError("discard_pending 须为布尔值。")
                 state = maintenance.begin(scope_id, discard_pending=discard)
                 plugin.worker.wake.set()
-                return {"maintenance": state, "message": "维护已开始；远端已接受的任务继续排空。"}
+                return {
+                    "maintenance": state,
+                    "message": "维护已开始，新记录和记忆查询已暂停。请等到显示「可以修改记忆」后再去官方面板操作。",
+                }
             if action == "maintenance_status":
                 state = await maintenance.status(scope_id)
                 plugin.worker.wake.set()
@@ -632,24 +647,24 @@ class MemoryPanel:
             if action == "mode":
                 mode = payload.get("mode")
                 if mode not in {"active", "readonly", "paused"}:
-                    raise PanelError("请选择开启、只读或暂停。")
+                    raise PanelError("请选择「正常记忆」「只用已有记忆」或「暂停记忆」。")
                 if mode == "active":
                     summary = queue.summary(scope_id)
                     if summary.get("maintenance") or summary.get("bank_missing"):
-                        raise PanelError("请先完成维护并恢复 Bank 映射，再开启记忆。")
+                        raise PanelError("请先结束维护；如果记忆库已被删除，请恢复原记忆库或清空旧记忆后重新开始。")
                     if not await maintenance.check(force=True, owner_id=scope["owner_id"]):
-                        raise PanelError("旧范围仍在清理，请稍后开启。")
+                        raise PanelError("旧记忆仍在清理，请等清理完成后再开启记忆。")
                     latest = self.scope(scope_id)
                     if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
                         raise PanelError("记忆范围已变化，请刷新后重试。")
                     summary = queue.summary(scope_id)
                     if summary.get("maintenance") or summary.get("bank_missing"):
-                        raise PanelError("请先完成维护并恢复 Bank 映射，再开启记忆。")
+                        raise PanelError("请先结束维护；如果记忆库已被删除，请恢复原记忆库或清空旧记忆后重新开始。")
                 queue.set_mode(scope_id, mode)
                 message = "记忆模式已更新。"
             elif action == "retry":
                 count = queue.request_retry(scope_id)
-                message = f"已登记 {count} 条失败任务重试。"
+                message = f"已安排重新保存 {count} 条失败记录。"
             elif action == "forget_prepare":
                 if not request.username:
                     raise PanelError("请使用 AstrBot 管理账号登录。")
@@ -661,8 +676,8 @@ class MemoryPanel:
                 }
                 return {
                     "confirmation": token,
-                    "message": "完整遗忘会清除旧 Bank、聊天来源和待办，显式登记新 Bank 并保持暂停。"
-                    "旧 Bank 的远端清理仍可能需要时间；清理完成后再开启记忆。",
+                    "message": "清空后记忆功能保持暂停。等清理完成，再切换为「正常记忆」；"
+                    "下次保存聊天时会自动创建新的记忆库。",
                 }
             elif action == "forget_confirm":
                 confirmation = str(payload.get("confirmation", ""))
@@ -674,9 +689,9 @@ class MemoryPanel:
                     or old["revision"] != scope["revision"]
                     or not secrets.compare_digest(old["token"], confirmation)
                 ):
-                    raise PanelError("确认已失效，请重新选择完整遗忘。")
+                    raise PanelError("确认已失效，请重新点击「清空此用户的记忆」。")
                 queue.forget(scope_id)
-                message = "完整遗忘已登记，新 Bank 保持暂停。请等待旧 Bank 清理完成后再开启记忆。"
+                message = "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「正常记忆」重新开始。"
             else:
                 raise PanelError("操作无效。")
             plugin.worker.wake.set()

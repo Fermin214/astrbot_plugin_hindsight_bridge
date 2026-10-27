@@ -58,32 +58,32 @@ class HindsightBridge(Star):
     @staticmethod
     def diagnostic(code):
         explanations = {
-            "http_401": "API Key 无效，请检查服务与插件凭据",
+            "http_401": "连接密钥无效，请检查服务和插件的 API Key 是否一致",
             "http_403": "服务拒绝访问，请检查 API Key 权限",
             "server_auth_not_enforced": "后端未启用认证，请配置服务 API Key",
-            "connection_error": "无法连接后端，请检查地址、网络和容器服务名",
-            "timeout": "后端响应超时",
+            "connection_error": "无法连接记忆服务，请检查 API 地址、网络和容器服务名",
+            "timeout": "记忆服务响应超时",
             "recall_timeout": "检索超过时限，聊天继续",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
-            "accepted_operation_missing": "已接收任务的远端记录缺失，请核对后端恢复点",
-            "payload_digest_conflict": "冻结材料摘要不一致，请检查业务库",
-            "scope_not_active": "请先用 /hindsight on 开启采集",
-            "scope_not_available": "记忆范围正在恢复或已变更，请稍后重试",
-            "bank_missing": "既有 Bank 已丢失，记忆保持暂停；请管理员恢复原 Bank 后显式结束维护，或确认完整遗忘并登记新 Bank",
-            "maintenance_active": "记忆正在维护，采集、召回、提交和重试已暂停；请管理员在插件管理页查看排空进度并完成维护",
-            "maintenance_pending": "维护仍有在途任务或未提交待办；请管理员等待已接受任务排空，并显式作废未提交旧待办",
-            "maintenance_unknown_operation": "任务接收或协作取消结果待核对，保持暂停且不重发；修复服务后核对原操作，或确认完整遗忘恢复",
-            "legacy_corrections_require_handover": "检测到历史本地更正，启动已阻止；请管理员备份业务库和最新控制库，完成数据交接后重载，勿删除原数据",
+            "accepted_operation_missing": "Hindsight 找不到已接收的记录，请管理员检查服务恢复时使用的备份",
+            "payload_digest_conflict": "待保存内容校验失败，请管理员检查插件本地数据库",
+            "scope_not_active": "请先用 /hindsight on 开启记忆",
+            "scope_not_available": "这个用户的记忆正在恢复或设置已变化，请稍后重试",
+            "bank_missing": "找不到原记忆库，记忆功能已暂停；请管理员恢复原库并结束维护，或清空旧记忆后重新开始",
+            "maintenance_active": "正在维护，新记录和记忆查询已暂停；请管理员在插件页查看进度，完成操作后结束维护",
+            "maintenance_pending": "还有记录未处理完；请管理员在插件页查看保存进度，等待处理完成，或放弃尚未发送和保存失败的记录",
+            "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后刷新维护状态。需要清空全部旧记忆时，可使用清空操作重新开始",
+            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按数据维护指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
             "invalid_capture": "内容为空或超出长度限制",
             "assistant_history_changed": "已保存的助手正文发生变化，请检查会话编辑记录",
             "conversation_history_not_saved": "助手正文尚未保存到会话历史，下一条消息继续核对",
-            "http_404": "本人范围内没有这条记忆",
-            "export_too_large": "导出超出容量限制，请由管理员使用后端数据导出",
-            "export_limit_exceeded": "记忆超过导出数量上限，请由管理员使用后端数据导出",
+            "http_404": "你的记忆库中没有这条记忆",
+            "export_too_large": "导出文件过大，请联系管理员从官方面板导出",
+            "export_limit_exceeded": "记忆数量超过命令导出上限，请联系管理员从官方面板导出",
             "export_changed": "导出期间记忆发生变化，请稍后重试",
             "catalog_changed": "查看期间记忆发生变化，请重新查看该页",
-            "export_source_missing": "记忆来源不完整，请检查后端数据与保留策略",
+            "export_source_missing": "记忆来源不完整，请管理员检查 Hindsight 数据和保留设置",
             "invalid_identifier": "记忆 ID 无效，请从 view 列表复制完整 ID",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
         }
@@ -479,19 +479,19 @@ class HindsightBridge(Star):
     @hindsight.command("help")
     async def memory_help(self, event: AstrMessageEvent):
         yield event.plain_result(
-            "Hindsight Memory\n"
-            "/hindsight status：连接、模式、队列与清理进度\n"
+            "Hindsight 记忆\n"
+            "/hindsight status：连接、模式和保存进度\n"
             "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
-            "/hindsight show 记忆ID：查看类型、时间与来源\n"
-            "/hindsight recall 问题：检索本人记忆\n"
-            "/hindsight export：导出 JSON 文件（事实、整合观察与源文档）\n"
-            "更正记忆：请管理员在插件管理页复制 Bank，在官方 Control Plane 中操作\n"
-            "/hindsight on | readonly | pause：开启、只读、暂停\n"
-            "/hindsight retry：重试失败任务\n"
+            "/hindsight show 记忆ID：查看详情和来源\n"
+            "/hindsight recall 问题：查找相关记忆\n"
+            "/hindsight export：导出记忆和来源（JSON）\n"
+            "修改记忆：联系管理员，在插件页开始维护后到 Hindsight 官方面板操作\n"
+            "/hindsight on | readonly | pause：正常记忆、只用已有记忆、暂停记忆\n"
+            "/hindsight retry：重试保存失败的记录\n"
             "/hindsight cancel 任务编号：取消上传，已形成的记忆保留\n"
-            "/hindsight forget：查看完整遗忘范围并取得确认码\n"
-            "维护期间采集、召回、提交和重试暂停；已接受任务继续排空。\n"
-            "自动记录用户原文和标准会话历史中的助手正文；助手正文不证明送达或操作执行。"
+            "/hindsight forget：清空本人全部记忆，需再次确认\n"
+            "维护时暂停新记录和记忆查询，Hindsight 已接收的记录继续处理。\n"
+            "自动记录你的原话和机器人保存到会话历史的最终回复。"
         )
 
     @hindsight.command("view")
@@ -583,8 +583,8 @@ class HindsightBridge(Star):
                         MessageChain([File(name=path.name, file=str(path))])
                     )
                 yield event.plain_result(
-                    "本人记忆 JSON 已交给平台发送。范围包含事实、整合观察与源文档；"
-                    "上传队列和 AstrBot 聊天历史不在导出范围内。"
+                    "已发送记忆 JSON 文件，包含记忆事实、整合结果和来源文档。"
+                    "插件待保存记录和 AstrBot 聊天历史不在文件中。"
                 )
             except (HindsightError, QueueError, TimeoutError) as exc:
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
@@ -603,8 +603,8 @@ class HindsightBridge(Star):
             yield event.plain_result("此私聊未开放记忆。")
             return
         yield event.plain_result(
-            "记忆更正请联系管理员：在 AstrBot 插件管理页复制对应 Bank，"
-            "独立登录官方 Control Plane 完成更正；修改前先进入维护并处理旧待办。"
+            "请联系管理员修改记忆：在 AstrBot 插件页开始维护，"
+            "等记录处理完成后，到 Hindsight 官方面板按记忆库编号找到并修改记忆。"
         )
 
     @hindsight.command("status")
@@ -643,35 +643,43 @@ class HindsightBridge(Star):
                 counts.get(s, 0)
                 for s in ("submitting", "unknown", "tracking", "cancel_requested")
             )
-            modes = {"active": "开启", "readonly": "只读", "paused": "暂停"}
+            modes = {"active": "正常记忆", "readonly": "只用已有记忆", "paused": "暂停记忆"}
             erasures = self.outbox.control.erasures(
                 self.outbox.connection_id, owner_id=scope["owner_id"]
             )
             cleanup = (
-                "远端清理中"
+                "正在删除旧记忆"
                 if any(r["phase"] != "verified" for r in erasures)
-                else "远端删除已核对"
+                else "旧记忆已删除"
                 if erasures
                 else "无清空记录"
             )
-            tasks = (
-                "，".join(f"{r['id']}:{r['state']}" for r in summary["tasks"]) or "无"
-            )
+            task_labels = {
+                "ready": "等待发送", "submitting": "正在发送",
+                "unknown": "确认保存结果中", "tracking": "Hindsight 正在整理",
+                "held": "等待机器人回复", "failed": "保存失败",
+                "reconcile_required": "需要检查保存结果",
+                "cancel_requested": "正在取消", "cancelled": "已取消",
+                "done": "已保存", "discarded": "已放弃保存",
+            }
+            tasks = "，".join(
+                f"{r['id']}（{task_labels.get(r['state'], r['state'])}）"
+                for r in summary["tasks"]
+            ) or "无"
             yield event.plain_result(
                 f"Hindsight：{connection}\n{runner}；模式：{modes[scope['mode']]}\n"
                 f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
-                f"逻辑用户：{scope['principal_id']}；代次：{scope['generation']}\n"
-                f"待提交 {waiting}，处理中 {tracking}，失败 {counts.get('failed', 0)}，"
+                f"诊断编号：{scope['principal_id']} / {scope['generation']}\n"
+                f"等待发送 {waiting}，处理中 {tracking}，失败 {counts.get('failed', 0)}，"
                 f"需核对 {counts.get('reconcile_required', 0)}，完成 {counts.get('done', 0)}\n"
-                f"最老待办：{summary['oldest_seconds']} 秒；任务：{tasks}\n"
-                f"Observation：{stats.get('total_observations', '未知')}；"
+                f"最早记录已等待：{summary['oldest_seconds']} 秒；任务编号与进度：{tasks}\n"
+                f"整合记忆：{stats.get('total_observations', '未知')}；"
                 f"待整合：{stats.get('pending_consolidation', '未知')}\n"
                 f"清空：{cleanup}\n"
                 f"维护：{maintenance}\n"
                 f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
-                f"最近队列错误：{self.diagnostic(summary['last_error'])}\n"
-                f"最近采集提示：{self.status}\n"
-                "助手自动记录：标准会话历史正文，发送状态未知\n"
+                f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
+                f"最近记录状态：{self.status}\n"
                 "常用操作：/hindsight help"
             )
 
@@ -717,7 +725,7 @@ class HindsightBridge(Star):
                     if not await self.worker.maintenance.check(
                         force=True, owner_id=scope["owner_id"]
                     ):
-                        return "旧范围仍在清理，请稍后开启。"
+                        return "旧记忆仍在清理，请等清理完成后再开启记忆。"
                     if not self.allowed(event):
                         return "此私聊未开放记忆。"
                     latest = self.outbox.scope_owner(scope["scope_id"])
@@ -731,9 +739,9 @@ class HindsightBridge(Star):
             except QueueError as exc:
                 return "模式切换失败：" + self.diagnostic(str(exc))
         return {
-            "active": "记忆已开启，从新消息开始采集；暂停前的同代次队列继续处理。",
-            "readonly": "记忆已设为只读：继续召回，停止采集，未提交队列冻结。",
-            "paused": "记忆已暂停：停止采集和自动召回，未提交队列冻结。",
+            "active": "记忆已开启：开始记录新消息，并继续保存暂停前的待处理记录。",
+            "readonly": "只使用已有记忆，不再记录新消息；尚未发送的记录等重新开启后再保存。",
+            "paused": "记忆已暂停：不再记录新消息或自动查找记忆；尚未发送的记录等重新开启后再保存。",
         }[mode]
 
     @hindsight.command("on")
@@ -761,7 +769,7 @@ class HindsightBridge(Star):
                 return
             count = self.outbox.request_retry(scope["scope_id"])
             self.worker.wake.set()
-            yield event.plain_result(f"已登记 {count} 条失败任务重试。")
+            yield event.plain_result(f"已安排重新保存 {count} 条失败记录。")
         except QueueError as exc:
             yield event.plain_result("无法重试：" + self.diagnostic(str(exc)))
 
@@ -775,7 +783,7 @@ class HindsightBridge(Star):
             self.outbox.request_cancel(scope["scope_id"], task_id)
             self.worker.wake.set()
             yield event.plain_result(
-                f"任务 {task_id} 已登记取消，后台继续核对根任务和子任务。已产生的记忆保留。"
+                f"正在取消任务 {task_id}，可用 /hindsight status 查看进度。已经生成的记忆保留。"
             )
         except QueueError as exc:
             yield event.plain_result("无法取消：" + self.diagnostic(str(exc)))
@@ -823,10 +831,10 @@ class HindsightBridge(Star):
                     "until": time.monotonic() + 120,
                 }
                 yield event.plain_result(
-                    f"清空范围：{event.get_platform_id()} / {event.get_sender_id()}，"
-                    f"逻辑用户 {scope['principal_id']}，代次 {scope['generation']}。\n"
-                    "将删除此逻辑用户在该记忆空间的文档、事实、Observation、"
-                    "异步任务及其原始材料，并作废本地旧队列。绑定到同一范围的账号共用此结果。\n"
+                    f"用户：{event.get_platform_id()} / {event.get_sender_id()}。\n"
+                    "将删除这个用户在 Hindsight 中的全部记忆、用于生成记忆的聊天内容，"
+                    "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。"
+                    "如果其他账号共用此记忆库，它们的记忆也会一起清空。\n"
                     f"确认请在 120 秒内发送：/hindsight forget {token}"
                 )
                 return
@@ -845,8 +853,8 @@ class HindsightBridge(Star):
                 self.outbox.forget(scope["scope_id"])
                 self.worker.wake.set()
                 yield event.plain_result(
-                    "旧范围已停用，本地旧队列已作废；远端清理中。"
-                    "记忆保持暂停，用 /hindsight status 查看结果，用 /hindsight on 开启新范围。"
+                    "正在清空旧记忆，记忆功能已暂停。"
+                    "用 /hindsight status 查看进度；清理完成后发送 /hindsight on，开始记录新记忆。"
                 )
             except (QueueError, OSError, sqlite3.DatabaseError) as exc:
                 self.warning(

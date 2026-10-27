@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView;
-const modeLabels = { active: "正常记忆", readonly: "只读记忆", paused: "暂停记忆" };
+const modeLabels = { active: "正常记忆", readonly: "只用已有记忆", paused: "暂停记忆" };
 const modeHelp = {
   active: "读取已有记忆，并保存新的记忆。",
   readonly: "读取已有记忆，不保存新的记忆。",
@@ -79,6 +79,7 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
 }
 
 function activateTab(name, focus = false) {
+  document.querySelectorAll(".help[open]").forEach((help) => { help.open = false; });
   if (name !== "setup") {
     clearCommands();
   }
@@ -232,18 +233,18 @@ function scopeName(scope) {
 }
 
 function countDescription(counts) {
-  if (counts == null) return "任务统计暂未提供";
-  if (typeof counts === "number") return `任务数：${counts}`;
+  if (counts == null) return "暂时无法获取保存进度";
+  if (typeof counts === "number") return `待处理记录：${counts}`;
   const labels = {
-    pending: "等待处理", running: "正在处理", processing: "正在处理", queued: "排队中",
+    pending: "等待保存", running: "正在保存", processing: "正在保存", queued: "等待保存",
     failed: "失败", error: "错误", retry: "待重试", retrying: "重试中",
     completed: "已完成", done: "已完成", succeeded: "已完成", total: "总计",
     retained: "已保存", cancelled: "已取消", dead: "失败",
-    ready: "等待处理", submitting: "正在提交", unknown: "结果待确认", tracking: "正在整理",
-    reconcile_required: "需要核对", discarded: "已丢弃", collecting: "收集中", held: "等待回复",
+    ready: "等待发送", submitting: "正在发送", unknown: "正在确认保存结果", tracking: "Hindsight 正在整理",
+    reconcile_required: "需要检查保存结果", discarded: "已放弃保存", collecting: "正在记录", held: "等待机器人回复",
     cancel_requested: "正在取消",
   };
-  return Object.entries(counts).map(([key, value]) => `${labels[key] || key}：${text(value)}`).join("，") || "暂无后台任务";
+  return Object.entries(counts).map(([key, value]) => `${labels[key] || key}：${text(value)}`).join("，") || "暂无等待保存的记录";
 }
 
 function renderStatus() {
@@ -275,7 +276,7 @@ function renderStatus() {
   (data.scopes || []).forEach((scope) => {
     const row = el("article", "scope-status");
     const heading = el("div", "scope-status-header");
-    const manage = el("button", "", "管理此账号");
+    const manage = el("button", "", "管理此用户");
     manage.type = "button";
     manage.addEventListener("click", () => {
       if (locks.has("memory")) return;
@@ -343,12 +344,13 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
 }
 
 function maintenanceDescription(summary = {}, state = null) {
-  if (summary.bank_missing || state?.bank_missing) return "映射失效：原 Bank 已不存在。恢复原 Bank 后可结束维护并核对映射；也可通过完整遗忘显式登记新 Bank。";
-  if (state?.phase === "inactive" || !summary.maintenance) return "未处于维护状态。";
-  if (state?.error) return `维护状态暂时无法确认：${state.error} 请保持暂停，刷新维护状态后再操作。`;
-  if (state?.ready === true && state.phase === "ready") return "可维护：服务已确认任务排空，可在官方管理页面操作此 Bank。";
-  if (state?.pending || state?.in_flight || state?.remote_active) return "排空中：仍有待办或远端任务。未提交的待办须明确勾选丢弃并应用维护选项；状态不明或取消结果无法确认时保持暂停，可使用完整遗忘轮换 Bank。";
-  return "排空中：等待服务确认。请刷新维护状态，确认可维护后再操作 Bank。";
+  if (summary.bank_missing || state?.bank_missing) return "找不到这个用户的记忆库，记忆功能已暂停。请恢复原记忆库，或通过「清空此用户的记忆」重新开始。";
+  if (state?.phase === "inactive" || !summary.maintenance) return "尚未开始维护，日常聊天无需操作这里。";
+  if (state?.error) return `暂时无法确认保存进度：${state.error} 请稍后点击「刷新维护状态」，确认完成后再修改记忆。`;
+  if (state?.ready === true && state.phase === "ready") return "可以修改记忆：新记录和记忆查询已暂停，之前的记录已处理完。请到官方面板操作，完成后点击「结束维护并恢复」。";
+  if (state?.pending) return "仍有未保存的记录。Hindsight 已接收的记录会继续处理；尚未发送或保存失败的记录如需放弃，勾选下方选项后再次点击「开始维护」。";
+  if (state?.in_flight || state?.remote_active) return "正在等待 Hindsight 处理已接收的记录。请稍后刷新维护状态。";
+  return "正在确认保存结果。请等到显示「可以修改记忆」后再去官方面板操作。";
 }
 
 async function readMaintenanceStatus() {
@@ -377,13 +379,18 @@ function renderScope() {
   const maintenanceActive = !!summary.maintenance;
   $("scope-mode").querySelector('[value="active"]').disabled = maintenanceActive || !!summary.bank_missing;
   $("scope-mode").querySelector('[value="readonly"]').disabled = maintenanceActive || !!summary.bank_missing;
-  $("maintenance-begin").textContent = maintenanceActive ? "应用维护选项" : "开始维护";
   $("maintenance-resume").disabled ||= !maintenanceActive || maintenanceState?.ready !== true || maintenanceState.phase !== "ready";
   $("retry").disabled ||= maintenanceActive || !!summary.bank_missing;
   $("scope-error").hidden = !summary.error_message;
   $("scope-error").textContent = text(summary.error_message);
   $("control-plane-address").value = data?.config.control_plane_url || "";
   $("control-plane-missing").hidden = !!data?.config.control_plane_url;
+  const keyCommand = data?.config.managed ? data.control_plane_key_command || "" : "";
+  $("control-plane-key-command").hidden = !keyCommand;
+  $("control-plane-key-command").value = keyCommand;
+  $("control-plane-key-help").textContent = keyCommand
+    ? "用安装服务时的账号登录服务器，在终端执行下方命令。输出的内容就是面板登录密钥；自定义过安装目录时，请替换命令中的路径。"
+    : "连接已有 Hindsight 时，请向服务维护者获取网页登录密钥。";
   $("scope-bank").value = scope?.bank || "";
   $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : countDescription(summary.counts);
   $("maintenance-state").textContent = maintenanceDescription(summary, maintenanceState);
@@ -414,8 +421,10 @@ function controlPlaneUrl(value) {
   value = value.trim();
   if (!value) return "";
   let parsed;
-  try { parsed = new URL(value); } catch { throw new Error("请填写完整的官方管理地址。"); }
-  if (!/^https?:\/\//i.test(value) || !["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || /[@]/.test(value.split("/")[2]) || /[?#\\\s]/.test(value)) throw new Error("管理地址仅支持 HTTP/HTTPS，不能包含登录凭据、查询参数或片段。");
+  try { parsed = new URL(value); } catch { throw new Error("请填写完整的面板地址，例如 https://memory.example.com。"); }
+  if (!/^https?:\/\//i.test(value) || !["http:", "https:"].includes(parsed.protocol)) throw new Error("面板地址请以 http:// 或 https:// 开头。");
+  if (parsed.username || parsed.password || /[@]/.test(value.split("/")[2])) throw new Error("请只填写面板地址，登录密钥在面板登录页输入。");
+  if (/[?#\\\s]/.test(value)) throw new Error("请填写面板首页地址，去掉空格、反斜杠以及 ? 或 # 后面的内容。");
   return value;
 }
 
@@ -711,7 +720,7 @@ $("maintenance-begin").addEventListener("click", () => void maintenanceAction($(
 $("maintenance-status").addEventListener("click", () => void maintenanceAction($("maintenance-status"), "maintenance_status"));
 $("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
 
-for (const id of ["control-plane-address", "scope-bank"]) $(id).addEventListener("focus", () => $(id).select());
+for (const id of ["control-plane-address", "scope-bank", "control-plane-key-command"]) $(id).addEventListener("focus", () => $(id).select());
 for (const [details, field] of [["installation", "install-command"], ["uninstallation", "uninstall-command"]]) {
   $(details).addEventListener("toggle", () => { if (!$(details).open) $(field).value = ""; });
 }
@@ -719,6 +728,18 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearCommands();
 });
 window.addEventListener("pagehide", clearCommands);
+document.addEventListener("click", (event) => {
+  document.querySelectorAll(".help[open]").forEach((help) => {
+    if (!help.contains(event.target)) help.open = false;
+  });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  document.querySelectorAll(".help[open]").forEach((help) => {
+    help.open = false;
+    help.querySelector("summary").focus();
+  });
+});
 function clearCommands() {
   $("installation").open = false;
   $("uninstallation").open = false;
@@ -729,7 +750,7 @@ function clearCommands() {
 $("forget").addEventListener("click", () => void perform($("forget"), "memory", async () => {
   const id = scopeId;
   const response = await bridge.apiPost(endpoint("action", id), { action: "forget_prepare" });
-  if (!response.confirmation) throw new Error("未取得遗忘确认信息，请重试。");
+  if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
   forgetState = { id, confirmation: response.confirmation };
   $("forget-user").textContent = scopeName(data.scopes.find((scope) => scope.scope_id === id));
   $("forget-message").textContent = response.message || "";
@@ -754,7 +775,7 @@ $("confirm-forget").addEventListener("click", () => {
       forgetState = null;
       $("forget-dialog").close();
       await refreshBootstrap();
-      notify(response.message || "完整遗忘已登记。请等待旧 Bank 清理完成后，再开启记忆。");
+      notify(response.message || "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「正常记忆」重新开始。");
     } finally {
       $("forget-agree").disabled = false;
       $("cancel-forget").disabled = false;
@@ -763,7 +784,7 @@ $("confirm-forget").addEventListener("click", () => {
         forgetState = null;
         $("forget-agree").checked = false;
         $("forget-agree").disabled = true;
-        $("forget-message").textContent = "操作未完成。请关闭此窗口，重新点击「完整遗忘并轮换 Bank」获取确认信息。";
+        $("forget-message").textContent = "操作未完成。请关闭此窗口，重新点击「清空此用户的记忆」。";
       }
     }
   }, "forget-feedback").finally(() => { $("confirm-forget").disabled = true; });

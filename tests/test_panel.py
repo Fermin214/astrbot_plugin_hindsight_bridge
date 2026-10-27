@@ -390,12 +390,14 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bootstrap_hides_invalid_address_and_service_secrets(self):
         self.panel.saved_state = {
+            "id": "012345abcdef",
             "api_key": "setup-secret", "management_key": "manager-secret",
             "control_plane_key": "cp-secret", "database_password": "db-secret",
         }
         self.config["control_plane_url"] = "https://memory.example.com/?key=cp-secret"
         snapshot = await self.panel.bootstrap()
         self.assertEqual(snapshot["config"]["control_plane_url"], "")
+        self.assertIn("astrbot-memory-012345abcdef/.env", snapshot["control_plane_key_command"])
         serialized = json.dumps(snapshot)
         for secret in ("old-secret", "setup-secret", "manager-secret", "cp-secret", "db-secret"):
             self.assertNotIn(secret, serialized)
