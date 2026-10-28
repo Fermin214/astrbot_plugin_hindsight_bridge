@@ -195,19 +195,37 @@ class Maintenance:
 
     async def _verify_refs(self, fid, bank, epoch):
         control = self.outbox.control
+
+        async def exists(kind, ref):
+            if kind == "operation":
+                return (await self.client.operation(bank, ref)).status != "not_found"
+            return await self.client.document_exists(bank, ref)
+
+        # Absence can change remotely without changing the local epoch. Complete
+        # a fresh sweep before verification; only cancellation progress is durable.
         for kind in ("operation", "document"):
-            for ref in control.cleanup_refs(fid, kind, 3):
-                exists = (
-                    (await self.client.operation(bank, ref)).status != "not_found"
-                    if kind == "operation" else await self.client.document_exists(bank, ref)
-                )
-                if exists:
-                    return self._retired_data_present(fid, epoch)
-                if not control.cleanup_ref_done(fid, kind, ref, 3, epoch):
-                    return False
-            if control.cleanup_refs(fid, kind, 3, limit=1):
-                control.cleanup_state(fid, "cleaning", delay=1, epoch=epoch)
-                return False
+            after = None
+            while refs := control.refs(fid, kind, after=after):
+                for offset in range(0, len(refs), 4):
+                    if not control.cleanup_current(fid, epoch):
+                        return False
+                    async with asyncio.timeout(45):
+                        results = await asyncio.gather(
+                            *(exists(kind, ref) for ref in refs[offset:offset + 4]),
+                            return_exceptions=True,
+                        )
+                    if not control.cleanup_current(fid, epoch):
+                        return False
+                    errors = [result for result in results if isinstance(result, BaseException)]
+                    if errors:
+                        raise next(
+                            (error for error in errors
+                             if isinstance(error, HindsightError) and error.authentication),
+                            errors[0],
+                        )
+                    if any(result is True for result in results):
+                        return self._retired_data_present(fid, epoch)
+                after = refs[-1]
         return True
 
     async def erase(self, record):
@@ -230,9 +248,9 @@ class Maintenance:
             control.cleanup_state(fid, "cleaning", epoch=epoch)
             try:
                 async with asyncio.timeout(45):
-                    # Each sweep and each absent reference survives timeout and process restart.
-                    # A late submission or restored reference changes the epoch, invalidating old work.
-                    while step < 7:
+                    # Cancellation sweeps survive timeout and process restart.
+                    # A late submission or restored reference invalidates old work.
+                    while step < 6:
                         if step in (0, 2):
                             operations = await self.client.list_operations(bank)
                             with control.db:
@@ -246,18 +264,18 @@ class Maintenance:
                         elif step == 5:
                             if await self._bank_has_data(bank):
                                 return self._retired_data_present(fid, epoch)
-                        elif step == 6:
-                            if not await self._verify_refs(fid, bank, epoch):
-                                return False
-                            # Verification can span calls; do not trust an earlier empty Bank listing.
-                            if await self._bank_has_data(bank):
-                                return self._retired_data_present(fid, epoch)
-                            return control.cleanup_state(
-                                fid, "verified", delay=86400, step=7, epoch=epoch
-                            )
                         step += 1
                         if not control.cleanup_state(fid, "cleaning", step=step, epoch=epoch):
                             return False
+                if not await self._verify_refs(fid, bank, epoch):
+                    return False
+                # Recheck the Bank after checking every reference.
+                async with asyncio.timeout(45):
+                    if await self._bank_has_data(bank):
+                        return self._retired_data_present(fid, epoch)
+                return control.cleanup_state(
+                    fid, "verified", delay=86400, step=7, epoch=epoch
+                )
             except (HindsightError, TimeoutError, QueueError) as exc:
                 error = exc.code if isinstance(exc, HindsightError) else str(exc)
                 if isinstance(exc, TimeoutError):

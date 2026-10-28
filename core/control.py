@@ -371,14 +371,21 @@ class Control:
             )
             self.bump()
 
-    def refs(self, forget_id, kind):
+    def refs(self, forget_id, kind, *, after=None, limit=128):
         return [
             r[0]
             for r in self.db.execute(
-                "SELECT ref FROM erasure_refs WHERE forget_id=? AND kind=?",
-                (forget_id, kind),
+                "SELECT ref FROM erasure_refs WHERE forget_id=? AND kind=? "
+                "AND (? IS NULL OR ref>?) ORDER BY ref LIMIT ?",
+                (forget_id, kind, after, after, limit),
             )
         ]
+
+    def cleanup_current(self, forget_id, epoch):
+        return bool(self.db.execute(
+            "SELECT 1 FROM erasures WHERE forget_id=? AND cleanup_epoch=?",
+            (forget_id, epoch),
+        ).fetchone())
 
     def erasures(self, connection, *, owner_id=None):
         clause = " AND owner_id=?" if owner_id else ""

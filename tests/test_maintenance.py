@@ -15,7 +15,7 @@ from unittest.mock import patch
 import httpx
 from test_controls import MemoryService
 
-from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
@@ -355,6 +355,155 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(erasure["phase"], "pending")
         self.assertEqual(erasure["next_at"], 0)
         self.assertTrue(await self.worker.maintenance.check())
+
+    async def checkpointed_erasure(self, kind):
+        captured = await self.seed()
+        record = self.queue.forget(captured.scope_id)
+        fid = record["forget_id"]
+        await self.client.delete_bank(captured.bank)
+        with self.queue.control.db:
+            self.queue.control.add_refs(
+                fid, [(kind, f"absent-{index:03}") for index in range(129)]
+            )
+            # Restore a verification checkpoint written by the batched cleanup format.
+            self.queue.control.db.execute(
+                "UPDATE erasure_refs SET checked_pass=3 "
+                "WHERE forget_id=? AND kind=? AND ref<'absent-128'",
+                (fid, kind),
+            )
+            self.queue.control.cleanup_state(fid, "cleaning", step=6, delay=0)
+        self.queue.close()
+        self.open()
+        return captured.bank, self.queue.control.erasures("test")[0]
+
+    async def finish_cleanup(self):
+        for _ in range(4):
+            if await self.worker.maintenance.check(force=True):
+                return
+            self.assertEqual(self.queue.control.erasures("test")[0]["last_error"], "")
+        self.fail("erasure did not finish across bounded cancellation batches")
+
+    async def test_resumed_verification_detects_hidden_operation_writeback(self):
+        bank, record = await self.checkpointed_erasure("operation")
+        self.service.operations["absent-000"] = {
+            "operation_id": "absent-000", "status": "cancelled",
+        }
+        self.service.op_banks["absent-000"] = bank
+        self.assertEqual(await self.client.list_operations(bank), [])
+        self.assertFalse(await self.worker.maintenance.erase(record))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["last_error"], "retired_data_present")
+        self.assertNotEqual(erasure["phase"], "verified")
+        await self.finish_cleanup()
+        self.assertEqual((await self.client.operation(bank, "absent-000")).status, "not_found")
+
+    async def test_resumed_verification_detects_hidden_document_writeback(self):
+        bank, record = await self.checkpointed_erasure("document")
+        self.service.documents[bank] = {"absent-000"}
+        self.assertFalse(await self.worker.maintenance.erase(record))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["last_error"], "retired_data_present")
+        self.assertNotEqual(erasure["phase"], "verified")
+        await self.finish_cleanup()
+        self.assertFalse(await self.client.document_exists(bank, "absent-000"))
+
+    async def test_verification_timeout_does_not_reuse_absence_results(self):
+        bank, record = await self.checkpointed_erasure("operation")
+        operation = self.client.operation
+        reads = []
+
+        async def timeout_at_last_batch(bank, ref):
+            reads.append(ref)
+            if ref == "absent-128":
+                raise TimeoutError()
+            return await operation(bank, ref)
+
+        with patch.object(self.client, "operation", side_effect=timeout_at_last_batch):
+            self.assertFalse(await self.worker.maintenance.erase(record))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["last_error"], "cleanup_timeout")
+        self.assertEqual(erasure["cleanup_step"], 6)
+        self.assertIn("absent-000", reads)
+        self.service.operations["absent-000"] = {
+            "operation_id": "absent-000", "status": "cancelled",
+        }
+        self.service.op_banks["absent-000"] = bank
+        self.assertFalse(await self.worker.maintenance.erase(erasure))
+        self.assertEqual(
+            self.queue.control.erasures("test")[0]["last_error"], "retired_data_present"
+        )
+        await self.finish_cleanup()
+
+    async def test_verification_authentication_error_survives_mixed_batch_results(self):
+        bank, record = await self.checkpointed_erasure("operation")
+        operation = self.client.operation
+        self.service.operations["absent-000"] = {
+            "operation_id": "absent-000", "status": "cancelled",
+        }
+        self.service.op_banks["absent-000"] = bank
+
+        async def mixed_results(bank, ref):
+            if ref == "absent-001":
+                raise TimeoutError()
+            if ref == "absent-002":
+                raise HindsightError("http_401")
+            return await operation(bank, ref)
+
+        with patch.object(self.client, "operation", side_effect=mixed_results):
+            self.assertFalse(await self.worker.maintenance.erase(record))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(self.queue.connection_error(), "http_401")
+        self.assertEqual(erasure["last_error"], "http_401")
+        self.assertNotEqual(erasure["phase"], "verified")
+        self.assertTrue(await self.worker.recover_connection())
+        self.assertFalse(await self.worker.maintenance.check(force=True))
+        self.assertEqual(
+            self.queue.control.erasures("test")[0]["last_error"], "retired_data_present"
+        )
+        await self.finish_cleanup()
+
+    async def test_complete_verification_can_outlast_one_batch_deadline(self):
+        bank, record = await self.checkpointed_erasure("operation")
+        operation = self.client.operation
+        loop = asyncio.get_running_loop()
+        clock, elapsed = loop.time, 0
+        checked = set()
+
+        async def slow_operation(bank, ref):
+            nonlocal elapsed
+            elapsed += 1
+            checked.add(ref)
+            await asyncio.sleep(0)
+            return await operation(bank, ref)
+
+        with (
+            patch.object(loop, "time", side_effect=lambda: clock() + elapsed),
+            patch.object(loop, "slow_callback_duration", float("inf")),
+            patch.object(self.client, "operation", side_effect=slow_operation),
+        ):
+            self.assertTrue(await self.worker.maintenance.erase(record))
+        self.assertGreater(elapsed, 45)
+        self.assertTrue({f"absent-{index:03}" for index in range(129)} <= checked)
+        self.assertEqual(self.queue.control.erasures("test")[0]["phase"], "verified")
+
+    async def test_epoch_change_stops_obsolete_reference_verification(self):
+        bank, record = await self.checkpointed_erasure("operation")
+        operation, reads = self.client.operation, []
+
+        async def late_return(bank, ref):
+            reads.append(ref)
+            if ref == "absent-000":
+                self.queue.control.retired_request_returned("test", bank)
+            return await operation(bank, ref)
+
+        with patch.object(self.client, "operation", side_effect=late_return):
+            self.assertFalse(await self.worker.maintenance.erase(record))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["phase"], "pending")
+        self.assertEqual(erasure["cleanup_step"], 0)
+        self.assertEqual(erasure["next_at"], 0)
+        self.assertNotIn("absent-128", reads)
+        await self.finish_cleanup()
 
     async def test_maintenance_is_persistent_and_does_not_block_other_accounts(self):
         first = await self.seed()
