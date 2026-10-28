@@ -87,7 +87,7 @@ Hindsight 1.1.0 原生官方管理页面（Control Plane）提供浏览、搜索
 ## 升级插件
 
 1. 创建插件业务快照，单独保存最新控制库，并备份 Hindsight 数据库和配置。
-2. 在 AstrBot 的插件管理中更新 Hindsight Memory，重载插件。
+2. 在 AstrBot 的插件管理中更新 Hindsight Bridge，重载插件。
 3. 原有 API 配置、服务标识、Agent 标识和账号配置继续沿用，数据目录继续挂载。
 
 格式升级保留既有身份、记忆空间、摘要与 operation UUID；非空历史更正会阻止启动并要求先完成数据交接。具体规则见 [实现说明](ARCHITECTURE.md#数据格式与恢复)。

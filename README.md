@@ -1,6 +1,6 @@
-# Hindsight Memory
+# Hindsight Bridge
 
-让 AstrBot 在新会话中也能记得你。
+连接自托管 Hindsight，让 AstrBot 在新会话中也能记得你。
 
 正常聊天，插件就会把 QQ 私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
 
@@ -18,7 +18,7 @@
    https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
    ```
 
-2. 安装完成后打开 **Hindsight Memory 插件详情 → 记忆管理 → 设置**。
+2. 安装完成后打开 **Hindsight Bridge 插件详情 → 记忆管理 → 设置**。
 3. 选择安装方式：生成配套服务安装命令，在运行 AstrBot 的 Linux 主机执行；已有 Hindsight 1.1.0 则填写服务地址与 API Key，并填写独立的官方管理地址 `control_plane_url`。
 4. 配套服务安装完成后，在设置中选择聊天与嵌入模型，可选重排模型，点击 **验证并保存模型**。
 5. 选择 QQ 机器人并添加使用者的 QQ 号，点击 **完成设置**。

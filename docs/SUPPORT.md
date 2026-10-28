@@ -7,7 +7,7 @@
 | 项目 | 适用范围 |
 | --- | --- |
 | AstrBot | **4.29.1 及以上**，使用内置执行器 `local` |
-| Hindsight | **1.1.0**，启用 API Key 认证，官方管理面板也使用 1.1.0 |
+| Hindsight | 自托管 **1.1.0**，启用 API Key 认证，官方管理面板也使用 1.1.0 |
 | QQ 接入 | **OneBot v11**，AstrBot 中的平台类型为 `aiocqhttp` |
 | 对话类型 | QQ 私聊纯文字 |
 | 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 桥接网络，Hindsight 运行于 Linux Docker |
