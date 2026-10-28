@@ -31,6 +31,8 @@ class MemoryPanel:
     def __init__(self, plugin):
         self.plugin = plugin
         self.lock = asyncio.Lock()
+        self.closed = False
+        self.requests = set()
         self.model_task = None
         self.model_job = None
         self.model_selection = None
@@ -55,7 +57,10 @@ class MemoryPanel:
         async def invoke(**kwargs):
             from astrbot.api.web import error_response, json_response
 
+            task = asyncio.current_task()
             try:
+                self.ensure_open()
+                self.requests.add(task)
                 value = await handler(**kwargs)
                 if isinstance(value, dict):
                     return json_response(value, headers={"Cache-Control": "no-store"})
@@ -69,7 +74,24 @@ class MemoryPanel:
                 return error_response(message, headers={"Cache-Control": "no-store"})
             except (OSError, sqlite3.DatabaseError):
                 return error_response("无法保存数据，请检查 AstrBot 数据目录与磁盘空间。")
+            finally:
+                self.requests.discard(task)
         return invoke
+
+    def ensure_open(self):
+        if self.closed:
+            raise PanelError("插件已停用，请先启用插件并重新打开页面。")
+
+    def connection_ready(self, url, key):
+        plugin, queue = self.plugin, self.plugin.outbox
+        if (
+            not self.closed and not plugin.stopping and queue
+            and self.connection_url(plugin.config.get("api_url", "")) == url
+            and plugin.config.get("api_key") == key
+            and queue.connection_error()
+        ):
+            queue.pause_connection("")
+            plugin.worker.wake.set()
 
     def error_message(self, code):
         messages = {
@@ -150,6 +172,7 @@ class MemoryPanel:
         ))
 
     def check_revision(self, payload):
+        self.ensure_open()
         if "config_revision" in payload and payload["config_revision"] != self.config_revision():
             raise PanelError("配置已被更新，请刷新页面后重新保存。")
 
@@ -265,7 +288,8 @@ class MemoryPanel:
         if plugin.client and plugin.outbox and not plugin.stopping:
             try:
                 async with plugin.using_resources(), asyncio.timeout(3):
-                    await plugin.client.ensure_auth()
+                    await plugin.client.ensure_auth(force=bool(plugin.outbox.connection_error()))
+                    self.connection_ready(plugin.client.url, plugin.client.api_key)
                 connected = True
             except (HindsightError, TimeoutError) as exc:
                 connected = False
@@ -352,6 +376,7 @@ class MemoryPanel:
                 await client.ensure_auth(force=True)
         finally:
             await client.close()
+        self.connection_ready(client.url, key)
         return {"ok": True, "ready": True, "message": "记忆服务连接正常。"}
 
     async def managed_request(self, state, environment=None):
@@ -456,9 +481,13 @@ class MemoryPanel:
             self.model_job.update(status="failed", message=message)
 
     async def close(self):
-        if self.model_task and not self.model_task.done():
-            self.model_task.cancel()
-            await asyncio.gather(self.model_task, return_exceptions=True)
+        self.closed = True
+        tasks = self.requests | {self.model_task}
+        tasks = {task for task in tasks if task is not None and task is not asyncio.current_task()}
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def apply_models(self, payload):
         async with self.lock:
@@ -478,7 +507,9 @@ class MemoryPanel:
                 plugin.stopping = True
                 await plugin._close_resources()
             try:
+                self.ensure_open()
                 result = await self.managed_request(state, environment)
+                self.ensure_open()
                 if not result["ready"]:
                     raise PanelError("模型配置已接收，服务尚未就绪，请稍后重试。")
                 state.update(selection)
@@ -487,7 +518,7 @@ class MemoryPanel:
                 if active:
                     plugin.permissions = None
                     # Plugin unload cancels this job and must not reopen resources.
-                    if not asyncio.current_task().cancelling():
+                    if not self.closed and not asyncio.current_task().cancelling():
                         plugin.stopping = False
                         await plugin.initialize()
             return {"saved": True, "config_revision": self.config_revision(), "message": "模型配置已保存并生效。"}
@@ -507,9 +538,25 @@ class MemoryPanel:
             revision = self.config_revision()
             return await self._save(payload, revision)
 
+    def write_config(self, updates):
+        config = self.plugin.config
+        for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids", "timezone"):
+            config.pop(obsolete, None)
+        config.update(updates)
+        config.save_config()
+
+    def settings_saved(self):
+        self.plugin.confirmations.clear()
+        return {
+            "saved": True, "config_revision": self.config_revision(),
+            "message": "配置已保存并生效。正常聊天即可，无需再重载插件。",
+        }
+
     async def _save(self, payload, revision):
+        self.ensure_open()
+        plugin = self.plugin
         control_plane_url = self.control_plane_url(
-            payload.get("control_plane_url", self.plugin.config.get("control_plane_url", "")),
+            payload.get("control_plane_url", plugin.config.get("control_plane_url", "")),
             api_key=payload.get("api_key", ""),
         )
         accounts = payload.get("allowed_accounts", [])
@@ -519,40 +566,68 @@ class MemoryPanel:
             raise PanelError("请选择 AstrBot 中已启用的 OneBot 接入实例。")
         if any(not user.isdecimal() or len(user) > 20 for _, user in selected):
             raise PanelError("用户账号请填写自己的 QQ 号。")
+        for platform, user in selected:
+            profile = plugin.context.get_config(f"{platform}:FriendMessage:{user}")
+            if not local_runner(profile):
+                raise PanelError("所选账号需要使用 AstrBot 内置 Agent，请先在配置文件中选择内置执行器。")
         url, key = self.credentials(payload)
         try:
             client = HindsightClient(url, key)
         except (ValueError, httpx.InvalidURL):
             raise PanelError("服务地址格式无效，请填写完整的 HTTP 地址与有效 Key。") from None
+        old_url = self.connection_url(plugin.config.get("api_url", ""))
+        old_service = plugin.config.get("service_id")
+        updates = {
+            "api_url": client.url, "api_key": key,
+            "control_plane_url": control_plane_url,
+            "allowed_accounts": [
+                {"platform_instance_id": platform, "user_id": user}
+                for platform, user in sorted(selected)
+            ],
+        }
+        local_change = (
+            old_service and old_url == client.url and key == plugin.config.get("api_key")
+            and any(updates[name] != plugin.config.get(name, [] if name == "allowed_accounts" else "")
+                    for name in ("allowed_accounts", "control_plane_url"))
+        )
         state = self.state()
         try:
-            if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):
-                status = await self.managed_request(state)
-                if not status["configured"] or not status["ready"]:
-                    raise PanelError("请先在设置中选择模型并保存，待服务就绪后完成设置。")
-            async with asyncio.timeout(10):
-                await client.ensure_auth(force=True)
+            if not local_change:
+                if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):
+                    status = await self.managed_request(state)
+                    if not status["configured"] or not status["ready"]:
+                        raise PanelError("请先在设置中选择模型并保存，待服务就绪后完成设置。")
+                async with asyncio.timeout(10):
+                    await client.ensure_auth(force=True)
         except (HindsightError, TimeoutError):
             raise PanelError("记忆服务连接检查失败，请检查服务地址、Key 与服务运行状态。") from None
         finally:
             await client.close()
-        context = self.plugin.context
-        for platform, user in selected:
-            profile = context.get_config(f"{platform}:FriendMessage:{user}")
-            if not local_runner(profile):
-                raise PanelError("所选账号需要使用 AstrBot 内置 Agent，请先在配置文件中选择内置执行器。")
+        self.ensure_open()
         if revision != self.config_revision():
             raise PanelError("连接检查期间配置已被更新，请刷新页面后重新保存。")
-        plugin = self.plugin
         previous = copy.deepcopy(dict(plugin.config))
+        if local_change:
+            try:
+                self.write_config(updates)
+                if plugin.outbox:
+                    plugin.refresh_permissions()
+            except Exception:
+                plugin.config.clear()
+                plugin.config.update(previous)
+                plugin.config.save_config()
+                if plugin.outbox:
+                    plugin.permissions = None
+                    plugin.refresh_permissions()
+                raise PanelError("设置保存失败，请检查插件数据目录后重试。") from None
+            return self.settings_saved()
+        self.connection_ready(client.url, key)
         connections = state.setdefault("connections", {})
         if not isinstance(connections, dict) or any(
             not isinstance(address, str) or not isinstance(service, str) or not service
             for address, service in connections.items()
         ):
             raise PanelError("服务连接记录损坏，请从备份恢复 setup.json。")
-        old_url = self.connection_url(plugin.config.get("api_url", ""))
-        old_service = plugin.config.get("service_id")
         if old_url and old_service:
             connections[old_url] = old_service
         service = connections.get(client.url)
@@ -562,25 +637,16 @@ class MemoryPanel:
         # Persist both identities before changing the active connection so a
         # process interruption cannot lose the route back to the old queue.
         self.store_state(state)
-        updates = {
-            "api_url": client.url, "api_key": key,
-            "control_plane_url": control_plane_url,
-            "service_id": service,
-            "allowed_accounts": [
-                {"platform_instance_id": platform, "user_id": user}
-                for platform, user in sorted(selected)
-            ],
-        }
+        updates["service_id"] = service
         plugin.stopping = True
         try:
             await plugin._close_resources()
-            for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids", "timezone"):
-                plugin.config.pop(obsolete, None)
-            plugin.config.update(updates)
-            plugin.config.save_config()
+            self.ensure_open()
+            self.write_config(updates)
             plugin.permissions = None
             plugin.stopping = False
             await plugin.initialize()
+            self.ensure_open()
             if not plugin.outbox:
                 raise PanelError("记忆服务初始化失败，请检查服务配置与本地数据目录。")
         except Exception:
@@ -589,14 +655,11 @@ class MemoryPanel:
             plugin.config.update(previous)
             plugin.config.save_config()
             plugin.permissions = None
+            self.ensure_open()
             plugin.stopping = False
             await plugin.initialize()
             raise PanelError("配置应用失败，已恢复原有服务配置，请检查服务与数据目录。") from None
-        plugin.confirmations.clear()
-        return {
-            "saved": True, "config_revision": self.config_revision(),
-            "message": "配置已保存并生效。正常聊天即可，无需再重载插件。",
-        }
+        return self.settings_saved()
 
     def scope(self, scope_id):
         plugin = self.plugin

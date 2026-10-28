@@ -81,7 +81,7 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
         namespace = lifecycle_methods({
             "asyncio": asyncio, "Path": Path, "sha256": sha256, "pairs": pairs,
             "host_timezone": host_timezone, "Outbox": Outbox, "QueueError": QueueError,
-            "encoding": Mock(), "logger": Mock(),
+            "load_encoding": AsyncMock(), "TokenizerError": ValueError, "logger": Mock(),
             "HindsightClient": Mock(side_effect=lambda url, key, **kw: SimpleNamespace(url=url)),
             "StarTools": SimpleNamespace(get_data_dir=lambda name: root / "runtime"),
             "Worker": Mock(return_value=SimpleNamespace(run=AsyncMock())),
@@ -94,6 +94,7 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             },
             context=SimpleNamespace(get_config=Mock(return_value=host)),
             outbox=None, permissions=None, permission_revision=0,
+            panel=SimpleNamespace(closed=False), stopping=False,
             control_directory=lambda: root / "control", warning=Mock(),
             _close_resources=AsyncMock(),
         )

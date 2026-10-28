@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import unittest
@@ -76,7 +77,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         async def initialize():
             if self.config.get("api_url") and self.config.get("api_key"):
                 self.plugin.outbox = SimpleNamespace(
-                    recovering=False, list_scopes=lambda: [],
+                    recovering=False, list_scopes=lambda: [], connection_error=lambda: "",
                 )
 
         self.plugin._close_resources = AsyncMock(side_effect=close_resources)
@@ -141,6 +142,82 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
     async def save(self, **updates):
         self.panel.body = AsyncMock(return_value={**self.payload, **updates})
         return await self.panel.save()
+
+    async def test_closed_panel_rejects_late_save_and_new_requests(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        previous = copy.deepcopy(dict(self.config))
+
+        async def gate(client):
+            entered.set()
+            await release.wait()
+
+        self.auth_gate = gate
+        saving = asyncio.create_task(self.save(api_key="new-secret"))
+        try:
+            await entered.wait()
+            self.plugin.stopping = True
+            await self.panel.close()
+            release.set()
+            with self.assertRaisesRegex(module.PanelError, "插件已停用"):
+                await saving
+            with self.assertRaisesRegex(module.PanelError, "插件已停用"):
+                await self.save()
+            self.assertEqual(dict(self.config), previous)
+            self.plugin.initialize.assert_not_awaited()
+            self.assertTrue(self.plugin.stopping)
+        finally:
+            release.set()
+            await asyncio.gather(saving, return_exceptions=True)
+
+    async def test_offline_account_removal_updates_existing_queue_without_restarting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = Outbox(
+                Path(temporary) / "runtime", self.config["service_id"], self.config["api_url"],
+                credential_fingerprint="test", control_directory=Path(temporary) / "control",
+            )
+            self.plugin.outbox = queue
+            self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
+            self.plugin.refresh_permissions()
+            scope = queue.scope(Incoming("aiocqhttp", "qq", "20001", "123", "", int(time.time()), ""))
+            self.auth_gate = AsyncMock(side_effect=module.HindsightError("connection_error"))
+            self.panel.managed_request = AsyncMock(side_effect=module.PanelError("offline"))
+            try:
+                result = await self.save(allowed_accounts=[])
+                self.assertTrue(result["saved"])
+                self.assertEqual(self.config["allowed_accounts"], [])
+                self.assertFalse(queue.can_recall(scope))
+                self.assertIs(self.plugin.outbox, queue)
+                self.auth_gate.assert_not_awaited()
+                self.panel.managed_request.assert_not_awaited()
+                self.plugin.initialize.assert_not_awaited()
+                self.plugin._close_resources.assert_not_awaited()
+            finally:
+                queue.close()
+
+    async def test_verified_active_connection_clears_persistent_auth_pause(self):
+        @asynccontextmanager
+        async def resources():
+            yield
+
+        queue = SimpleNamespace(
+            recovering=False, list_scopes=lambda: [],
+            connection_error=unittest.mock.Mock(return_value="http_401"),
+            pause_connection=unittest.mock.Mock(),
+        )
+        self.plugin.outbox = queue
+        self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
+        self.plugin.using_resources = resources
+        self.plugin.client = SimpleNamespace(
+            url=self.config["api_url"], api_key=self.config["api_key"],
+            ensure_auth=AsyncMock(),
+        )
+        await self.panel.bootstrap()
+        self.plugin.client.ensure_auth.assert_awaited_once_with(force=True)
+        queue.pause_connection.assert_called_once_with("")
+        self.assertTrue(self.plugin.worker.wake.is_set())
+        self.panel.connection_ready("http://different-service", self.config["api_key"])
+        self.panel.connection_ready(self.config["api_url"], "different-key")
+        queue.pause_connection.assert_called_once()
 
     async def test_old_revision_is_rejected_before_credentials_or_network(self):
         snapshot = await self.panel.bootstrap()
@@ -572,6 +649,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
                 self.plugin.refresh_permissions()
                 scope = queue.scope(Incoming("aiocqhttp", "qq", "20001", "123", "", 1, ""))
                 identifier, bank = scope["scope_id"], scope["bank"]
+                queue.control.set_bank_state(queue.connection_id, bank, "established")
                 await self.action("maintenance_begin", scope_id=identifier)
                 self.assertFalse(queue.can_recall(queue.scope_owner(identifier), manual=True))
                 status = await self.action("maintenance_status", method="GET", scope_id=identifier)

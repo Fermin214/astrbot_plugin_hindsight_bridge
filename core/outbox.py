@@ -14,8 +14,8 @@ from .identity import Incoming, Scope, canonical, sha256
 from .locking import exclusive_lock
 from .materials import Message, request_digest, retain_payload
 
-SCHEMA_VERSION = 5
-ACTIVE_STATES = ("ready", "submitting", "unknown", "tracking", "cancel_requested")
+SCHEMA_VERSION = 6
+ACTIVE_STATES = ("ready", "submitting", "unknown", "deferred", "tracking", "cancel_requested")
 STATES = (
     *ACTIVE_STATES,
     "done",
@@ -93,7 +93,7 @@ class Outbox:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
                 raise QueueError("unsupported_database_version")
             self._schema()
             deployment = self.setting("deployment_id")
@@ -334,12 +334,14 @@ class Outbox:
                     self.db.execute(
                         "UPDATE outbox SET accepted=MAX(accepted,?),cancel_intent=?,state="
                         "CASE WHEN ? THEN 'cancel_requested' "
+                        "WHEN ? AND state='deferred' THEN 'unknown' "
                         "WHEN ? AND state IN ('ready','submitting') THEN 'unknown' ELSE state END "
                         "WHERE id=?",
                         (
                             record["accepted"],
                             record["cancel_intent"],
                             record["cancel_intent"],
+                            record["accepted"],
                             record["dispatched"] or record["accepted"],
                             task["id"],
                         ),
@@ -798,7 +800,10 @@ class Outbox:
             (self.connection_id,),
         ).fetchone()[0]
         if active >= 2:
-            exclusion += " AND o.state NOT IN ('ready','failed')"
+            exclusion += (
+                " AND o.state NOT IN ('ready','failed')"
+                " AND NOT (o.state='deferred' AND s.allowed=1 AND s.mode='active')"
+            )
         if exclude_scopes:
             exclusion += (
                 " AND s.owner_id NOT IN (" + ",".join("?" for _ in exclude_scopes) + ")"
@@ -809,20 +814,20 @@ class Outbox:
         return self.db.execute(
             "SELECT o.*,s.owner_id FROM outbox o JOIN scopes s USING(connection_id,scope_id) "
             "WHERE o.connection_id=? AND ((s.allowed=1 AND s.mode='active') "
-            "OR o.state IN ('unknown','tracking','cancel_requested') OR o.cancel_intent=1) "
+            "OR o.state IN ('unknown','deferred','tracking','cancel_requested') OR o.cancel_intent=1) "
             "AND o.bank=s.bank AND o.generation=s.generation AND o.released=1 "
-            "AND (o.state IN ('ready','unknown','tracking','cancel_requested') "
+            "AND (o.state IN ('ready','unknown','deferred','tracking','cancel_requested') "
             "OR (o.state='cancelled' AND o.cancel_intent=1) "
             "OR (o.state='failed' AND o.retry_requested=1)) AND o.next_at<=? "
-            "AND (o.state NOT IN ('ready','failed') OR NOT EXISTS (SELECT 1 FROM outbox a "
+            "AND (o.state NOT IN ('ready','failed','deferred') OR NOT EXISTS (SELECT 1 FROM outbox a "
             "JOIN scopes a_scope ON a.connection_id=a_scope.connection_id AND a.scope_id=a_scope.scope_id "
             "WHERE a.connection_id=o.connection_id AND a_scope.owner_id=s.owner_id AND a.id<>o.id "
             "AND a.state IN ('submitting','unknown','tracking','cancel_requested'))) "
-            "AND (o.state NOT IN ('ready','failed') OR NOT EXISTS "
+            "AND (o.state NOT IN ('ready','failed','deferred') OR NOT EXISTS "
             "(SELECT 1 FROM outbox p JOIN scopes p_scope ON p.connection_id=p_scope.connection_id "
             "AND p.scope_id=p_scope.scope_id WHERE p.connection_id=o.connection_id "
             "AND p_scope.owner_id=s.owner_id AND p.id<o.id AND (p.state IN "
-            "('ready','submitting','unknown','tracking','cancel_requested','reconcile_required') "
+            "('ready','submitting','unknown','deferred','tracking','cancel_requested','reconcile_required') "
             "OR (p.state='failed' AND p.retry_requested=1))))"
             + exclusion
             + " ORDER BY o.next_at,o.id LIMIT 1",
@@ -830,7 +835,7 @@ class Outbox:
         ).fetchone()
 
     def claim(self, row):
-        if row["state"] == "ready":
+        if row["state"] == "ready" or (row["state"] == "deferred" and self.current(row)):
             self.update(row["id"], "submitting")
         elif row["state"] == "failed":
             self.update(row["id"], "tracking")
@@ -959,7 +964,7 @@ class Outbox:
         oldest = self.db.execute(
             "SELECT MIN(created_at) FROM outbox WHERE connection_id=? AND scope_id IN "
             "(SELECT scope_id FROM scopes WHERE connection_id=? AND owner_id=?) "
-            "AND state IN ('ready','submitting','unknown','tracking','failed','reconcile_required')",
+            "AND state IN ('ready','submitting','unknown','deferred','tracking','failed','reconcile_required')",
             (self.connection_id, self.connection_id, scope["owner_id"]),
         ).fetchone()[0]
         tasks = self.db.execute(

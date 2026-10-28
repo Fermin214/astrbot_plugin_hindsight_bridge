@@ -34,7 +34,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -72,11 +72,14 @@ class Control:
                     phase TEXT NOT NULL DEFAULT 'pending',
                     last_error TEXT NOT NULL DEFAULT '', next_at REAL NOT NULL DEFAULT 0,
                     verified_at REAL,
+                    cleanup_step INTEGER NOT NULL DEFAULT 0,
+                    cleanup_epoch INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(connection_id,old_bank)
                 );
                 CREATE TABLE IF NOT EXISTS erasure_refs(
                     forget_id TEXT NOT NULL REFERENCES erasures(forget_id),
                     kind TEXT NOT NULL, ref TEXT NOT NULL,
+                    checked_pass INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(forget_id,kind,ref)
                 );
                 CREATE TABLE IF NOT EXISTS requests(
@@ -93,14 +96,22 @@ class Control:
                     PRIMARY KEY(connection_id,bank)
                 );
             """)
-            if "state" not in {
-                row["name"] for row in self.db.execute("PRAGMA table_info(banks)")
-            }:
-                self.db.execute(
-                    "ALTER TABLE banks ADD COLUMN state TEXT NOT NULL DEFAULT 'established'"
-                )
+            for table, column, declaration in (
+                ("banks", "state", "TEXT NOT NULL DEFAULT 'established'"),
+                ("erasures", "cleanup_step", "INTEGER NOT NULL DEFAULT 0"),
+                ("erasures", "cleanup_epoch", "INTEGER NOT NULL DEFAULT 0"),
+                ("erasure_refs", "checked_pass", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in {
+                    row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")
+                }:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS erasure_refs_cleanup "
+                "ON erasure_refs(forget_id,kind,checked_pass,ref)"
+            )
             with self.db:
-                self.db.execute("PRAGMA user_version=2")
+                self.db.execute("PRAGMA user_version=3")
                 for key, value in (
                     ("deployment_id", deployment_id or str(uuid.uuid4())),
                     ("control_id", str(uuid.uuid4())),
@@ -284,10 +295,18 @@ class Control:
 
     def add_refs(self, forget_id, refs):
         # The caller controls the transaction so the initial erasure and its references commit together.
+        changes = self.db.total_changes
         self.db.executemany(
-            "INSERT OR IGNORE INTO erasure_refs VALUES (?,?,?)",
+            "INSERT OR IGNORE INTO erasure_refs(forget_id,kind,ref) VALUES (?,?,?)",
             ((forget_id, kind, ref) for kind, ref in refs),
         )
+        if self.db.total_changes != changes:
+            progress = self.db.execute(
+                "SELECT cleanup_step FROM erasures WHERE forget_id=?", (forget_id,)
+            ).fetchone()
+            if progress["cleanup_step"] >= 4:
+                # Restored queue records must invalidate a completed cancellation sweep.
+                self.restart_cleanup(forget_id)
 
     def bank_state(self, connection, bank):
         row = self.db.execute(
@@ -368,21 +387,56 @@ class Control:
             (connection, owner_id) if owner_id else (connection,),
         ).fetchall()
 
-    def cleanup_state(self, forget_id, phase, error="", *, delay=60):
-        with self.db:
-            self.db.execute(
-                "UPDATE erasures SET phase=?,last_error=?,next_at=?,verified_at="
-                "CASE WHEN ?='verified' THEN ? ELSE verified_at END WHERE forget_id=?",
-                (phase, error, time.time() + delay, phase, time.time(), forget_id),
+    def cleanup_refs(self, forget_id, kind, checked_pass, *, limit=128):
+        return [
+            row[0] for row in self.db.execute(
+                "SELECT ref FROM erasure_refs WHERE forget_id=? AND kind=? "
+                "AND checked_pass<? ORDER BY checked_pass,ref LIMIT ?",
+                (forget_id, kind, checked_pass, limit),
             )
+        ]
+
+    def cleanup_ref_done(self, forget_id, kind, ref, checked_pass, epoch):
+        with self.db:
+            return bool(self.db.execute(
+                "UPDATE erasure_refs SET checked_pass=? WHERE forget_id=? AND kind=? AND ref=? "
+                "AND EXISTS (SELECT 1 FROM erasures WHERE forget_id=? AND cleanup_epoch=?)",
+                (checked_pass, forget_id, kind, ref, forget_id, epoch),
+            ).rowcount)
+
+    def restart_cleanup(self, forget_id, *, epoch=None):
+        # Like add_refs, this participates in the caller's transaction.
+        changed = self.db.execute(
+            "UPDATE erasures SET phase='pending',last_error='',next_at=0,"
+            "cleanup_step=0,cleanup_epoch=cleanup_epoch+1 WHERE forget_id=? "
+            "AND (? IS NULL OR cleanup_epoch=?)",
+            (forget_id, epoch, epoch),
+        ).rowcount
+        if changed:
+            self.db.execute(
+                "UPDATE erasure_refs SET checked_pass=0 WHERE forget_id=?", (forget_id,)
+            )
+        return bool(changed)
+
+    def cleanup_state(self, forget_id, phase, error="", *, delay=60, step=None, epoch=None):
+        with self.db:
+            return bool(self.db.execute(
+                "UPDATE erasures SET phase=?,last_error=?,next_at=?,verified_at="
+                "CASE WHEN ?='verified' THEN ? ELSE verified_at END,"
+                "cleanup_step=COALESCE(?,cleanup_step) WHERE forget_id=? "
+                "AND (? IS NULL OR cleanup_epoch=?)",
+                (phase, error, time.time() + delay, phase, time.time(), step,
+                 forget_id, epoch, epoch),
+            ).rowcount)
 
     def retired_request_returned(self, connection, bank):
         with self.db:
-            self.db.execute(
-                "UPDATE erasures SET phase='pending',next_at=0 "
-                "WHERE connection_id=? AND old_bank=?",
+            row = self.db.execute(
+                "SELECT forget_id FROM erasures WHERE connection_id=? AND old_bank=?",
                 (connection, bank),
-            )
+            ).fetchone()
+            if row:
+                self.restart_cleanup(row["forget_id"])
 
     def request(self, operation_id):
         return self.db.execute(

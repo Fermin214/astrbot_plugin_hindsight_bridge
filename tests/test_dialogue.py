@@ -73,6 +73,7 @@ class HistoryBoundaries(unittest.TestCase):
         rows = [user, {"role": "assistant", "content": "可以试试牛肉面。"}]
         before = json.dumps(rows, ensure_ascii=False)
         self.assertEqual(final_reply(rows, source), "可以试试牛肉面。")
+        self.assertEqual(final_reply(rows, "  " + source + "\n"), "可以试试牛肉面。")
         self.assertIsNone(final_reply(rows, source + "条"))
         self.assertEqual(json.dumps(rows, ensure_ascii=False), before)
         for extra in (

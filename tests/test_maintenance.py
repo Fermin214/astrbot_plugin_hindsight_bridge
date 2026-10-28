@@ -10,6 +10,7 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from test_controls import MemoryService
@@ -198,6 +199,162 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         await self.step()
         self.assertEqual(self.queue.get(pending.task_id)["state"], "tracking")
         self.assertIn(pending.bank, self.service.banks)
+
+    async def test_uncreated_bank_can_finish_maintenance_without_losing_first_creation(self):
+        scope = self.queue.scope(self.source)
+        bank, sid = scope["bank"], scope["scope_id"]
+        self.worker.maintenance.begin(sid)
+        self.assertTrue((await self.worker.maintenance.status(sid))["ready"])
+        await self.worker.maintenance.resume(sid)
+        self.assertEqual(self.queue.control.bank_state("test", bank), "new")
+        self.assertNotIn(bank, self.service.banks)
+        self.assertIsNone(self.queue.control.maintenance("test", bank))
+        self.source = replace(self.source, timestamp=math.ceil(time.time()))
+        captured = self.enqueue("after-maintenance")
+        await self.step()
+        self.assertEqual(self.queue.get(captured.task_id)["state"], "tracking")
+        self.assertIn(bank, self.service.banks)
+
+    async def test_new_bank_with_durable_dispatch_evidence_is_not_assumed_uncreated(self):
+        captured = self.enqueue()
+        row = self.queue.get(captured.task_id)
+        owner = self.queue.scope_owner(captured.scope_id)
+        self.queue.control.record_request(row, owner["owner_id"], dispatched=True)
+        self.queue.update(captured.task_id, "discarded")
+        self.worker.maintenance.begin(captured.scope_id)
+        self.assertTrue((await self.worker.maintenance.status(captured.scope_id))["ready"])
+        with self.assertRaisesRegex(QueueError, "bank_missing"):
+            await self.worker.maintenance.resume(captured.scope_id)
+        self.assertEqual(self.queue.control.bank_state("test", captured.bank), "missing")
+
+    async def test_erasure_batches_survive_timeout_and_restart_with_late_children(self):
+        captured = await self.seed()
+        oid = self.queue.get(captured.task_id)["operation_id"]
+        for index in range(140):
+            key = f"history-{index:03}"
+            self.service.operations[key] = {"operation_id": key, "status": "pending"}
+            self.service.op_banks[key] = captured.bank
+        record = self.queue.forget(captured.scope_id)
+        control_path = self.queue.control.directory / "control.sqlite3"
+        self.queue.close()
+        # Reopen an original version-2 control store, without erasure checkpoints.
+        with closing(sqlite3.connect(control_path)) as db, db:
+            db.execute("DROP INDEX erasure_refs_cleanup")
+            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_step")
+            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_epoch")
+            db.execute("ALTER TABLE erasure_refs DROP COLUMN checked_pass")
+            db.execute("PRAGMA user_version=2")
+        self.open()
+        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        operation, listing = self.client.operation, self.client.list_operations
+        reads, listings = [], 0
+
+        async def fault_once(bank, ref):
+            reads.append(ref)
+            if len(reads) == 8:
+                raise TimeoutError()
+            return await operation(bank, ref)
+
+        async def late_children(bank):
+            nonlocal listings
+            listings += 1
+            if listings == 2:
+                self.service.add_child(bank, oid, "late-child")
+                self.service.add_child(bank, "late-child", "late-grandchild")
+            return [
+                op for op in await listing(bank)
+                if op.id not in {"late-child", "late-grandchild"}
+            ]
+
+        with (
+            patch.object(self.client, "operation", side_effect=fault_once),
+            patch.object(self.client, "list_operations", side_effect=late_children),
+        ):
+            self.assertFalse(await self.worker.maintenance.check(force=True))
+            erasure = self.queue.control.erasures("test")[0]
+            self.assertEqual(erasure["cleanup_step"], 1)
+            self.assertEqual(erasure["last_error"], "cleanup_timeout")
+            self.assertGreater(erasure["next_at"] - time.time(), 50)
+            self.assertEqual(len(self.queue.control.cleanup_refs(record["forget_id"], "operation", 1)), 128)
+            self.assertEqual(self.service.deleted, [])
+            completed_ref = reads[0]
+            self.queue.close()
+            self.open()
+            self.assertEqual(self.queue.control.erasures("test")[0]["cleanup_step"], 1)
+            for _ in range(6):
+                if await self.worker.maintenance.check(force=True):
+                    break
+                erasure = self.queue.control.erasures("test")[0]
+                self.assertEqual(erasure["last_error"], "")
+                self.assertLessEqual(erasure["next_at"] - time.time(), 2)
+                self.assertGreater(erasure["next_at"], time.time() - 1)
+            else:
+                self.fail("erasure did not advance across bounded calls")
+        self.assertEqual(reads.count(completed_ref), 3)
+        self.assertEqual(reads.count("late-grandchild"), 2)
+        self.assertIn("late-child", self.service.cancelled)
+        self.assertIn("late-grandchild", self.service.cancelled)
+        self.assertEqual(len(set(self.service.cancelled)), 142)
+        self.assertEqual(listings, 4)
+        self.assertEqual(self.queue.control.erasures("test")[0]["phase"], "verified")
+        self.assertNotIn(captured.bank, self.service.banks)
+
+    async def test_late_submit_during_final_verification_invalidates_old_checkpoint(self):
+        captured = await self.seed()
+        oid = self.queue.get(captured.task_id)["operation_id"]
+        doc = self.queue.get(captured.task_id)["document_id"]
+        self.queue.forget(captured.scope_id)
+        bank_list, checks = self.client.bank_list_contains, 0
+
+        async def late_ack(bank):
+            nonlocal checks
+            result = await bank_list(bank)
+            checks += 1
+            if checks == 2:
+                self.service.banks.add(bank)
+                self.service.operations[oid] = {"operation_id": oid, "status": "processing"}
+                self.service.documents[bank] = {doc}
+                self.queue.control.retired_request_returned("test", bank)
+            return result
+
+        with patch.object(self.client, "bank_list_contains", side_effect=late_ack):
+            self.assertFalse(await self.worker.maintenance.check(force=True))
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["phase"], "pending")
+        self.assertEqual(erasure["cleanup_step"], 0)
+        self.assertEqual(erasure["next_at"], 0)
+        self.assertTrue(await self.worker.maintenance.check())
+        self.assertNotIn(captured.bank, self.service.banks)
+        self.assertIn(oid, self.service.cancelled)
+        self.assertEqual(self.service.deleted.count(captured.bank), 2)
+
+    async def test_verified_bank_rechecks_hidden_cancelled_operations_and_restored_refs(self):
+        captured = await self.seed()
+        oid = self.queue.get(captured.task_id)["operation_id"]
+        record = self.queue.forget(captured.scope_id)
+        self.assertTrue(await self.worker.maintenance.check(force=True))
+        delete_bank = self.client.delete_bank
+
+        async def cooperative_cancel_write(bank):
+            await delete_bank(bank)
+            self.service.operations[oid] = {"operation_id": oid, "status": "cancelled"}
+
+        with self.queue.control.db:
+            self.queue.control.db.execute("UPDATE erasures SET next_at=0")
+        with patch.object(self.client, "delete_bank", side_effect=cooperative_cancel_write):
+            self.assertFalse(await self.worker.maintenance.check())
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertEqual(erasure["last_error"], "retired_data_present")
+        self.assertNotEqual(erasure["phase"], "verified")
+        self.assertTrue(await self.worker.maintenance.check(force=True))
+        epoch = self.queue.control.erasures("test")[0]["cleanup_epoch"]
+        with self.queue.control.db:
+            self.queue.control.add_refs(record["forget_id"], [("document", "restored-document")])
+        erasure = self.queue.control.erasures("test")[0]
+        self.assertGreater(erasure["cleanup_epoch"], epoch)
+        self.assertEqual(erasure["phase"], "pending")
+        self.assertEqual(erasure["next_at"], 0)
+        self.assertTrue(await self.worker.maintenance.check())
 
     async def test_maintenance_is_persistent_and_does_not_block_other_accounts(self):
         first = await self.seed()

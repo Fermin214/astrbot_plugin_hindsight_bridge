@@ -292,6 +292,87 @@ class DurableCore(unittest.IsolatedAsyncioTestCase):
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
 
+    async def test_absent_paused_operations_do_not_block_other_owners(self):
+        paused = []
+        for user, mode in (("alice", "paused"), ("bob", "readonly")):
+            capture = self.enqueue(self.incoming(user=user))
+            self.service.fail_before_accept = True
+            await self.worker.step()
+            self.queue.set_mode(capture.scope_id, mode)
+            paused.append(capture)
+        self.immediately()
+        await self.worker.step()
+        await self.worker.step()
+        self.assertEqual([self.queue.get(c.task_id)["state"] for c in paused], ["deferred"] * 2)
+        self.service.pending = True
+        third = self.enqueue(self.incoming(user="carol"))
+        await self.worker.step()
+        self.assertEqual(self.queue.get(third.task_id)["state"], "tracking")
+        first_id = self.queue.get(paused[0].task_id)["operation_id"]
+        self.service.tree(first_id, "processing")
+        self.immediately()
+        await self.worker.step()
+        self.assertEqual(self.queue.get(paused[0].task_id)["accepted"], 1)
+        self.queue.set_mode(paused[1].scope_id, "active", now=time.time() - 1)
+        with self.queue.db:
+            self.queue.db.execute("UPDATE outbox SET next_at=? WHERE state='tracking'", (time.time() + 60,))
+        self.assertIsNone(self.queue.due())
+        self.assertEqual(len(self.service.submissions), 3)
+        self.service.tree(first_id, "completed")
+        self.immediately()
+        await self.worker.step()
+        await self.worker.step()
+        self.assertEqual(self.queue.get(paused[1].task_id)["state"], "tracking")
+        self.assertEqual(self.service.submissions[1], self.service.submissions[-1])
+
+    async def test_worker_recovers_after_database_becomes_writable(self):
+        capture = self.enqueue()
+        self.queue.db.execute("PRAGMA query_only=ON")
+        running = asyncio.create_task(self.worker.run())
+        try:
+            async with asyncio.timeout(2):
+                while not self.queue.recovering:
+                    await asyncio.sleep(0.01)
+            self.assertFalse(running.done())
+            self.queue.db.execute("PRAGMA query_only=OFF")
+            self.worker.wake.set()
+            async with asyncio.timeout(3):
+                while self.queue.get(capture.task_id)["state"] != "done":
+                    await asyncio.sleep(0.01)
+            self.assertFalse(self.queue.recovering)
+            self.assertFalse(running.done())
+        finally:
+            self.queue.db.execute("PRAGMA query_only=OFF")
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+
+    async def test_storage_failure_after_claim_reconciles_the_original_task(self):
+        capture = self.enqueue()
+        original = dict(self.queue.get(capture.task_id))
+        submit = self.queue.before_submit
+        failed = False
+
+        def before_submit(row):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise sqlite3.OperationalError("database is locked")
+            return submit(row)
+
+        with patch.object(self.queue, "before_submit", side_effect=before_submit):
+            running = asyncio.create_task(self.worker.run())
+            try:
+                async with asyncio.timeout(5):
+                    while self.queue.get(capture.task_id)["state"] != "done":
+                        await asyncio.sleep(0.01)
+                self.assertTrue(failed)
+                self.assertFalse(running.done())
+                self.assertEqual(len(self.service.submissions), 1)
+                self.assertEqual(self.service.submissions[0]["operation_id"], original["operation_id"])
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+
     async def test_authentication_pause_and_retry_after(self):
         capture = self.enqueue()
         self.service.authorized = False
@@ -299,8 +380,8 @@ class DurableCore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.queue.connection_error(), "http_401")
         self.assertIsNone(self.queue.due())
         self.service.authorized = True
-        await self.client.ensure_auth(force=True)
-        self.queue.pause_connection("")
+        self.assertTrue(await self.worker.recover_connection())
+        self.assertEqual(self.queue.connection_error(), "")
         self.client.auth_until = 0
         self.service.rate_limit = True
         self.immediately()
@@ -466,7 +547,7 @@ class SourceAndQuery(unittest.TestCase):
             get_platform_id=lambda: "onebot",
             get_self_id=lambda: "2",
             get_sender_id=lambda: "1",
-            get_messages=lambda: [Plain(text)],
+            get_messages=lambda: [Plain(text.strip())],
             get_message_str=lambda: text.strip(),
             message_obj=SimpleNamespace(message_id="123", raw_message=raw),
         )

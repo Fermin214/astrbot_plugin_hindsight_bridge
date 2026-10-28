@@ -92,6 +92,7 @@ def plain_text(row):
 
 
 def user_matches(row, user_text):
+    user_text = user_text.strip()
     if plain_text(row) == user_text:
         return True
     if not isinstance(row, dict) or row.get("role") != "user":

@@ -27,7 +27,7 @@ from .core.dialogue import (
     persistent_messages,
 )
 from .core.identity import Incoming, sha256
-from .core.materials import encoding, memory_block, recall_query
+from .core.materials import TokenizerError, load_encoding, memory_block, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import pairs
 from .core.panel import MemoryPanel
@@ -64,6 +64,8 @@ class HindsightBridge(Star):
             "connection_error": "无法连接记忆服务，请检查 API 地址、网络和容器服务名",
             "timeout": "记忆服务响应超时",
             "recall_timeout": "检索超过时限，聊天继续",
+            "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
+            "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
             "accepted_operation_missing": "Hindsight 找不到已接收的记录，请管理员检查服务恢复时使用的备份",
             "payload_digest_conflict": "待保存内容校验失败，请管理员检查插件本地数据库",
@@ -92,6 +94,8 @@ class HindsightBridge(Star):
         return explanations.get(code, "处理失败，请检查服务与数据目录") + f"（{code}）"
 
     async def initialize(self):
+        if self.panel.closed or self.stopping:
+            return
         url = str(self.config.get("api_url", "")).strip()
         key = str(self.config.get("api_key", "")).strip()
         service = str(self.config.get("service_id", "")).strip()
@@ -100,7 +104,9 @@ class HindsightBridge(Star):
             return
         try:
             tokenizer = str(self.config.get("query_tokenizer", "o200k_base"))
-            await asyncio.to_thread(encoding, tokenizer)
+            await load_encoding(tokenizer)
+            if self.panel.closed or self.stopping:
+                return
             self.client = HindsightClient(url, key, tokenizer=tokenizer)
             self.outbox = Outbox(
                 Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")),
@@ -127,7 +133,7 @@ class HindsightBridge(Star):
         except Exception as exc:  # noqa: BLE001 -- plugin initialization must preserve chat
             self.status = "初始化失败：" + (
                 self.diagnostic(str(exc))
-                if isinstance(exc, QueueError)
+                if isinstance(exc, (QueueError, TokenizerError))
                 else type(exc).__name__
             )
             logger.error("Hindsight: %s", self.status)
@@ -641,7 +647,7 @@ class HindsightBridge(Star):
             waiting = counts.get("ready", 0)
             tracking = sum(
                 counts.get(s, 0)
-                for s in ("submitting", "unknown", "tracking", "cancel_requested")
+                for s in ("submitting", "unknown", "deferred", "tracking", "cancel_requested")
             )
             modes = {"active": "正常记忆", "readonly": "只用已有记忆", "paused": "暂停记忆"}
             erasures = self.outbox.control.erasures(
@@ -656,7 +662,8 @@ class HindsightBridge(Star):
             )
             task_labels = {
                 "ready": "等待发送", "submitting": "正在发送",
-                "unknown": "确认保存结果中", "tracking": "Hindsight 正在整理",
+                "unknown": "确认保存结果中", "deferred": "暂停发送，继续确认保存结果",
+                "tracking": "Hindsight 正在整理",
                 "held": "等待机器人回复", "failed": "保存失败",
                 "reconcile_required": "需要检查保存结果",
                 "cancel_requested": "正在取消", "cancelled": "已取消",

@@ -1,6 +1,9 @@
 """Frozen user windows and bounded recall queries; no additional model calls."""
 
+import asyncio
 import json
+import pickle
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -11,11 +14,51 @@ import tiktoken
 from .identity import Scope, canonical, sha256
 
 FORMAT = "user_window_v1"
+_loaded_encodings = {}
+_ENCODING_LOADER = """
+import pickle, sys, tiktoken
+value = tiktoken.get_encoding(sys.argv[1])
+pickle.dump(dict(name=value.name, pat_str=value._pat_str,
+                 mergeable_ranks=value._mergeable_ranks,
+                 special_tokens=value._special_tokens), sys.stdout.buffer)
+"""
+
+
+class TokenizerError(ValueError):
+    pass
+
+
+async def load_encoding(name="o200k_base", *, timeout=20):
+    if name in _loaded_encodings:
+        return _loaded_encodings[name]
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", _ENCODING_LOADER, name,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        async with asyncio.timeout(timeout):
+            output, _ = await process.communicate()
+        if process.returncode:
+            raise TokenizerError("tokenizer_load_failed")
+        # Named Encoding pickles call get_encoding again; transfer only the
+        # constructor data from our child so the host never starts a download.
+        value = tiktoken.Encoding(**pickle.loads(output))
+        _loaded_encodings[name] = value
+        return value
+    except TimeoutError:
+        raise TokenizerError("tokenizer_timeout") from None
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
 
 
 @lru_cache(maxsize=3)
 def encoding(name="o200k_base"):
-    return tiktoken.get_encoding(name)
+    return _loaded_encodings.get(name) or tiktoken.get_encoding(name)
 
 
 def token_count(text: str, name="o200k_base") -> int:

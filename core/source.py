@@ -43,7 +43,7 @@ def native_snapshot(event, plain_type, command_prefixes=("/",)) -> Incoming | No
         return None
     original = "".join(texts)
     if (
-        original != "".join(v.text for v in components)
+        original.strip() != "".join(v.text for v in components)
         or original.strip() != event.get_message_str().strip()
         or not original.strip()
         or len(original) > 8000

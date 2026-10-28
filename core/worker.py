@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+import sqlite3
 import time
 from collections import deque
 
@@ -26,6 +27,9 @@ class Worker:
         self.wake = asyncio.Event()
         self.running = {}
         self.last_prune = 0.0
+        self.next_auth_check = 0.0
+        self.last_warning = 0.0
+        self.storage_recovery = False
         self.maintenance = Maintenance(outbox, client)
         self.cleanup_task = None
 
@@ -102,7 +106,7 @@ class Worker:
                 if self.outbox.control.maintenance(row["connection_id"], row["bank"]):
                     raise QueueError("maintenance_unknown_operation")
                 if not self.outbox.current(row):
-                    self.outbox.update(task_id, "unknown", delay=self.poll_interval)
+                    self.outbox.update(task_id, "deferred", delay=self.poll_interval)
                     return
                 first_creation = self.outbox.control.bank_state(
                     row["connection_id"], row["bank"]
@@ -211,6 +215,8 @@ class Worker:
             )
             if attempts == 1 or exc.permanent:
                 self.logger.warning("Hindsight queue: %s", exc.code)
+        except (OSError, sqlite3.OperationalError):
+            raise
         except Exception as exc:  # noqa: BLE001 -- preserve durable work on adapter failures
             self.outbox.update(
                 task_id,
@@ -306,46 +312,77 @@ class Worker:
                 name=f"hindsight-retain-{row['id']}",
             )
 
+    async def recover_connection(self):
+        if not self.outbox.connection_error():
+            return True
+        if time.monotonic() < self.next_auth_check:
+            return False
+        self.next_auth_check = time.monotonic() + 30
+        async with asyncio.timeout(10):
+            await self.client.ensure_auth(force=True)
+        self.outbox.pause_connection("")
+        self.next_auth_check = 0.0
+        return True
+
     async def run(self) -> None:
+        failures = 0
         try:
             while True:
-                for scope_id, task in list(self.running.items()):
-                    if task.done():
-                        del self.running[scope_id]
-                        error = None if task.cancelled() else task.exception()
-                        if error:
-                            self.logger.error(
-                                "Hindsight worker: %s", type(error).__name__
-                            )
-                if self.refresh_permissions:
-                    self.refresh_permissions()
-                if time.monotonic() - self.last_prune > 60:
-                    with self.outbox.db:
-                        self.outbox.prune_window()
-                    self.last_prune = time.monotonic()
                 self.wake.clear()
+                delay = max(0.01, min(self.poll_interval, 0.5))
                 try:
-                    if await self.maintenance.startup():
+                    for scope_id, task in list(self.running.items()):
+                        if task.done():
+                            del self.running[scope_id]
+                            error = None if task.cancelled() else task.exception()
+                            if error:
+                                raise error
+                    if self.refresh_permissions:
+                        self.refresh_permissions()
+                    if time.monotonic() - self.last_prune > 60:
+                        with self.outbox.db:
+                            self.outbox.prune_window()
+                        self.last_prune = time.monotonic()
+                    if self.storage_recovery and not self.running:
+                        with self.outbox.db:
+                            self.outbox.db.execute(
+                                "UPDATE outbox SET state='unknown',next_at=0 "
+                                "WHERE connection_id=? AND state='submitting'",
+                                (self.outbox.connection_id,),
+                            )
+                        self.storage_recovery = False
+                    if not self.storage_recovery and await self.recover_connection() and await self.maintenance.startup():
                         self.start_due()
                         if self.cleanup_task is None or self.cleanup_task.done():
                             if self.cleanup_task and not self.cleanup_task.cancelled():
                                 error = self.cleanup_task.exception()
+                                self.cleanup_task = None
                                 if error:
-                                    self.logger.error(
-                                        "Hindsight cleanup: %s", type(error).__name__
-                                    )
+                                    raise error
                             self.cleanup_task = asyncio.create_task(
                                 self.maintenance.check()
                             )
-                except (HindsightError, QueueError, OSError) as exc:
-                    self.outbox.recovering = True
+                    failures = 0
+                except (HindsightError, QueueError, TimeoutError, OSError, sqlite3.OperationalError) as exc:
+                    recover_storage = isinstance(exc, (QueueError, OSError, sqlite3.OperationalError))
                     if isinstance(exc, HindsightError) and exc.authentication:
-                        self.outbox.pause_connection(exc.code)
+                        try:
+                            self.outbox.pause_connection(exc.code)
+                        except (OSError, sqlite3.OperationalError):
+                            recover_storage = True
+                    if recover_storage:
+                        self.storage_recovery = True
+                        self.outbox.recovering = True
+                        self.maintenance.booted = False
+                        self.maintenance.next_startup = 0.0
+                    failures += 1
+                    delay = min(30, 2 ** min(failures, 5))
+                    if time.monotonic() - self.last_warning > 60:
+                        code = exc.code if isinstance(exc, HindsightError) else type(exc).__name__
+                        self.logger.warning("Hindsight recovery: %s", code)
+                        self.last_warning = time.monotonic()
                 try:
-                    await asyncio.wait_for(
-                        self.wake.wait(),
-                        timeout=max(0.01, min(self.poll_interval, 0.5)),
-                    )
+                    await asyncio.wait_for(self.wake.wait(), timeout=delay)
                 except TimeoutError:
                     pass
         finally:

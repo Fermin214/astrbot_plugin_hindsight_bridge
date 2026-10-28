@@ -241,6 +241,7 @@ function countDescription(counts) {
     completed: "已完成", done: "已完成", succeeded: "已完成", total: "总计",
     retained: "已保存", cancelled: "已取消", dead: "失败",
     ready: "等待发送", submitting: "正在发送", unknown: "正在确认保存结果", tracking: "Hindsight 正在整理",
+    deferred: "暂停发送，继续确认保存结果",
     reconcile_required: "需要检查保存结果", discarded: "已放弃保存", collecting: "正在记录", held: "等待机器人回复",
     cancel_requested: "正在取消",
   };
