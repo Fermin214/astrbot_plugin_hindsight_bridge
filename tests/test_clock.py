@@ -15,10 +15,14 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
+from plugins.astrbot_plugin_hindsight_bridge.core.diagnostics import (
+    ConfigurationError, configuration_message, connection_fields, missing_connection,
+    recall_timeout,
+)
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import Message
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
+from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
 
 
 def lifecycle_methods(namespace):
@@ -80,6 +84,10 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
     async def initialize_bridge(self, root, host):
         namespace = lifecycle_methods({
             "asyncio": asyncio, "Path": Path, "sha256": sha256, "pairs": pairs,
+            "configuration_accounts": configuration_accounts,
+            "ConfigurationError": ConfigurationError, "configuration_message": configuration_message,
+            "connection_fields": connection_fields, "missing_connection": missing_connection,
+            "recall_timeout": recall_timeout,
             "host_timezone": host_timezone, "Outbox": Outbox, "QueueError": QueueError,
             "load_encoding": AsyncMock(), "TokenizerError": ValueError, "logger": Mock(),
             "HindsightClient": Mock(side_effect=lambda url, key, **kw: SimpleNamespace(url=url)),
@@ -90,19 +98,20 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             config={
                 "api_url": "http://memory.test", "api_key": "key",
                 "service_id": "clock-test",
-                "allowed_accounts": [{"platform_instance_id": "onebot", "user_id": "alice"}],
+                "allowed_accounts": [{"__template_key": "account", "platform_instance_id": "onebot", "user_id": "alice"}],
             },
             context=SimpleNamespace(get_config=Mock(return_value=host)),
             outbox=None, permissions=None, permission_revision=0,
             panel=SimpleNamespace(closed=False), stopping=False,
             control_directory=lambda: root / "control", warning=Mock(),
-            _close_resources=AsyncMock(),
+            _close_resources=AsyncMock(), recall_outcomes={}, monitor_connection=AsyncMock(),
         )
         for name in ("initialize", "refresh_permissions"):
             setattr(plugin, name, MethodType(namespace[name], plugin))
         await plugin.initialize()
         self.assertEqual(plugin.status, "已配置")
         await plugin.task
+        await plugin.connection_task
         plugin.outbox.recovering = False
         self.addCleanup(plugin.outbox.close)
         return plugin

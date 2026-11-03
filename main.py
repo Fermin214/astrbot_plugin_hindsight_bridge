@@ -19,6 +19,10 @@ from astrbot.core.agent.message import TextPart
 from .core.catalog import export_bytes, render_memory, render_page
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
+from .core.diagnostics import (
+    ConfigurationError, WarningLog, configuration_message, connection_fields,
+    missing_connection, recall_description, recall_notice, recall_timeout,
+)
 from .core.dialogue import (
     appended_history,
     final_reply,
@@ -29,7 +33,7 @@ from .core.dialogue import (
 from .core.identity import Incoming, sha256
 from .core.materials import TokenizerError, load_encoding, memory_block, recall_query
 from .core.outbox import Outbox, QueueError
-from .core.permissions import pairs
+from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel
 from .core.source import local_runner, native_snapshot
 from .core.worker import Worker
@@ -40,12 +44,14 @@ class HindsightBridge(Star):
         super().__init__(context)
         self.config = config
         self.outbox = self.client = self.worker = self.task = None
+        self.connection_task = None
         self.incoming = weakref.WeakKeyDictionary()
         self.handled = weakref.WeakSet()
         self.turns = weakref.WeakKeyDictionary()
         self.history_tasks = set()
         self.status = "未配置"
-        self.last_warning = 0.0
+        self.warning_log = WarningLog(logger)
+        self.recall_outcomes = {}
         self.stopping = False
         self.permissions = None
         self.permission_revision = 0
@@ -62,8 +68,17 @@ class HindsightBridge(Star):
             "http_403": "服务拒绝访问，请检查 API Key 权限",
             "server_auth_not_enforced": "后端未启用认证，请配置服务 API Key",
             "connection_error": "无法连接记忆服务，请检查 API 地址、网络和容器服务名",
+            "connect_timeout": "连接记忆服务超时，请检查 API 地址、网络和服务状态",
+            "read_timeout": "等待记忆服务响应超时，可增加召回等待时间并检查服务负载",
+            "write_timeout": "向记忆服务发送请求超时，请检查网络连接",
+            "pool_timeout": "等待可用连接超时，请检查服务负载后重试",
+            "auth_timeout": "连接认证检查超时，请检查服务状态后重试",
+            "history_timeout": "读取会话信息超时，请检查 AstrBot 会话服务",
+            "conversation_not_available": "无法取得当前会话，请检查 AstrBot 会话状态",
+            "invalid_recall_timeout": "召回超时须设为 0.2 到 30 秒，请修改插件配置",
+            "recall_content_unavailable": "检索结果无法放入当前记忆长度限制，请检查记忆内容与字符上限",
             "timeout": "记忆服务响应超时",
-            "recall_timeout": "检索超过时限，聊天继续",
+            "recall_timeout": "查找记忆超时，可增加召回等待时间或检查服务负载",
             "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
             "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
@@ -96,18 +111,28 @@ class HindsightBridge(Star):
     async def initialize(self):
         if self.panel.closed or self.stopping:
             return
-        url = str(self.config.get("api_url", "")).strip()
-        key = str(self.config.get("api_key", "")).strip()
-        service = str(self.config.get("service_id", "")).strip()
-        if not url or not key or not service:
-            self.status = "请在设置中连接记忆服务"
+        fields = connection_fields(self.config)
+        url, key, service = (fields[name] for name in ("api_url", "api_key", "service_id"))
+        if missing_connection(self.config):
+            self.status = configuration_message(self.config)
+            if any(fields.values()):
+                logger.warning("Hindsight: %s", self.status)
             return
         try:
+            timeout = recall_timeout(self.config)
+            try:
+                accounts = configuration_accounts(self.config.get("allowed_accounts", []))
+            except QueueError:
+                accounts = None
+            if accounts is not None and accounts != self.config.get("allowed_accounts", []):
+                self.config["allowed_accounts"] = accounts
+                self.config.save_config()
             tokenizer = str(self.config.get("query_tokenizer", "o200k_base"))
             await load_encoding(tokenizer)
             if self.panel.closed or self.stopping:
                 return
-            self.client = HindsightClient(url, key, tokenizer=tokenizer)
+            self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer)
+            self.recall_outcomes.clear()
             self.outbox = Outbox(
                 Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")),
                 service,
@@ -129,11 +154,14 @@ class HindsightBridge(Star):
                 refresh_permissions=self.refresh_permissions,
             )
             self.task = asyncio.create_task(self.worker.run(), name="hindsight-outbox")
+            self.connection_task = asyncio.create_task(
+                self.monitor_connection(), name="hindsight-connection"
+            )
             self.status = "已配置"
         except Exception as exc:  # noqa: BLE001 -- plugin initialization must preserve chat
             self.status = "初始化失败：" + (
                 self.diagnostic(str(exc))
-                if isinstance(exc, (QueueError, TokenizerError))
+                if isinstance(exc, (QueueError, TokenizerError, ConfigurationError))
                 else type(exc).__name__
             )
             logger.error("Hindsight: %s", self.status)
@@ -191,31 +219,81 @@ class HindsightBridge(Star):
 
     def warning(self, label):
         self.status = label
-        if time.monotonic() - self.last_warning > 60:
-            logger.warning("Hindsight: %s", label)
-            self.last_warning = time.monotonic()
+        self.warning_log.warning(label)
+
+    async def monitor_connection(self):
+        client, queue = self.client, self.outbox
+        last_error = ""
+        while not self.stopping and self.client is client:
+            try:
+                await client.check_connection(force=True)
+                if queue.connection_error():
+                    queue.pause_connection("")
+                    self.worker.wake.set()
+                if last_error:
+                    self.warning_log.recovered(last_error)
+                    last_error = ""
+            except HindsightError as exc:
+                if exc.authentication:
+                    try:
+                        queue.pause_connection(exc.code)
+                    except (OSError, sqlite3.DatabaseError) as storage_error:
+                        self.warning("local_" + type(storage_error).__name__)
+                last_error = exc.code
+                self.warning(exc.code)
+            except (QueueError, OSError, sqlite3.DatabaseError) as exc:
+                last_error = str(exc) if isinstance(exc, QueueError) else "local_" + type(exc).__name__
+                self.warning(last_error)
+            await asyncio.sleep(30 if last_error else 60)
+
+    def record_recall(self, scope, outcome, started, code=""):
+        key = (self.outbox.connection_id, scope["owner_id"])
+        previous = self.recall_outcomes.get(key, {})
+        if previous.get("bank") != scope["bank"] or previous.get("revision") != scope["revision"]:
+            previous = {}
+        failures = previous.get("consecutive_failures", 0)
+        if outcome in {"success", "empty"} and failures:
+            logger.info("Hindsight recall recovered: %s (failures=%s)", scope["scope_id"], failures)
+        self.recall_outcomes[key] = {
+            "bank": scope["bank"], "revision": scope["revision"],
+            "outcome": outcome, "code": code, "last_at": time.time(),
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "consecutive_failures": failures + 1 if outcome == "error" else 0,
+        }
+
+    def recall_status(self, scope):
+        value = self.recall_outcomes.get((self.outbox.connection_id, scope["owner_id"]), {})
+        if value.get("bank") != scope["bank"] or value.get("revision") != scope["revision"]:
+            return None
+        return {key: value[key] for key in (
+            "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
+        )}
 
     async def recall_text(self, bank, current, history=(), *, timestamp):
-        timeout = max(0.2, min(4.0, float(self.config.get("recall_timeout", 4))))
+        timeout = recall_timeout(self.config)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         result_tokens = max(
             256, min(1200, int(self.config.get("recall_max_tokens", 1200)))
         )
         limit = max(256, min(4000, int(self.config.get("context_max_chars", 4000))))
-        async with asyncio.timeout(timeout):
-            query = recall_query(
-                current,
-                history,
-                budget=budget,
-                name=self.client.tokenizer,
-            )
-            results = await self.client.recall(
-                bank,
-                query,
-                result_tokens,
-                timestamp=timestamp,
-            )
-            return memory_block(results, limit=limit)
+        stage = "auth"
+        try:
+            async with asyncio.timeout(timeout):
+                query = recall_query(current, history, budget=budget, name=self.client.tokenizer)
+                await self.client.ensure_auth(timeout=timeout)
+                stage = "recall"
+                results = await self.client.recall(
+                    bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
+                )
+                block = memory_block(results, limit=limit)
+                if results and not block:
+                    raise HindsightError("recall_content_unavailable")
+                return block
+        except TimeoutError:
+            code = "auth_timeout" if stage == "auth" else "recall_timeout"
+            if stage == "auth":
+                self.client.connection_result(False, code)
+            raise HindsightError(code) from None
 
     async def conversation_history(self, event, conversation_id):
         manager = self.context.conversation_manager
@@ -228,6 +306,9 @@ class HindsightBridge(Star):
                     conversation_id,
                     create_if_not_exists=False,
                 )
+        except TimeoutError:
+            self.warning("history_timeout")
+            return None
         except Exception as exc:  # noqa: BLE001 -- user capture remains independent
             self.warning("history_" + type(exc).__name__)
             return None
@@ -336,27 +417,38 @@ class HindsightBridge(Star):
         self.hooks += 1
         self.idle.clear()
         capture = None
+        scope = None
+        outcome = None
+        code = ""
+        content = ""
+        started = time.monotonic()
         try:
             self.refresh_permissions()
             permission_revision = self.permission_revision
             scope = self.outbox.scope(incoming)
             if not self.outbox.can_recall(scope):
+                self.record_recall(scope, "skipped", started)
                 return
-            async with asyncio.timeout(2):
-                conversation = (
-                    str(req.conversation.cid)
-                    if req.conversation
-                    else await self.context.conversation_manager.get_curr_conversation_id(
-                        event.unified_msg_origin
+            outcome = "error"
+            try:
+                async with asyncio.timeout(2):
+                    conversation = (
+                        str(req.conversation.cid)
+                        if req.conversation
+                        else await self.context.conversation_manager.get_curr_conversation_id(
+                            event.unified_msg_origin
+                        )
                     )
-                )
-                rows = (
-                    await self.conversation_history(event, str(conversation))
-                    if conversation
-                    else []
-                )
+                    rows = (
+                        await self.conversation_history(event, str(conversation))
+                        if conversation
+                        else []
+                    )
+            except TimeoutError:
+                raise HindsightError("history_timeout") from None
             if not conversation:
-                self.warning("conversation_not_available")
+                code = "conversation_not_available"
+                self.warning(code)
                 return
             self.refresh_permissions()
             if (
@@ -375,6 +467,7 @@ class HindsightBridge(Star):
                     incoming, str(conversation), history_before=history_boundary(rows)
                 )
                 if not capture.created:
+                    outcome = None
                     return
                 if rows is not None:
                     self.turns[event] = {
@@ -397,28 +490,38 @@ class HindsightBridge(Star):
                 else (),
                 timestamp=incoming.iso_timestamp,
             )
-            self.refresh_permissions()
-            if (
-                memory
-                and self.allowed(event)
-                and self.outbox.can_recall(scope)
-                and self.permission_revision == permission_revision
-            ):
-                req.extra_user_content_parts.append(
-                    TextPart(text=memory).mark_as_temp()
-                )
+            outcome = "success" if memory else "empty"
+            content = memory or "Hindsight 检索完成，本轮未匹配到相关记忆。"
             self.status = "运行中"
+        except asyncio.CancelledError:
+            outcome = None
+            raise
         except HindsightError as exc:
+            code = exc.code
             if exc.authentication:
                 self.outbox.pause_connection(exc.code)
             self.warning(exc.code)
-        except TimeoutError:
-            self.warning("recall_timeout")
         except QueueError as exc:
-            self.warning(str(exc))
+            code = str(exc)
+            self.warning(code)
         except Exception as exc:  # noqa: BLE001 -- local storage failures must preserve chat
-            self.warning("local_" + type(exc).__name__)
+            code = "local_" + type(exc).__name__
+            self.warning(code)
         finally:
+            try:
+                if outcome is not None and scope is not None:
+                    self.refresh_permissions()
+                    if (
+                        self.allowed(event)
+                        and self.outbox.can_recall(scope)
+                        and self.permission_revision == permission_revision
+                    ):
+                        self.record_recall(scope, outcome, started, code)
+                        if not content:
+                            content = recall_notice(code)
+                        req.extra_user_content_parts.append(TextPart(text=content).mark_as_temp())
+            except Exception as exc:  # noqa: BLE001 -- diagnostics must preserve chat
+                self.warning("local_" + type(exc).__name__)
             if capture and capture.created and self.outbox is not None:
                 try:
                     self.outbox.release(capture.task_id)
@@ -687,6 +790,7 @@ class HindsightBridge(Star):
                 f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
                 f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
                 f"最近记录状态：{self.status}\n"
+                f"最近记忆检索：{recall_description(self.recall_status(scope))}\n"
                 "常用操作：/hindsight help"
             )
 
@@ -872,6 +976,10 @@ class HindsightBridge(Star):
                 )
 
     async def _close_resources(self):
+        if self.connection_task is not None:
+            self.connection_task.cancel()
+            await asyncio.gather(self.connection_task, return_exceptions=True)
+            self.connection_task = None
         for task in list(self.history_tasks):
             task.cancel()
         if self.history_tasks:

@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const bridge = window.AstrBotPluginView;
+let bridge = window.AstrBotPluginView;
 const modeLabels = { active: "正常记忆", readonly: "只用已有记忆", paused: "暂停记忆" };
 const modeHelp = {
   active: "读取已有记忆，并保存新的记忆。",
@@ -12,6 +12,7 @@ let scopeId = "";
 let modeDirty = false;
 let forgetState = null;
 let maintenanceState = null;
+let maintenanceReadRevision = 0;
 let refreshTimer;
 let refreshRunning = false;
 let refreshFailures = 0;
@@ -20,6 +21,21 @@ let modelWatch = null;
 let statusSignature = "";
 const locks = new Set();
 let feedbackTimer;
+let startRunning = false;
+let viewReady = false;
+let offContext;
+
+async function withTimeout(work, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function text(value) {
   if (value == null) return "";
@@ -48,7 +64,7 @@ function notify(message, error = false, target = "feedback") {
 
 function errorMessage(error) {
   const message = error?.message || "";
-  if (/timeout|timed out|超时/i.test(message)) return "请求超时，请稍后重试。";
+  if (/timeout|timed out/i.test(message)) return "请求超时，请稍后重试。";
   return message || "操作未完成，请稍后重试。";
 }
 
@@ -255,9 +271,9 @@ function renderStatus() {
     : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
   $("status-description").textContent = status.recovering ? "恢复完成后自动更新。"
-    : connected === false ? (data.config.managed
+    : connected === false ? (status.message || (data.config.managed
       ? "请检查配套服务是否运行；服务恢复后会自动连接。"
-      : "请检查服务地址、密钥与服务状态，可点击「测试服务连接」查看原因。")
+      : "请检查服务地址、密钥与服务状态，可点击「测试服务连接」查看原因。"))
     : "";
   if (data.config.managed && data.managed_service?.installed && !status.recovering) {
     if (!data.managed_service.ready) {
@@ -286,14 +302,25 @@ function renderStatus() {
     });
     heading.append(el("strong", "", scopeName(scope)), el("span", "badge", scope.pending ? "等待连接" : modeLabels[scope.mode] || "模式未知"), manage);
     row.append(heading, el("p", "hint", scope.pending ? pendingScopeHelp(scope) : countDescription(scope.summary?.counts)));
+    if (!scope.pending) row.append(el("p", "hint", recallDescription(scope.summary?.recall)));
     if (scope.summary?.maintenance || scope.summary?.bank_missing) row.append(el("p", "hint", maintenanceDescription(scope.summary)));
     if (scope.summary?.error_message) row.append(el("p", "hint error-text", scope.summary.error_message));
     $("scope-statuses").append(row);
   });
 }
 
+function recallDescription(recall) {
+  if (!recall) return "最近记忆检索：尚未检索";
+  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过" };
+  const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome];
+  let result = `最近记忆检索：${label} · ${new Date(recall.last_at * 1000).toLocaleTimeString()} · ${(recall.elapsed_ms / 1000).toFixed(2)} 秒`;
+  if (recall.consecutive_failures) result += ` · 连续失败 ${recall.consecutive_failures} 次`;
+  if (recall.error_message) result += `。${recall.error_message}`;
+  return result;
+}
+
 async function refreshBootstrap({ hydrate = false, automatic = false, pollMaintenance = true } = {}) {
-  const next = await bridge.apiGet("bootstrap");
+  const next = await withTimeout(bridge.apiGet("bootstrap"), 15000, "获取插件状态超时，请点击重新获取。");
   if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   data = next;
   maintenanceState = null;
@@ -355,18 +382,22 @@ function maintenanceDescription(summary = {}, state = null) {
 }
 
 async function readMaintenanceStatus() {
+  const revision = ++maintenanceReadRevision;
   const snapshot = data;
   const id = scopeId;
   const scope = snapshot?.scopes.find((item) => item.scope_id === id);
   if (!scope?.summary?.maintenance || scope.pending) return;
   let state;
   try {
-    const response = await bridge.apiGet(endpoint("action", id), { action: "maintenance_status" });
+    const response = await withTimeout(
+      bridge.apiGet(endpoint("action", id), { action: "maintenance_status" }),
+      15000, "获取维护状态超时，请稍后刷新维护状态。",
+    );
     state = response.maintenance;
   } catch (error) {
     state = { phase: "draining", ready: false, error: errorMessage(error) };
   }
-  if (snapshot !== data || id !== scopeId) return;
+  if (revision !== maintenanceReadRevision || snapshot !== data || id !== scopeId) return;
   maintenanceState = state;
   renderScope();
 }
@@ -404,6 +435,7 @@ function pendingScopeHelp(scope) {
 }
 
 function selectScope(id) {
+  maintenanceReadRevision++;
   scopeId = id;
   $("scope-picker").value = id;
   modeDirty = false;
@@ -522,11 +554,12 @@ function watchModels(requestId = "") {
 
 function scheduleRefresh(milliseconds = 5000) {
   clearTimeout(refreshTimer);
+  if (!viewReady) return;
   refreshTimer = setTimeout(() => void autoRefresh(), milliseconds);
 }
 
 async function autoRefresh() {
-  if (document.hidden || refreshRunning || !data || locks.size) {
+  if (document.hidden || refreshRunning || !viewReady || locks.size) {
     scheduleRefresh();
     return;
   }
@@ -675,14 +708,17 @@ $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninsta
   $("uninstallation").open = false;
   notify("卸载命令已复制。请在运行 AstrBot 的 Linux 主机终端执行。");
 }));
-$("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", async () => {
-  const firstLoad = !data;
-  await refreshBootstrap({ hydrate: firstLoad });
-  if (firstLoad) activateTab(data.config.configured ? "memories" : "setup");
+async function refreshView() {
+  if (!viewReady) {
+    window.location.reload();
+    return;
+  }
+  await refreshBootstrap();
   notify("状态已刷新。");
   $("update-error").hidden = true;
   scheduleRefresh();
-}));
+}
+$("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", refreshView));
 $("go-setup").addEventListener("click", () => activateTab("setup", true));
 $("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = true; clearTimeout(feedbackTimer); });
 $("scope-picker").addEventListener("change", () => selectScope($("scope-picker").value));
@@ -702,14 +738,15 @@ $("retry").addEventListener("click", () => void perform($("retry"), "memory", as
 }));
 async function maintenanceAction(button, action, extra = {}) {
   await perform(button, "memory", async () => {
+    const revision = ++maintenanceReadRevision;
     const id = scopeId;
     maintenanceState = null;
     renderScope();
     const response = action === "maintenance_status"
-      ? await bridge.apiGet(endpoint("action", id), { action })
+      ? await withTimeout(bridge.apiGet(endpoint("action", id), { action }), 15000, "获取维护状态超时，请稍后刷新维护状态。")
       : await bridge.apiPost(endpoint("action", id), { action, ...extra });
     await refreshBootstrap({ pollMaintenance: action !== "maintenance_status" });
-    if (scopeId === id && action === "maintenance_status") {
+    if (revision === maintenanceReadRevision && scopeId === id && action === "maintenance_status") {
       maintenanceState = response.maintenance;
       renderScope();
     }
@@ -769,6 +806,7 @@ $("confirm-forget").addEventListener("click", () => {
   if (!forgetState || !$("forget-agree").checked) return;
   const pending = forgetState;
   void perform($("confirm-forget"), "forget", async () => {
+    maintenanceReadRevision++;
     $("forget-agree").disabled = true;
     $("cancel-forget").disabled = true;
     try {
@@ -792,29 +830,43 @@ $("confirm-forget").addEventListener("click", () => {
 });
 
 async function start() {
+  if (startRunning) return;
+  startRunning = true;
+  $("startup").hidden = false;
+  $("startup").textContent = "正在连接 AstrBot…";
+  $("startup").classList.remove("error");
+  $("refresh").disabled = true;
   try {
+    bridge = window.AstrBotPluginView;
     if (!bridge) throw new Error("请从 AstrBot 的插件详情页打开「记忆管理」。");
-    const context = await bridge.ready();
+    const context = await withTimeout(bridge.ready(), 10000, "连接 AstrBot 超时，请重新加载插件页面。");
     const theme = (value) => { document.documentElement.dataset.theme = (value || bridge.getContext?.())?.isDark ? "dark" : "light"; };
     theme(context);
-    const off = bridge.onContext?.(theme);
-    window.addEventListener("beforeunload", () => { off?.(); }, { once: true });
-    await refreshBootstrap({ hydrate: true });
+    offContext?.();
+    offContext = bridge.onContext?.(theme);
+    await refreshBootstrap({ hydrate: true, pollMaintenance: false });
     $("refresh").disabled = false;
+    $("refresh").textContent = "重新获取";
+    $("update-error").hidden = true;
     activateTab(data.config.configured ? "memories" : "setup");
+    viewReady = true;
     scheduleRefresh();
+    void readMaintenanceStatus().catch((error) => notify(errorMessage(error), true));
   } catch (error) {
     $("startup").textContent = errorMessage(error);
     $("startup").classList.add("error");
     $("startup").setAttribute("role", "alert");
-    $("refresh").disabled = !bridge;
+    $("refresh").disabled = false;
+    $("refresh").textContent = viewReady ? "重新获取" : "重新加载页面";
     $("update-error").hidden = false;
     $("update-error-message").textContent = "页面加载失败，请重试。";
+  } finally {
+    startRunning = false;
   }
 }
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
   if (!document.hidden) scheduleRefresh(0);
 });
-window.addEventListener("beforeunload", () => clearTimeout(refreshTimer), { once: true });
+window.addEventListener("beforeunload", () => { clearTimeout(refreshTimer); offContext?.(); }, { once: true });
 void start();

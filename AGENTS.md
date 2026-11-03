@@ -14,6 +14,8 @@ Bridge 只负责连接，不负责接管。
 ## 开发与验证
 
 - 回归入口：在插件仓库根目录运行 `python tests/run.py`，按改动范围完成相关验证。
+- 本仓库是已公开发布的插件。每次 push 前必须完成完整回归、Node 页面测试与语法检查、`python tools/check-package.py`，并核对实际分发包包含全部运行模块、页面资产和部署材料；测试不能静默跳过。
+- 涉及宿主钩子、初始化、生命周期、页面或数据恢复时，还须在独立的真实 AstrBot/Hindsight 环境完成相关安装、升级/重载和集成验收。记录实际版本、测试范围和结果，明确区分模拟测试与真实集成；未执行或未通过的验收不能用单元测试通过替代，不得 push。
 - 实现与安装设计见 [ARCHITECTURE.md](docs/ARCHITECTURE.md) 和 [SETUP-DESIGN.md](docs/SETUP-DESIGN.md)。
 
 ## 界面文案

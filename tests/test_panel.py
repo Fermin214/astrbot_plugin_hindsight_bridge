@@ -43,6 +43,9 @@ class StatePath:
 
 
 class InMemoryPanel(module.MemoryPanel):
+    def has_identity_data(self):
+        return False
+
     def directory(self):
         return StatePath(self)
 
@@ -67,7 +70,9 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = SimpleNamespace(
             context=context, config=self.config, client=None, outbox=None,
             stopping=False, status="已停用", confirmations={},
-            refresh_permissions=lambda: None,
+            refresh_permissions=lambda: None, recall_status=lambda scope: None,
+            diagnostic=lambda code: code,
+            error_code=lambda exc: exc.code if isinstance(exc, HindsightError) else "timeout",
         )
 
         async def close_resources():
@@ -233,6 +238,13 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("timezone", self.config)
         self.assertEqual(self.config["allowed_accounts"], [])
 
+    async def test_settings_save_uses_native_astrbot_account_template_format(self):
+        await self.save(allowed_accounts=[{"platform_instance_id": "qq", "user_id": "123"}])
+        self.assertEqual(self.config["allowed_accounts"], [{
+            "__template_key": "account", "platform_instance_id": "qq", "user_id": "123",
+        }])
+        self.assertEqual(pairs(self.config["allowed_accounts"]), frozenset({("qq", "123")}))
+
     async def test_saved_users_are_visible_without_a_running_service(self):
         snapshot = await self.panel.bootstrap()
         self.assertEqual(len(snapshot["scopes"]), 1)
@@ -240,6 +252,27 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((user["platform_instance_id"], user["user_id"]), ("qq", "123"))
         self.assertTrue(user["pending"])
         self.assertEqual(user["pending_reason"], "service")
+
+    async def test_missing_service_identity_is_explicit_and_existing_data_is_not_rebound(self):
+        self.config["service_id"] = ""
+        snapshot = await self.panel.bootstrap()
+        self.assertEqual(snapshot["config"]["missing_fields"], ["service_id"])
+        self.assertIn("稳定服务标识", snapshot["status"]["label"])
+        self.panel.has_identity_data = lambda: True
+        before = copy.deepcopy(self.config)
+        with self.assertRaisesRegex(module.PanelError, "恢复原插件配置"):
+            await self.save()
+        self.assertEqual(self.config, before)
+        self.assertEqual(self.auth_calls, [])
+        self.assertIsNone(self.panel.saved_state)
+
+    async def test_invalid_timeout_is_rejected_before_network_and_config_save(self):
+        self.config["recall_timeout"] = 31
+        before = copy.deepcopy(self.config)
+        with self.assertRaisesRegex(module.PanelError, "invalid_recall_timeout"):
+            await self.save()
+        self.assertEqual(self.config, before)
+        self.assertEqual(self.auth_calls, [])
 
     async def test_connected_user_can_set_mode_before_first_message(self):
         @asynccontextmanager

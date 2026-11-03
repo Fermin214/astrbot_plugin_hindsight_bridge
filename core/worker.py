@@ -7,6 +7,7 @@ import time
 from collections import deque
 
 from .client import HindsightClient, HindsightError, Operation
+from .diagnostics import WarningLog
 from .maintenance import Maintenance
 from .outbox import Outbox, QueueError
 
@@ -28,7 +29,7 @@ class Worker:
         self.running = {}
         self.last_prune = 0.0
         self.next_auth_check = 0.0
-        self.last_warning = 0.0
+        self.warning_log = WarningLog(logger)
         self.storage_recovery = False
         self.maintenance = Maintenance(outbox, client)
         self.cleanup_task = None
@@ -213,8 +214,7 @@ class Worker:
                     min(300, 2 ** min(attempts, 9) * random.uniform(1, 1.2)),
                 ),
             )
-            if attempts == 1 or exc.permanent:
-                self.logger.warning("Hindsight queue: %s", exc.code)
+            self.warning_log.warning(exc.code)
         except (OSError, sqlite3.OperationalError):
             raise
         except Exception as exc:  # noqa: BLE001 -- preserve durable work on adapter failures
@@ -351,7 +351,8 @@ class Worker:
                                 (self.outbox.connection_id,),
                             )
                         self.storage_recovery = False
-                    if not self.storage_recovery and await self.recover_connection() and await self.maintenance.startup():
+                    # Finish data recovery before gating uploads on network authentication.
+                    if not self.storage_recovery and await self.maintenance.startup() and await self.recover_connection():
                         self.start_due()
                         if self.cleanup_task is None or self.cleanup_task.done():
                             if self.cleanup_task and not self.cleanup_task.cancelled():
@@ -377,10 +378,12 @@ class Worker:
                         self.maintenance.next_startup = 0.0
                     failures += 1
                     delay = min(30, 2 ** min(failures, 5))
-                    if time.monotonic() - self.last_warning > 60:
-                        code = exc.code if isinstance(exc, HindsightError) else type(exc).__name__
-                        self.logger.warning("Hindsight recovery: %s", code)
-                        self.last_warning = time.monotonic()
+                    code = (
+                        exc.code if isinstance(exc, HindsightError)
+                        else str(exc) if isinstance(exc, QueueError)
+                        else type(exc).__name__
+                    )
+                    self.warning_log.warning(code)
                 try:
                     await asyncio.wait_for(self.wake.wait(), timeout=delay)
                 except TimeoutError:

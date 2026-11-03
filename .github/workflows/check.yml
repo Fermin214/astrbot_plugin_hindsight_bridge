@@ -17,6 +17,50 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: python -m pip install -r requirements-dev.txt
+      - run: node --check views/memory/app.js
       - run: python tests/run.py
       - run: python tools/check-package.py
+
+  astrbot-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/build-test-package.py --output "${{ runner.temp }}/hindsight-delivery"
+      - name: Official AstrBot archive installation, requests, history and upgrade
+        run: |
+          docker run --rm --name hindsight-bridge-delivery-astrbot \
+            --label hindsight-bridge.test=delivery --memory 1536m \
+            -e ASTRBOT_ROOT=/verification \
+            -e ASTRBOT_DASHBOARD_INITIAL_PASSWORD='Delivery-Test-2026!' \
+            -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
+            -v "${{ github.workspace }}:/candidate-source:ro" \
+            soulter/astrbot:v4.29.1 \
+            python /candidate-source/tests/integration/astrbot_smoke.py \
+            2>&1 | tee "${{ runner.temp }}/hindsight-delivery/astrbot-smoke.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astrbot-delivery-evidence
+          path: ${{ runner.temp }}/hindsight-delivery
+
+  hindsight-model-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned Hindsight model SDK contracts against local fixtures
+        run: |
+          docker run --rm --name hindsight-bridge-delivery-models \
+            --label hindsight-bridge.test=delivery --network none --memory 1536m \
+            -v "${{ github.workspace }}:/verify/plugins/astrbot_plugin_hindsight_bridge:ro" \
+            -w /verify/plugins/astrbot_plugin_hindsight_bridge \
+            ghcr.io/vectorize-io/hindsight:1.1.0-slim \
+            python tools/check-model-protocols.py

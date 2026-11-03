@@ -67,7 +67,7 @@
 - [使用指南](docs/USAGE.md)：面板管理和私聊命令。
 - [兼容范围](docs/SUPPORT.md)：版本、供应商、平台与消息类型。
 - [备份与恢复](docs/DATA-MAINTENANCE.md)：服务维护、升级和迁移。
-- [开发与贡献](CONTRIBUTING.md)：源码结构、检查及实现说明。
+- [贡献指南](CONTRIBUTING.md)：源码结构、接口边界和提交要求。
 
 反馈问题请到 [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues)，附上版本、操作步骤和错误提示。
 

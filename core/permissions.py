@@ -17,3 +17,9 @@ def pairs(entries):
             raise QueueError("invalid_allowed_user_id")
         result.add((platform.strip(), user.strip()))
     return frozenset(result)
+
+
+def configuration_accounts(entries):
+    """Keep account values while supplying AstrBot's template-list discriminator."""
+    pairs(entries)
+    return [dict(entry, __template_key="account") for entry in entries]

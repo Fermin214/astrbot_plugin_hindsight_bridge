@@ -70,8 +70,8 @@
   "recall_timeout": {
     "description": "召回总超时（秒）",
     "type": "float",
-    "default": 4,
-    "hint": "查找记忆的最长等待时间，默认 4 秒。超时后继续普通聊天。"
+    "default": 10,
+    "hint": "查找记忆的最长等待时间，默认 10 秒，可设为 0.2 到 30 秒。服务冷启动较慢时可适当增加；超时后继续聊天。"
   },
   "recall_max_tokens": {
     "description": "召回结果长度（token）",

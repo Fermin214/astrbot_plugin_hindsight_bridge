@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from .client import HindsightClient, HindsightError
+from .diagnostics import (
+    ConfigurationError, configuration_message, connection_fields, missing_connection,
+    recall_timeout,
+)
 from .identity import Incoming, sha256
 from .installer import installation, uninstallation
 from .outbox import QueueError
@@ -132,6 +136,11 @@ class MemoryPanel:
         from astrbot.api.star import StarTools
 
         return Path(StarTools.get_data_dir(NAME))
+
+    def has_identity_data(self):
+        return any((self.directory() / name).is_file() for name in (
+            "runtime.sqlite3", "outbox.sqlite3",
+        )) or (self.plugin.control_directory() / "control.sqlite3").is_file()
 
     def state(self, *, create=False):
         path = self.directory() / "setup.json"
@@ -260,6 +269,11 @@ class MemoryPanel:
                 "counts": {}, "last_error": "",
             }
             summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
+            summary["recall"] = plugin.recall_status(scope) if queue and not scope.get("pending") else None
+            if summary["recall"]:
+                summary["recall"]["error_message"] = (
+                    self.error_message(summary["recall"]["code"]) if summary["recall"]["code"] else ""
+                )
             result.append({key: scope[key] for key in (
                 "scope_id", "platform_instance_id", "user_id", "mode", "bank",
             )} | {
@@ -288,12 +302,18 @@ class MemoryPanel:
         if plugin.client and plugin.outbox and not plugin.stopping:
             try:
                 async with plugin.using_resources(), asyncio.timeout(3):
-                    await plugin.client.ensure_auth(force=bool(plugin.outbox.connection_error()))
+                    await plugin.client.ensure_auth(force=bool(
+                        plugin.outbox.connection_error()
+                        or getattr(plugin.client, "connection", {}).get("connected") is False
+                    ))
                     self.connection_ready(plugin.client.url, plugin.client.api_key)
-                connected = True
-            except (HindsightError, TimeoutError) as exc:
+                connected = getattr(plugin.client, "connection", {}).get("connected", True)
+            except HindsightError as exc:
                 connected = False
                 connection_message = self.error_message(plugin.error_code(exc))
+            except TimeoutError:
+                connected = False
+                connection_message = self.error_message("auth_timeout")
         scopes = await self.user_scopes()
         state = self.state()
         key_command = ""
@@ -310,11 +330,13 @@ class MemoryPanel:
                 managed_status = await self.managed_request(state)
             except PanelError:
                 managed_status = {"installed": False, "configured": False, "ready": False}
-        configured = bool(config.get("api_url") and config.get("api_key") and config.get("service_id"))
+        missing = missing_connection(config)
+        configured = not missing
         return {
             "config_revision": self.config_revision(),
             "config": {
                 "configured": configured,
+                "missing_fields": missing,
                 "api_url": config.get("api_url", "") or state.get("api_url", ""),
                 "control_plane_url": self.displayed_control_plane_url(
                     config.get("control_plane_url")
@@ -339,7 +361,8 @@ class MemoryPanel:
             "control_plane_key_command": key_command,
             "providers": self.providers().options(),
             "status": {
-                "label": connection_message or plugin.status,
+                "label": configuration_message(config) or connection_message or plugin.status,
+                "message": connection_message,
                 "connected": connected,
                 "recovering": bool(plugin.outbox and plugin.outbox.recovering),
             },
@@ -555,6 +578,10 @@ class MemoryPanel:
     async def _save(self, payload, revision):
         self.ensure_open()
         plugin = self.plugin
+        try:
+            recall_timeout(plugin.config)
+        except ConfigurationError as exc:
+            raise PanelError(self.error_message(str(exc))) from None
         control_plane_url = self.control_plane_url(
             payload.get("control_plane_url", plugin.config.get("control_plane_url", "")),
             api_key=payload.get("api_key", ""),
@@ -571,17 +598,20 @@ class MemoryPanel:
             if not local_runner(profile):
                 raise PanelError("所选账号需要使用 AstrBot 内置 Agent，请先在配置文件中选择内置执行器。")
         url, key = self.credentials(payload)
+        state = self.state()
+        if not connection_fields(plugin.config)["service_id"] and self.has_identity_data():
+            raise PanelError("已有记忆数据但稳定服务标识缺失，请恢复原插件配置后重新保存。")
         try:
             client = HindsightClient(url, key)
         except (ValueError, httpx.InvalidURL):
             raise PanelError("服务地址格式无效，请填写完整的 HTTP 地址与有效 Key。") from None
         old_url = self.connection_url(plugin.config.get("api_url", ""))
-        old_service = plugin.config.get("service_id")
+        old_service = connection_fields(plugin.config)["service_id"]
         updates = {
             "api_url": client.url, "api_key": key,
             "control_plane_url": control_plane_url,
             "allowed_accounts": [
-                {"platform_instance_id": platform, "user_id": user}
+                {"__template_key": "account", "platform_instance_id": platform, "user_id": user}
                 for platform, user in sorted(selected)
             ],
         }
@@ -590,7 +620,6 @@ class MemoryPanel:
             and any(updates[name] != plugin.config.get(name, [] if name == "allowed_accounts" else "")
                     for name in ("allowed_accounts", "control_plane_url"))
         )
-        state = self.state()
         try:
             if not local_change:
                 if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):

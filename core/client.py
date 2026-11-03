@@ -208,6 +208,10 @@ class HindsightClient:
         )
         self.auth_until = 0.0
         self.auth_lock = asyncio.Lock()
+        self.connection = {"connected": None, "code": "", "checked_at": None}
+
+    def connection_result(self, connected, code=""):
+        self.connection = {"connected": connected, "code": code, "checked_at": time.time()}
 
     @staticmethod
     def bank_path(bank: str) -> str:
@@ -220,18 +224,33 @@ class HindsightClient:
         *,
         body: dict | None = None,
         key: str | None = None,
+        timeout: float | None = None,
     ) -> dict:
         credential = self.api_key if key is None else key
         headers = {"Authorization": "Bearer " + credential} if credential else {}
+        options = {"timeout": httpx.Timeout(timeout, connect=min(3, timeout))} if timeout is not None else {}
         try:
             resp = await self.http.request(
-                method, self.url + path, json=body, headers=headers
+                method, self.url + path, json=body, headers=headers, **options
             )
-        except httpx.TimeoutException:
-            raise HindsightError("timeout") from None
+        except httpx.TimeoutException as exc:
+            code = (
+                "connect_timeout" if isinstance(exc, httpx.ConnectTimeout)
+                else "read_timeout" if isinstance(exc, httpx.ReadTimeout)
+                else "write_timeout" if isinstance(exc, httpx.WriteTimeout)
+                else "pool_timeout" if isinstance(exc, httpx.PoolTimeout)
+                else "timeout"
+            )
+            if key is None:
+                self.connection_result(False, code)
+            raise HindsightError(code) from None
         except httpx.HTTPError:
+            if key is None:
+                self.connection_result(False, "connection_error")
             raise HindsightError("connection_error") from None
         if not resp.is_success:
+            if key is None and resp.status_code in {401, 403}:
+                self.connection_result(False, f"http_{resp.status_code}")
             raise HindsightError(
                 f"http_{resp.status_code}",
                 permanent=400 <= resp.status_code < 500
@@ -244,25 +263,44 @@ class HindsightClient:
             raise HindsightError("invalid_response") from None
         if not isinstance(value, dict):
             raise HindsightError("invalid_response")
+        if key is None and time.monotonic() < self.auth_until:
+            self.connection_result(True)
         return value
 
-    async def ensure_auth(self, force: bool = False) -> None:
+    async def ensure_auth(self, force: bool = False, *, timeout: float | None = None) -> None:
         if not force and time.monotonic() < self.auth_until:
             return
+        previous_auth = self.auth_until
         async with self.auth_lock:
-            if not force and time.monotonic() < self.auth_until:
+            if time.monotonic() < self.auth_until and (
+                not force or self.auth_until != previous_auth
+            ):
                 return
             path = "/v1/default/banks"
-            await self.request("GET", path)
-            for wrong_key in ("", "invalid-" + uuid.uuid4().hex):
-                try:
-                    await self.request("GET", path, key=wrong_key)
-                except HindsightError as exc:
-                    if exc.code in {"http_401", "http_403"}:
-                        continue
-                    raise
-                raise HindsightError("server_auth_not_enforced")
+            try:
+                await self.request("GET", path, timeout=timeout)
+                for wrong_key in ("", "invalid-" + uuid.uuid4().hex):
+                    try:
+                        await self.request("GET", path, key=wrong_key, timeout=timeout)
+                    except HindsightError as exc:
+                        if exc.code in {"http_401", "http_403"}:
+                            continue
+                        raise
+                    raise HindsightError("server_auth_not_enforced")
+            except HindsightError as exc:
+                self.auth_until = 0.0
+                self.connection_result(False, exc.code)
+                raise
             self.auth_until = time.monotonic() + 60
+            self.connection_result(True)
+
+    async def check_connection(self, *, timeout=10, force=False):
+        try:
+            async with asyncio.timeout(timeout):
+                await self.ensure_auth(force=force, timeout=timeout)
+        except TimeoutError:
+            self.connection_result(False, "auth_timeout")
+            raise HindsightError("auth_timeout") from None
 
     async def create_bank(self, bank: str) -> None:
         if not bank.startswith("abm-v1-"):
@@ -276,10 +314,11 @@ class HindsightClient:
         max_tokens: int = 1200,
         *,
         timestamp: str,
+        timeout: float | None = None,
     ) -> list[dict]:
         if not query.strip() or token_count(query, self.tokenizer) > 400:
             raise HindsightError("invalid_query_budget", permanent=True)
-        await self.ensure_auth()
+        await self.ensure_auth(timeout=timeout)
         try:
             result = await self.request(
                 "POST",
@@ -297,6 +336,7 @@ class HindsightClient:
                         }
                     },
                 },
+                timeout=timeout,
             )
         except HindsightError as exc:
             if exc.code == "http_404":

@@ -59,7 +59,7 @@ def main():
     for name in (
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
-        "core/panel.py", "core/providers.py", "core/installer.py",
+        "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
@@ -95,7 +95,17 @@ def main():
     assert not schema["api_key"]["default"] and not example["api_key"]
     for path in root.rglob("*.py"):
         if ".git" not in path.parts:
-            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or not node.level:
+                    continue
+                package = path.parent
+                for _ in range(node.level - 1):
+                    package = package.parent
+                destination = package.joinpath(*(node.module or "").split("."))
+                assert destination.with_suffix(".py").is_file() or (destination / "__init__.py").is_file(), (
+                    str(path.relative_to(root)), "missing relative import", node.module,
+                )
     for path in root.rglob("*.md"):
         if ".git" in path.parts:
             continue
