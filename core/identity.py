@@ -68,7 +68,7 @@ class Incoming:
     message_id: str
     timestamp: int
     text: str
-    received_at: float = field(default_factory=time.time, compare=False)
+    received_at: float = field(default_factory=lambda: time.time(), compare=False)
 
     @property
     def iso_timestamp(self) -> str:

@@ -60,6 +60,7 @@ def main():
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
+        "core/source.py", "core/access.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
@@ -94,7 +95,7 @@ def main():
         assert obsolete not in schema and obsolete not in example, obsolete
     assert not schema["api_key"]["default"] and not example["api_key"]
     for path in root.rglob("*.py"):
-        if ".git" not in path.parts:
+        if not {".git", ".local"} & set(path.relative_to(root).parts):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom) or not node.level:
@@ -107,7 +108,7 @@ def main():
                     str(path.relative_to(root)), "missing relative import", node.module,
                 )
     for path in root.rglob("*.md"):
-        if ".git" in path.parts:
+        if {".git", ".local"} & set(path.relative_to(root).parts):
             continue
         for link in re.findall(r"\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
             if "://" in link:

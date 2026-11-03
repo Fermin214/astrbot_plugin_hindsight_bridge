@@ -11,8 +11,10 @@ let settingsRevision = "";
 let scopeId = "";
 let modeDirty = false;
 let forgetState = null;
+let authorizationState = null;
 let maintenanceState = null;
 let maintenanceReadRevision = 0;
+let bootstrapReadRevision = 0;
 let refreshTimer;
 let refreshRunning = false;
 let refreshFailures = 0;
@@ -70,6 +72,8 @@ function errorMessage(error) {
 
 async function perform(button, group, work, feedbackTarget = "feedback") {
   if (locks.has(group)) return;
+  bootstrapReadRevision++;
+  maintenanceReadRevision++;
   locks.add(group);
   const fieldset = $(`${group}-fields`);
   if (fieldset) fieldset.disabled = true;
@@ -176,29 +180,48 @@ function updateConnectionMode() {
 
 function addAccount(account = {}) {
   const row = el("div", "account-row");
-  const platformLabel = el("label", "", "QQ 机器人");
+  const platformLabel = el("label", "", "平台实例");
   const select = el("select");
   select.className = "account-platform";
   select.required = true;
-  select.append(option("", "请选择已连接的机器人"));
-  (data.platforms || []).forEach((platform) => select.append(option(platform.id, platform.name || platform.id)));
+  select.append(option("", "请选择平台实例"));
+  (data.platforms || []).forEach((platform) => select.append(option(
+    platform.id, platform.name || platform.id, platform.supported === false || platform.enabled === false,
+  )));
   if (account.platform_instance_id && !(data.platforms || []).some((item) => item.id === account.platform_instance_id)) {
-    select.append(option(account.platform_instance_id, `${account.platform_instance_id}（机器人不可用，请重新选择）`, true));
+    select.append(option(account.platform_instance_id, `${account.platform_instance_id}（实例不可用）`));
   }
   select.value = account.platform_instance_id || "";
   platformLabel.append(select);
-  const userLabel = el("label", "", "用户 QQ 号");
+  const userLabel = el("label");
+  const caption = el("span");
   const input = el("input");
   input.type = "text";
-  input.inputMode = "numeric";
-  input.pattern = "[0-9]+";
-  input.maxLength = 20;
   input.required = true;
   input.autocomplete = "off";
   input.className = "account-user";
-  input.placeholder = "与这个机器人私聊的 QQ 号";
   input.value = account.user_id || "";
-  userLabel.append(input);
+  userLabel.append(caption, input);
+  function updateHint() {
+    const platform = (data.platforms || []).find((item) => item.id === select.value);
+    caption.textContent = platform?.user_label || "用户 ID";
+    input.inputMode = platform?.numeric_user_id ? "numeric" : "text";
+    if (platform?.numeric_user_id) {
+      input.pattern = "[0-9]+";
+      input.maxLength = 20;
+    } else {
+      input.removeAttribute("pattern");
+      input.removeAttribute("maxlength");
+    }
+    input.placeholder = platform?.user_hint || "填写 /sid 中的用户 UID";
+  }
+  select.addEventListener("change", updateHint);
+  updateHint();
+  const authorize = el("button", "", "确认账号授权");
+  authorize.type = "button";
+  authorize.addEventListener("click", () => void prepareAuthorization(
+    authorize, select.value, input.value.trim(),
+  ));
   const remove = el("button", "danger-quiet", "移除");
   remove.type = "button";
   remove.setAttribute("aria-label", account.user_id ? `移除用户 ${account.user_id}` : "移除此用户");
@@ -206,7 +229,7 @@ function addAccount(account = {}) {
     row.remove();
     $("add-account").focus();
   });
-  row.append(platformLabel, userLabel, remove);
+  row.append(platformLabel, userLabel, authorize, remove);
   $("accounts").append(row);
   return select;
 }
@@ -214,10 +237,12 @@ function addAccount(account = {}) {
 function refreshAccountPlatforms() {
   $("accounts").querySelectorAll(".account-platform").forEach((select) => {
     const selected = select.value;
-    select.replaceChildren(option("", "请选择已连接的机器人"));
-    (data.platforms || []).forEach((platform) => select.append(option(platform.id, platform.name || platform.id)));
+    select.replaceChildren(option("", "请选择平台实例"));
+    (data.platforms || []).forEach((platform) => select.append(option(
+      platform.id, platform.name || platform.id, platform.supported === false || platform.enabled === false,
+    )));
     if (selected && !(data.platforms || []).some((platform) => platform.id === selected)) {
-      select.append(option(selected, `${selected}（机器人不可用，请重新选择）`, true));
+      select.append(option(selected, `${selected}（实例不可用）`));
     }
     select.value = selected;
   });
@@ -245,7 +270,7 @@ function hydrateConfig() {
 
 function scopeName(scope) {
   const platform = (data?.platforms || []).find((item) => item.id === scope.platform_instance_id);
-  return `QQ ${scope.user_id} · ${platform?.name || scope.platform_instance_id}`;
+  return `${scope.user_id} · ${platform?.name || scope.platform_instance_id}${scope.historical ? ` · 历史机器人 ${scope.bot_id}` : ""}`;
 }
 
 function countDescription(counts) {
@@ -320,7 +345,15 @@ function recallDescription(recall) {
 }
 
 async function refreshBootstrap({ hydrate = false, automatic = false, pollMaintenance = true } = {}) {
-  const next = await withTimeout(bridge.apiGet("bootstrap"), 15000, "获取插件状态超时，请点击重新获取。");
+  const revision = ++bootstrapReadRevision;
+  let next;
+  try {
+    next = await withTimeout(bridge.apiGet("bootstrap"), 15000, "获取插件状态超时，请点击重新获取。");
+  } catch (error) {
+    if (revision !== bootstrapReadRevision) return;
+    throw error;
+  }
+  if (revision !== bootstrapReadRevision) return;
   if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   data = next;
   maintenanceState = null;
@@ -344,7 +377,8 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
     refreshAccountPlatforms();
     updateProviderHelp();
   }
-  $("platform-help").textContent = data.platforms?.length ? "" : "未找到 QQ 机器人。请先在 AstrBot 中添加机器人。";
+  $("platform-help").textContent = data.platforms?.some((platform) => platform.supported !== false)
+    ? "" : "未找到可用的平台实例。请先在 AstrBot 中添加受支持的机器人。";
   $("platform-help").hidden = !$("platform-help").textContent;
   const nextStatusSignature = JSON.stringify([data.config.configured, data.status, data.managed_service, data.scopes]);
   if (!automatic || nextStatusSignature !== statusSignature) {
@@ -408,6 +442,8 @@ function renderScope() {
   if (!modeDirty) $("scope-mode").value = scope?.mode || "";
   $("mode-help").textContent = scope?.pending ? pendingScopeHelp(scope) : modeHelp[$("scope-mode").value] || "";
   for (const id of ["scope-mode", "save-mode", "retry", "maintenance-begin", "maintenance-status", "maintenance-resume", "discard-pending", "forget"]) $(id).disabled = !scope || scope.pending === true;
+  for (const id of ["scope-mode", "save-mode", "retry"]) $(id).disabled ||= scope?.historical === true;
+  if (scope?.historical) $("mode-help").textContent = "历史范围可维护或清空。重新使用前，请在设置中确认当前机器人身份并授权。";
   const maintenanceActive = !!summary.maintenance;
   $("scope-mode").querySelector('[value="active"]').disabled = maintenanceActive || !!summary.bank_missing;
   $("scope-mode").querySelector('[value="readonly"]').disabled = maintenanceActive || !!summary.bank_missing;
@@ -431,10 +467,12 @@ function renderScope() {
 function pendingScopeHelp(scope) {
   if (scope.pending_reason === "service") return "请先在「设置」中完成服务配置。";
   if (scope.pending_reason === "recovering") return "记忆服务正在恢复，完成后自动更新。";
-  return "QQ 机器人尚未连接。连接后会自动更新。";
+  if (scope.pending_reason === "authorization") return "请到「设置」点击「确认账号授权」，核对当前机器人身份。";
+  return "机器人尚未连接，请先在 AstrBot 中连接。";
 }
 
 function selectScope(id) {
+  bootstrapReadRevision++;
   maintenanceReadRevision++;
   scopeId = id;
   $("scope-picker").value = id;
@@ -480,8 +518,11 @@ function settingsPayload() {
     const platform = row.querySelector(".account-platform");
     const user = row.querySelector(".account-user");
     const userId = user.value.trim();
-    if (!platform.value || platform.selectedOptions[0]?.disabled) throw new Error("请为每个用户选择可用的 QQ 机器人。");
-    if (!/^[0-9]+$/.test(userId)) throw new Error("用户 QQ 号只能填写数字。");
+    const contract = (data.platforms || []).find((item) => item.id === platform.value);
+    const previous = (data.config.allowed_accounts || []).some((item) => item.platform_instance_id === platform.value && item.user_id === userId);
+    if (!platform.value || (platform.selectedOptions[0]?.disabled && !previous)) throw new Error("请为每个用户选择可用的平台实例。");
+    if (!userId || /[:\x00-\x1f\x7f]/.test(userId)) throw new Error("请填写有效的用户 ID。");
+    if (contract?.numeric_user_id && !/^[0-9]{1,20}$/.test(userId)) throw new Error(`${contract.user_label}只能填写数字。`);
     const identity = JSON.stringify([platform.value, userId]);
     if (seen.has(identity)) throw new Error(`用户 ${userId} 已经添加，请移除重复行。`);
     seen.add(identity);
@@ -489,6 +530,35 @@ function settingsPayload() {
   }
   return payload;
 }
+
+async function prepareAuthorization(button, platform, user) {
+  await perform(button, "setup", async () => {
+    const payload = { action: "prepare", platform_instance_id: platform, user_id: user, config_revision: settingsRevision };
+    const response = await bridge.apiPost("accounts/authorize", payload);
+    authorizationState = { ...payload, action: "confirm", confirmation: response.confirmation };
+    $("authorization-description").textContent = `${response.message} 授权后仅接收新消息。已有暂停、只读和维护状态保持原设置。`;
+    $("authorization-dialog").showModal();
+  });
+}
+
+$("cancel-authorization").addEventListener("click", () => $("authorization-dialog").close());
+$("authorization-dialog").addEventListener("close", () => { authorizationState = null; });
+async function confirmAuthorization() {
+  if (!authorizationState) return;
+  const pending = authorizationState;
+  authorizationState = null;
+  await perform($("confirm-authorization"), "authorization", async () => {
+    let response;
+    try {
+      response = await bridge.apiPost("accounts/authorize", pending);
+    } finally {
+      $("authorization-dialog").close();
+    }
+    await refreshBootstrap({ automatic: true });
+    notify(response.message);
+  });
+}
+$("confirm-authorization").addEventListener("click", () => void confirmAuthorization().catch(() => {}));
 
 async function checkConnection(payload) {
   const response = await bridge.apiPost("connection/check", payload);
@@ -501,6 +571,7 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 
 function watchModels(requestId = "") {
   if (modelWatch) return modelWatch;
+  bootstrapReadRevision++;
   locks.add("setup");
   $("setup-fields").disabled = true;
   $("model-progress").hidden = false;

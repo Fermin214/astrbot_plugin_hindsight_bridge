@@ -46,7 +46,7 @@
     "description": "使用记忆的用户",
     "type": "template_list",
     "default": [],
-    "hint": "在「记忆管理 → 设置」中选择机器人，填写与它私聊的用户 QQ 号。未添加的用户不使用记忆。",
+    "hint": "在「记忆管理 → 设置」中选择平台、填写用户 ID，保存后点击「确认账号授权」。空列表关闭所有用户的记忆访问。",
     "templates": {
       "account": {
         "name": "平台账号",
@@ -55,13 +55,13 @@
             "description": "平台实例 ID",
             "type": "string",
             "default": "",
-            "hint": "在 QQ 私聊中发送 /sid，复制回复中的 Bot ID，去掉外侧括号；不是机器人登录的 QQ 号。"
+            "hint": "私聊发送 /sid，复制回复中的 Bot ID，去掉外侧括号；这是平台实例 ID，不是机器人登录账号。"
           },
           "user_id": {
             "description": "用户 ID",
             "type": "string",
             "default": "",
-            "hint": "填写你自己的 QQ 号，也就是私聊 /sid 回复中的 UID，去掉外侧括号。"
+            "hint": "填写私聊 /sid 回复中的 UID，去掉外侧括号。OneBot 使用用户 QQ 号；按所选平台的提示填写。"
           }
         }
       }

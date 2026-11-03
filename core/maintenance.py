@@ -15,14 +15,16 @@ class Maintenance:
         self.attempted_startup = False
         self.next_startup = 0.0
 
-    def _scope(self, scope_id):
+    def _scope(self, scope_id, management=None):
         scope = self.outbox.scope_owner(scope_id)
-        if not scope or not scope["allowed"]:
+        if not scope or (
+            not scope["allowed"] and not self.outbox.managed(scope, management)
+        ):
             raise QueueError("scope_not_available")
         return scope
 
-    def begin(self, scope_id, *, discard_pending=False):
-        scope, queue = self._scope(scope_id), self.outbox
+    def begin(self, scope_id, *, discard_pending=False, management=None):
+        scope, queue = self._scope(scope_id, management), self.outbox
         if queue.recovering:
             raise QueueError("scope_not_available")
         record = queue.control.begin_maintenance(
@@ -55,8 +57,8 @@ class Maintenance:
                     queue.update(row["id"], "discarded", retry_requested=0)
         return queue.control.maintenance(queue.connection_id, scope["bank"])
 
-    async def status(self, scope_id):
-        scope, queue = self._scope(scope_id), self.outbox
+    async def status(self, scope_id, *, management=None):
+        scope, queue = self._scope(scope_id, management), self.outbox
         record = queue.control.maintenance(queue.connection_id, scope["bank"])
         if record is None:
             return {"phase": "inactive", "ready": False}
@@ -89,9 +91,12 @@ class Maintenance:
                     op.id for op in operations
                     if op.status in {"pending", "processing", "cancelled"}
                 ]
+        latest = self._scope(scope_id, management)
+        if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
+            raise QueueError("scope_not_available")
         ready = not pending and not inflight and not remote_active
         phase = "ready" if ready else "draining"
-        with queue.control.db:
+        with queue.control.transaction():
             queue.control.db.execute(
                 "UPDATE maintenance SET phase=? WHERE connection_id=? AND bank=?",
                 (phase, queue.connection_id, scope["bank"]),
@@ -104,11 +109,11 @@ class Maintenance:
             "bank_missing": queue.control.bank_state(queue.connection_id, scope["bank"]) == "missing",
         }
 
-    async def resume(self, scope_id):
-        scope, queue = self._scope(scope_id), self.outbox
+    async def resume(self, scope_id, *, management=None):
+        scope, queue = self._scope(scope_id, management), self.outbox
         if queue.recovering:
             raise QueueError("scope_not_available")
-        state = await self.status(scope_id)
+        state = await self.status(scope_id, management=management)
         if not state["ready"]:
             raise QueueError("maintenance_pending")
         async with asyncio.timeout(10):
@@ -124,7 +129,7 @@ class Maintenance:
                 ).fetchone()
                 and not await self.client.bank_list_contains(scope["bank"])
             )
-        latest = self._scope(scope_id)
+        latest = self._scope(scope_id, management)
         if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
             raise QueueError("scope_not_available")
         if not exists and not uncreated:
@@ -165,7 +170,7 @@ class Maintenance:
                 return True
             for oid in batch:
                 operation = await self.client.operation(bank, oid)
-                with control.db:
+                with control.transaction():
                     control.add_refs(
                         fid, (("operation", child) for child, _ in operation.children)
                     )
@@ -188,7 +193,7 @@ class Maintenance:
 
     def _retired_data_present(self, fid, epoch):
         control = self.outbox.control
-        with control.db:
+        with control.transaction():
             if control.restart_cleanup(fid, epoch=epoch):
                 control.cleanup_state(fid, "cleaning", "retired_data_present")
         return False
@@ -238,7 +243,7 @@ class Maintenance:
             ).fetchone()
             if progress["cleanup_step"] == 7:
                 # Verified Banks are checked again, including references no longer listed remotely.
-                with control.db:
+                with control.transaction():
                     control.restart_cleanup(fid)
                 progress = control.db.execute(
                     "SELECT * FROM erasures WHERE forget_id=?", (fid,)
@@ -253,7 +258,7 @@ class Maintenance:
                     while step < 6:
                         if step in (0, 2):
                             operations = await self.client.list_operations(bank)
-                            with control.db:
+                            with control.transaction():
                                 control.add_refs(fid, (("operation", op.id) for op in operations))
                             self._operation_limit(fid)
                         elif step in (1, 3):

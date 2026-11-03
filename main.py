@@ -1,6 +1,7 @@
 """AstrBot hooks, personal memory controls, and durable erasure recovery."""
 
 import asyncio
+import json
 import secrets
 import sqlite3
 import tempfile
@@ -35,7 +36,7 @@ from .core.materials import TokenizerError, load_encoding, memory_block, recall_
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel
-from .core.source import local_runner, native_snapshot
+from .core.source import local_runner, native_header, prepare_bot_identity, source_identity
 from .core.worker import Worker
 
 
@@ -54,6 +55,8 @@ class HindsightBridge(Star):
         self.recall_outcomes = {}
         self.stopping = False
         self.permissions = None
+        self.source_accounts = {}
+        self.source_lock = asyncio.Lock()
         self.permission_revision = 0
         self.hooks = 0
         self.idle = asyncio.Event()
@@ -92,6 +95,10 @@ class HindsightBridge(Star):
             "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后刷新维护状态。需要清空全部旧记忆时，可使用清空操作重新开始",
             "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按数据维护指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
+            "authorization_changed": "账号授权已变化，请管理员在插件页确认当前机器人身份",
+            "command_already_applied": "这条命令已处理，请发送一条新命令",
+            "command_identity_conflict": "消息编号与已处理的命令冲突，请重新发送命令",
+            "command_expired": "命令早于最近的授权或模式变化，请重新发送",
             "invalid_capture": "内容为空或超出长度限制",
             "assistant_history_changed": "已保存的助手正文发生变化，请检查会话编辑记录",
             "conversation_history_not_saved": "助手正文尚未保存到会话历史，下一条消息继续核对",
@@ -111,6 +118,8 @@ class HindsightBridge(Star):
     async def initialize(self):
         if self.panel.closed or self.stopping:
             return
+        self.confirmations.clear()
+        self.source_accounts.clear()
         fields = connection_fields(self.config)
         url, key, service = (fields[name] for name in ("api_url", "api_key", "service_id"))
         if missing_connection(self.config):
@@ -146,12 +155,14 @@ class HindsightBridge(Star):
                 agent_id=str(self.config.get("agent_id", "default")),
             )
             self.refresh_permissions()
+            await self.prepare_sources()
             self.outbox.recovering = True
             self.worker = Worker(
                 self.outbox,
                 self.client,
                 logger,
                 refresh_permissions=self.refresh_permissions,
+                prepare_sources=self.prepare_sources,
             )
             self.task = asyncio.create_task(self.worker.run(), name="hindsight-outbox")
             self.connection_task = asyncio.create_task(
@@ -190,25 +201,90 @@ class HindsightBridge(Star):
             self.outbox.sync_permissions(accounts)
             self.permissions = accounts
             self.permission_revision += 1
+        if self.outbox is not None:
+            for instance, evidence in self.source_accounts.items():
+                adapter = self.context.get_platform_inst(instance)
+                if adapter is None or adapter is not evidence["adapter"] or adapter.get_client() is not evidence["client"]:
+                    evidence["bot_id"] = ""
+            for row in self.outbox.list_scopes():
+                evidence = self.source_accounts.get(row["platform_instance_id"])
+                if evidence is not None:
+                    source = json.loads(row["identity_json"])
+                    if source[3] != evidence["bot_id"]:
+                        self.outbox.db.execute(
+                            "UPDATE scopes SET allowed=0 WHERE connection_id=? AND scope_id=?",
+                            (self.outbox.connection_id, row["scope_id"]),
+                        )
+            self.outbox.db.commit()
+
+    async def prepare_sources(self):
+        getter = getattr(self.context, "get_platform_inst", None)
+        if getter is None or self.outbox is None or self.stopping:
+            return
+        async with self.source_lock:
+            queue = self.outbox
+            try:
+                accounts = pairs(self.config.get("allowed_accounts", []))
+            except QueueError:
+                self.refresh_permissions()
+                return
+            for instance in sorted({platform for platform, _ in accounts}):
+                adapter = getter(instance)
+                client = adapter.get_client() if adapter else None
+                bot = await prepare_bot_identity(self.context, instance)
+                if (
+                    self.stopping or self.outbox is not queue
+                    or accounts != pairs(self.config.get("allowed_accounts", []))
+                ):
+                    return
+                if getter(instance) is not adapter or (adapter and adapter.get_client() is not client):
+                    bot = ""
+                self.source_accounts[instance] = {"adapter": adapter, "client": client, "bot_id": bot}
+                if bot and self.outbox.access.observe_bot(instance, "aiocqhttp", bot):
+                    self.outbox.sync_permissions(accounts)
+                    self.confirmations.clear()
+                    self.permission_revision += 1
+            self.outbox.sync_permissions(accounts)
+            self.refresh_permissions()
 
     def allowed(self, event):
         try:
             accounts = pairs(self.config.get("allowed_accounts", []))
         except ValueError:
             return False
+        incoming = self.source_header(event)
         return (
             not self.stopping
-            and event.is_private_chat()
-            and not event.get_group_id()
-            and event.get_platform_name() == "aiocqhttp"
+            and incoming is not None
             and (event.get_platform_id(), event.get_sender_id()) in accounts
+            and self.outbox is not None
+            and self.outbox.accepts(incoming)
+            and (
+                getattr(self.context, "get_platform_inst", None) is None
+                or self.source_accounts.get(incoming.platform_instance_id, {}).get("bot_id") == incoming.bot_id
+            )
         )
+
+    def source_header(self, event):
+        incoming = native_header(
+            event, Plain, self.context.get_config().get("wake_prefix", []),
+        )
+        if incoming is None:
+            return None
+        getter = getattr(self.context, "get_platform_inst", None)
+        adapter = getter(incoming.platform_instance_id) if getter else None
+        if getter and adapter is None:
+            return None
+        return incoming if source_identity(event, incoming, adapter) else None
 
     def snapshot(self, event):
         if not self.allowed(event):
             return None
         prefixes = ("/", *self.config.get("command_prefixes", []))
-        return native_snapshot(event, Plain, prefixes)
+        incoming = self.source_header(event)
+        return incoming if not any(
+            incoming.text.lstrip().startswith(prefix) for prefix in prefixes if prefix
+        ) else None
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
@@ -226,6 +302,7 @@ class HindsightBridge(Star):
         last_error = ""
         while not self.stopping and self.client is client:
             try:
+                await self.prepare_sources()
                 await client.check_connection(force=True)
                 if queue.connection_error():
                     queue.pause_connection("")
@@ -372,6 +449,7 @@ class HindsightBridge(Star):
                     ):
                         return
                     rows = await self.conversation_history(event, turn["conversation"])
+                    await self.prepare_sources()
                     self.refresh_permissions()
                     if (
                         not self.allowed(event)
@@ -451,6 +529,7 @@ class HindsightBridge(Star):
                 self.warning(code)
                 return
             self.refresh_permissions()
+            await self.prepare_sources()
             if (
                 not self.allowed(event)
                 or not self.outbox.can_recall(scope)
@@ -510,6 +589,7 @@ class HindsightBridge(Star):
         finally:
             try:
                 if outcome is not None and scope is not None:
+                    await self.prepare_sources()
                     self.refresh_permissions()
                     if (
                         self.allowed(event)
@@ -539,27 +619,31 @@ class HindsightBridge(Star):
     def command_scope(self, event):
         if self.outbox is None or not self.allowed(event):
             return None
-        values = (
-            event.get_platform_name(),
-            event.get_platform_id(),
-            event.get_self_id(),
-            event.get_sender_id(),
-        )
-        if not all(isinstance(v, str) and v for v in values):
-            return None
-        raw = getattr(event.message_obj, "raw_message", None)
-        if (
-            not isinstance(raw, dict)
-            or raw.get("post_type") != "message"
-            or raw.get("message_type") != "private"
-            or str(raw.get("self_id")) != values[2]
-            or str(raw.get("user_id")) != values[3]
-            or str(raw.get("message_id")) != str(event.message_obj.message_id)
-            or values[2] == values[3]
-        ):
+        if not local_runner(self.context.get_config(event.unified_msg_origin)):
             return None
         self.refresh_permissions()
-        return self.outbox.scope(Incoming(*values, "", int(time.time()), ""))
+        return self.outbox.scope(self.source_header(event)) if self.allowed(event) else None
+
+    def prepare_command(self, event, scope, name, arguments=()):
+        self.refresh_permissions()
+        incoming = self.source_header(event)
+        if not self.allowed(event) or incoming is None:
+            raise QueueError("authorization_changed")
+        return self.outbox.access.command(
+            incoming, incoming.scope(self.outbox.deployment_id), scope, name, arguments,
+        )
+
+    def apply_command(self, event, scope, command, operation):
+        self.refresh_permissions()
+        if not self.allowed(event):
+            raise QueueError("authorization_changed")
+        try:
+            result = self.outbox.access.run(command, scope, operation)
+            self.outbox.apply_control()
+            return result
+        except (OSError, sqlite3.DatabaseError):
+            self.outbox.recovering = True
+            raise
 
     @asynccontextmanager
     async def using_resources(self):
@@ -605,6 +689,7 @@ class HindsightBridge(Star):
 
     @hindsight.command("view")
     async def memory_view(self, event: AstrMessageEvent, page: int = 1):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
@@ -621,6 +706,7 @@ class HindsightBridge(Star):
                     await self.client.ensure_auth()
                     offset = (page - 1) * 10
                     data = await self.client.memory_page(scope["bank"], page=page)
+                await self.prepare_sources()
                 if not self.readable(event, scope):
                     yield event.plain_result(self.unavailable_message(scope))
                     return
@@ -637,6 +723,7 @@ class HindsightBridge(Star):
 
     @hindsight.command("show")
     async def memory_show(self, event: AstrMessageEvent, memory_id: str):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
@@ -649,6 +736,7 @@ class HindsightBridge(Star):
                 async with asyncio.timeout(8):
                     await self.client.ensure_auth()
                     record = await self.client.get_memory(scope["bank"], memory_id)
+                await self.prepare_sources()
                 if not self.readable(event, scope):
                     yield event.plain_result(self.unavailable_message(scope))
                     return
@@ -664,6 +752,7 @@ class HindsightBridge(Star):
 
     @hindsight.command("export")
     async def memory_export(self, event: AstrMessageEvent):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
@@ -676,6 +765,7 @@ class HindsightBridge(Star):
                 async with asyncio.timeout(30):
                     await self.client.ensure_auth()
                     payload = await self.client.export_memories(scope["bank"])
+                await self.prepare_sources()
                 if not self.readable(event, scope):
                     yield event.plain_result(self.unavailable_message(scope))
                     return
@@ -707,6 +797,7 @@ class HindsightBridge(Star):
     async def memory_correct(
         self, event: AstrMessageEvent, memory_id: str = "", text: str = ""
     ):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
@@ -718,6 +809,7 @@ class HindsightBridge(Star):
 
     @hindsight.command("status")
     async def memory_status(self, event: AstrMessageEvent):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result(f"Hindsight：{self.status}；当前私聊未开放记忆。")
@@ -733,6 +825,14 @@ class HindsightBridge(Star):
                 connection = "可用，认证已启用"
             except (HindsightError, TimeoutError) as exc:
                 connection = self.diagnostic(self.error_code(exc))
+            await self.prepare_sources()
+            latest = self.outbox.scope_owner(scope["scope_id"])
+            if (
+                not self.allowed(event) or not latest or not latest["allowed"]
+                or latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]
+            ):
+                yield event.plain_result(self.diagnostic("scope_not_available"))
+                return
             runner = (
                 "内置执行器"
                 if local_runner(self.context.get_config(event.unified_msg_origin))
@@ -796,11 +896,12 @@ class HindsightBridge(Star):
 
     @hindsight.command("recall")
     async def memory_recall(self, event: AstrMessageEvent, query: str):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("当前私聊未开放记忆。")
             return
-        source = native_snapshot(event, Plain, ())
+        source = self.source_header(event)
         arguments = source.text.split(None, 2) if source else []
         if len(arguments) == 3:
             query = arguments[2]
@@ -814,6 +915,7 @@ class HindsightBridge(Star):
                 result = await self.recall_text(
                     scope["bank"], query, timestamp=utc_timestamp()
                 )
+                await self.prepare_sources()
                 if not self.outbox.can_recall(scope, manual=True) or not self.allowed(
                     event
                 ):
@@ -824,11 +926,13 @@ class HindsightBridge(Star):
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
     async def mode(self, event, mode):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             return "此私聊未开放记忆。"
         async with self.using_resources():
             try:
+                command = self.prepare_command(event, scope, "mode", (mode,))
                 if mode == "active":
                     summary = self.outbox.summary(scope["scope_id"])
                     if summary.get("maintenance") or summary.get("bank_missing"):
@@ -837,6 +941,7 @@ class HindsightBridge(Star):
                         force=True, owner_id=scope["owner_id"]
                     ):
                         return "旧记忆仍在清理，请等清理完成后再开启记忆。"
+                    await self.prepare_sources()
                     if not self.allowed(event):
                         return "此私聊未开放记忆。"
                     latest = self.outbox.scope_owner(scope["scope_id"])
@@ -845,7 +950,10 @@ class HindsightBridge(Star):
                         or latest["bank"] != scope["bank"]
                     ):
                         return "记忆范围已变化，请重新开启。"
-                self.outbox.set_mode(scope["scope_id"], mode)
+                self.apply_command(
+                    event, scope, command,
+                    lambda: self.outbox.set_mode(scope["scope_id"], mode, journal_only=True),
+                )
                 self.worker.wake.set()
             except QueueError as exc:
                 return "模式切换失败：" + self.diagnostic(str(exc))
@@ -869,16 +977,21 @@ class HindsightBridge(Star):
 
     @hindsight.command("retry")
     async def memory_retry(self, event: AstrMessageEvent):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
             return
         try:
+            command = self.prepare_command(event, scope, "retry")
             summary = self.outbox.summary(scope["scope_id"])
             if summary.get("maintenance") or summary.get("bank_missing"):
                 yield event.plain_result(self.unavailable_message(scope))
                 return
-            count = self.outbox.request_retry(scope["scope_id"])
+            count = self.apply_command(
+                event, scope, command,
+                lambda: self.outbox.request_retry(scope["scope_id"], journal_only=True),
+            )
             self.worker.wake.set()
             yield event.plain_result(f"已安排重新保存 {count} 条失败记录。")
         except QueueError as exc:
@@ -886,12 +999,17 @@ class HindsightBridge(Star):
 
     @hindsight.command("cancel")
     async def memory_cancel(self, event: AstrMessageEvent, task_id: int):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
             return
         try:
-            self.outbox.request_cancel(scope["scope_id"], task_id)
+            command = self.prepare_command(event, scope, "cancel", (task_id,))
+            self.apply_command(
+                event, scope, command,
+                lambda: self.outbox.request_cancel(scope["scope_id"], task_id, journal_only=True),
+            )
             self.worker.wake.set()
             yield event.plain_result(
                 f"正在取消任务 {task_id}，可用 /hindsight status 查看进度。已经生成的记忆保留。"
@@ -901,6 +1019,7 @@ class HindsightBridge(Star):
 
     @hindsight.command("forget")
     async def memory_forget(self, event: AstrMessageEvent, confirmation: str = ""):
+        await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
             yield event.plain_result("此私聊未开放记忆。")
@@ -928,6 +1047,12 @@ class HindsightBridge(Star):
                 yield event.plain_result(self.diagnostic("scope_not_available"))
                 return
             if not confirmation:
+                try:
+                    command = self.prepare_command(event, scope, "forget_prepare")
+                    self.apply_command(event, scope, command, lambda: None)
+                except QueueError as exc:
+                    yield event.plain_result(self.diagnostic(str(exc)))
+                    return
                 self.confirmations = {
                     k: v
                     for k, v in self.confirmations.items()
@@ -939,6 +1064,9 @@ class HindsightBridge(Star):
                     "source": scope["scope_id"],
                     "bank": scope["bank"],
                     "revision": scope["revision"],
+                    "authorization_revision": self.outbox.access.authorization(
+                        event.get_platform_id(), event.get_sender_id(),
+                    )["revision"],
                     "until": time.monotonic() + 120,
                 }
                 yield event.plain_result(
@@ -957,11 +1085,18 @@ class HindsightBridge(Star):
                 or previous["source"] != scope["scope_id"]
                 or previous["bank"] != scope["bank"]
                 or previous["revision"] != scope["revision"]
+                or previous["authorization_revision"] != self.outbox.access.authorization(
+                    event.get_platform_id(), event.get_sender_id(),
+                )["revision"]
             ):
                 yield event.plain_result("确认码失效，请重新发送 /hindsight forget。")
                 return
             try:
-                self.outbox.forget(scope["scope_id"])
+                command = self.prepare_command(event, scope, "forget", (sha256(confirmation),))
+                self.apply_command(
+                    event, scope, command,
+                    lambda: self.outbox.forget(scope["scope_id"], journal_only=True),
+                )
                 self.worker.wake.set()
                 yield event.plain_result(
                     "正在清空旧记忆，记忆功能已暂停。"
@@ -998,8 +1133,10 @@ class HindsightBridge(Star):
 
     async def terminate(self):
         self.stopping = True
+        self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()
+        self.source_accounts.clear()
         self.handled.clear()
         self.turns.clear()
         await self._close_resources()

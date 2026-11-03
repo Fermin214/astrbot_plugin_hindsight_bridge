@@ -395,6 +395,10 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         self.queue.sync_permissions(
             [("instance-1", "alice"), ("instance-2", "other-account")]
         )
+        grant = self.queue.access.authorization("instance-2", "other-account")
+        second = replace(second, timestamp=int(time.time()) + 1)
+        self.queue.activate(second, grant["revision"])
+        second = replace(second, received_at=time.time())
         linked_task = self.enqueue(second)
         self.service.pending = True
         await self.worker.step()

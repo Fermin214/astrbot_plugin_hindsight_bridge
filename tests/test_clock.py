@@ -102,7 +102,8 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             },
             context=SimpleNamespace(get_config=Mock(return_value=host)),
             outbox=None, permissions=None, permission_revision=0,
-            panel=SimpleNamespace(closed=False), stopping=False,
+            panel=SimpleNamespace(closed=False), stopping=False, confirmations={},
+            source_accounts={}, prepare_sources=AsyncMock(),
             control_directory=lambda: root / "control", warning=Mock(),
             _close_resources=AsyncMock(), recall_outcomes={}, monitor_connection=AsyncMock(),
         )
@@ -135,7 +136,10 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             plugin = await self.initialize_bridge(Path(directory), host)
             queue = plugin.outbox
             self.assertEqual(queue.zone, "Asia/Shanghai")
-            source = Incoming("aiocqhttp", "onebot", "bot", "alice", "first", int(time.time()), "hello")
+            source = Incoming("aiocqhttp", "onebot", "bot", "alice", "first", int(time.time()) + 1, "hello")
+            grant = queue.access.authorization("onebot", "alice")
+            queue.activate(source, grant["revision"])
+            source = replace(source, received_at=time.time())
             first = queue.capture(source, "conversation")
             before = dict(queue.get(first.task_id))
             self.assertEqual(

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
@@ -210,16 +211,16 @@ class DialogueDurability(unittest.TestCase):
         for mode in ("readonly", "paused"):
             user = self.queue.capture(self.source, "chat")
             self.queue.set_mode(user.scope_id, mode)
-            self.queue.set_mode(user.scope_id, "active", now=time.time() - 1)
+            self.queue.set_mode(user.scope_id, "active")
             with self.assertRaisesRegex(QueueError, "scope_not_active"):
                 self.queue.capture_assistant(user.task_id, "迟到的承诺")
             self.source = Incoming(
-                "aiocqhttp", "onebot", "bot", "alice", mode, int(time.time()), mode
+                "aiocqhttp", "onebot", "bot", "alice", mode, int(time.time()) + 1, mode
             )
         user = self.queue.capture(self.source, "chat")
         self.queue.capture_assistant(user.task_id, "权限移除前的回复")
         self.source = Incoming(
-            "aiocqhttp", "onebot", "bot", "alice", "pending", int(time.time()), "未完成"
+            "aiocqhttp", "onebot", "bot", "alice", "pending", int(time.time()) + 1, "未完成"
         )
         pending = self.queue.capture(
             self.source, "chat", history_before=history_boundary([])
@@ -240,8 +241,13 @@ class DialogueDurability(unittest.TestCase):
             0,
         )
         fresh = Incoming(
-            "aiocqhttp", "onebot", "bot", "alice", "fresh", int(time.time()), "新语境"
+            "aiocqhttp", "onebot", "bot", "alice", "fresh", int(time.time()) + 1, "新语境"
         )
+        grant = self.queue.access.authorization("onebot", "alice")
+        self.queue.activate(fresh, grant["revision"])
+        fresh = replace(fresh, received_at=max(
+            time.time(), self.queue.access.authorization("onebot", "alice")["accept_from"],
+        ) + 0.001)
         capture = self.queue.capture(fresh, "chat")
         self.assertEqual(capture.history, ())
         self.assertIsNone(

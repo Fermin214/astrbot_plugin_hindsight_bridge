@@ -221,6 +221,8 @@ class Environment:
         self.owner = "hb-live-" + secrets.token_hex(4)
         self.containers = []
         self.volume = self.owner + "-postgres"
+        astrbot_version = getattr(args, "astrbot_version", "4.29.1")
+        self.astrbot_image = "soulter/astrbot:v" + astrbot_version
         self.magpie = args.magpie_url.rstrip("/")
         if self.magpie not in {"http://127.0.0.1:3425/v1", "http://localhost:3425/v1"}:
             raise ValueError("This harness expects the explicitly selected loopback Magpie gateway")
@@ -230,7 +232,8 @@ class Environment:
             "onebot_token": secrets.token_hex(20), "chat_token": secrets.token_hex(20),
             "control_token": secrets.token_hex(20), "memory_key": secrets.token_hex(20),
             "database_password": secrets.token_hex(20),
-            "chat_model": args.chat_model, "initial_password": "Delivery-Initial-2026!",
+            "chat_model": args.chat_model, "astrbot_version": astrbot_version,
+            "initial_password": "Delivery-Initial-2026!",
             "admin_password": "Delivery-Acceptance-2026!", "admin_name": "delivery-admin",
         }
         self.settings["hindsight_url"] = f'http://127.0.0.1:{self.settings["hindsight_port"]}'
@@ -356,8 +359,8 @@ class Environment:
         mounts = ["-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
                   "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", "/tmp/hindsight-bridge-token-cache:/token-cache:ro"]
-        self.docker("run", "--rm", "--network", "none", *mounts, "soulter/astrbot:v4.29.1", "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
-        self.launch("astrbot", "soulter/astrbot:v4.29.1", "--memory", "1536m", *mounts)
+        self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
+        self.launch("astrbot", self.astrbot_image, "--memory", "1536m", *mounts)
         dashboard = f'http://127.0.0.1:{self.settings["dashboard_port"]}'
         self.wait(lambda: self.ready_http(dashboard + "/api/v1/auth/setup-status"))
         print("Real AstrBot dashboard is ready", flush=True)
@@ -395,6 +398,7 @@ def main():
     parser.add_argument("--model-environment", type=Path, default=Path("/tmp/hindsight-bridge-qwen-acceptance/model-environment.json"))
     parser.add_argument("--magpie-url", default="http://127.0.0.1:3425/v1")
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
+    parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
     parser.add_argument("--scenario", choices=("full", "accepted"), default="full")
     args = parser.parse_args()
     state = Environment(args)

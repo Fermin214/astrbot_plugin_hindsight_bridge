@@ -542,6 +542,7 @@ class SourceAndQuery(unittest.TestCase):
         }
         event = SimpleNamespace(
             get_platform_name=lambda: "aiocqhttp",
+            created_at=time.time(),
             is_private_chat=lambda: True,
             get_group_id=lambda: "",
             get_platform_id=lambda: "onebot",

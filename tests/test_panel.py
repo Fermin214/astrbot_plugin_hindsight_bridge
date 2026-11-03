@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
@@ -71,6 +72,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             context=context, config=self.config, client=None, outbox=None,
             stopping=False, status="已停用", confirmations={},
             refresh_permissions=lambda: None, recall_status=lambda scope: None,
+            prepare_sources=AsyncMock(), source_accounts={},
             diagnostic=lambda code: code,
             error_code=lambda exc: exc.code if isinstance(exc, HindsightError) else "timeout",
         )
@@ -83,6 +85,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             if self.config.get("api_url") and self.config.get("api_key"):
                 self.plugin.outbox = SimpleNamespace(
                     recovering=False, list_scopes=lambda: [], connection_error=lambda: "",
+                    sync_permissions=Mock(),
                 )
 
         self.plugin._close_resources = AsyncMock(side_effect=close_resources)
@@ -288,8 +291,29 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.using_resources = resources
             self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
             bot = SimpleNamespace(get_login_info=AsyncMock(return_value={"user_id": 20001}))
-            self.plugin.context.get_platform_inst = lambda platform: SimpleNamespace(get_client=lambda: bot)
+            adapter = SimpleNamespace(get_client=lambda: bot)
+            self.plugin.context.get_platform_inst = lambda platform: adapter
+            async def prepare():
+                self.plugin.source_accounts["qq"] = {"bot_id": "20001"}
+            self.plugin.prepare_sources.side_effect = prepare
             try:
+                snapshot = await self.panel.bootstrap()
+                scope = snapshot["scopes"][0]
+                self.assertTrue(scope["pending"])
+                self.assertEqual(scope["pending_reason"], "authorization")
+                self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
+                request = SimpleNamespace(username="admin")
+                payload = {
+                    "action": "prepare", "platform_instance_id": "qq", "user_id": "123",
+                    "config_revision": snapshot["config_revision"],
+                }
+                with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}):
+                    self.panel.body = AsyncMock(return_value=payload)
+                    prepared = await self.panel.authorize()
+                    self.panel.body = AsyncMock(return_value={
+                        **payload, "action": "confirm", "confirmation": prepared["confirmation"],
+                    })
+                    await self.panel.authorize()
                 snapshot = await self.panel.bootstrap()
                 scope = snapshot["scopes"][0]
                 self.assertFalse(scope["pending"])
@@ -531,7 +555,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
     def management_resources(self):
         scope = {
             "scope_id": "scope-1", "owner_id": "owner-1", "bank": "bank-1",
-            "revision": 7, "allowed": True, "mode": "active",
+            "revision": 7, "allowed": True, "mode": "active", "generation": 0,
+            "identity_json": Scope("deployment", "aiocqhttp", "qq", "20001", "123").identity,
         }
         summary = {"counts": {}, "last_error": "", "maintenance": {"phase": "draining"}}
         queue = SimpleNamespace(
@@ -540,6 +565,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             control=SimpleNamespace(owner=Mock(return_value={"bank": "bank-1", "revision": 7})),
             can_recall=Mock(return_value=False), summary=Mock(return_value=summary),
             set_mode=Mock(), request_retry=Mock(return_value=2), forget=Mock(),
+            management=Mock(return_value="management-capability"),
         )
         maintenance = SimpleNamespace(
             begin=Mock(return_value={"phase": "draining"}),
@@ -554,6 +580,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             yield
 
         self.plugin.using_resources = resources
+        self.panel.bot_id = AsyncMock(return_value="20001")
         return scope, queue, maintenance
 
     async def action(self, action, *, method="POST", scope_id="scope-1", **payload):
@@ -565,24 +592,24 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_can_begin_poll_and_resume_without_recall_permission(self):
         _, queue, maintenance = self.management_resources()
         result = await self.action("maintenance_begin", discard_pending=True)
-        maintenance.begin.assert_called_once_with("scope-1", discard_pending=True)
+        maintenance.begin.assert_called_once_with("scope-1", discard_pending=True, management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "draining"})
         self.assertTrue(self.plugin.worker.wake.is_set())
         self.plugin.worker.wake.clear()
         result = await self.action("maintenance_status", method="GET")
-        maintenance.status.assert_awaited_once_with("scope-1")
+        maintenance.status.assert_awaited_once_with("scope-1", management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "ready", "ready": True})
         self.assertTrue(self.plugin.worker.wake.is_set())
         maintenance.status.return_value = {"phase": "inactive", "ready": False}
         result = await self.action("maintenance_resume")
-        maintenance.resume.assert_awaited_once_with("scope-1")
+        maintenance.resume.assert_awaited_once_with("scope-1", management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "inactive", "ready": False})
         queue.can_recall.assert_not_called()
 
     async def test_maintenance_defaults_to_drain_and_requires_boolean_discard(self):
         _, _, maintenance = self.management_resources()
         await self.action("maintenance_begin")
-        maintenance.begin.assert_called_once_with("scope-1", discard_pending=False)
+        maintenance.begin.assert_called_once_with("scope-1", discard_pending=False, management="management-capability")
         for value in ("false", 1, None):
             with self.subTest(value=value), self.assertRaises(module.PanelError):
                 await self.action("maintenance_begin", discard_pending=value)
@@ -590,8 +617,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_management_scope_preserves_permission_and_mapping_checks(self):
         scope, queue, maintenance = self.management_resources()
-        for change in ("disallowed", "recovering", "missing", "bank", "revision", "owner"):
-            scope["allowed"] = change != "disallowed"
+        for change in ("recovering", "missing", "bank", "revision", "owner"):
             queue.recovering = change == "recovering"
             queue.scope_owner.side_effect = None
             queue.scope_owner.return_value = None if change == "missing" else scope
@@ -636,7 +662,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         result = await self.action("forget_prepare")
         queue.forget.assert_not_called()
         await self.action("forget_confirm", confirmation=result["confirmation"])
-        queue.forget.assert_called_once_with("scope-1")
+        queue.forget.assert_called_once_with("scope-1", management="management-capability")
         with self.assertRaises(module.PanelError):
             await self.action("forget_confirm", confirmation=result["confirmation"])
         result = await self.action("forget_prepare")

@@ -98,7 +98,7 @@
           </div>
           <div class="section-heading">
             <h2>使用者</h2>
-            <p>选择 AstrBot 中已连接的机器人，再填写和它私聊的 QQ 号。每个用户的记忆独立管理。</p>
+            <p>选择平台实例并填写用户 ID。保存后点击「确认账号授权」，核对机器人身份。</p>
           </div>
           <div class="surface">
             <div id="accounts" class="accounts"></div>
@@ -209,6 +209,11 @@
     </div>
   </main>
 
+  <dialog id="authorization-dialog" aria-labelledby="authorization-heading">
+    <div class="dialog-header"><h2 id="authorization-heading">确认当前机器人身份并授权</h2></div>
+    <p id="authorization-description"></p>
+    <div class="actions dialog-actions"><button type="button" id="cancel-authorization" autofocus>取消</button><button type="button" id="confirm-authorization" class="primary">确认授权</button></div>
+  </dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading" aria-describedby="forget-description">
     <div class="dialog-header"><h2 id="forget-heading">清空此用户的全部记忆？</h2></div>
     <p id="forget-description">删除这个用户在 Hindsight 中的全部记忆、用于生成记忆的聊天内容，以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。</p>

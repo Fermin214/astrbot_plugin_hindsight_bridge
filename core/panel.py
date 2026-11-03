@@ -18,11 +18,11 @@ from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
 )
-from .identity import Incoming, sha256
+from .identity import Incoming, Scope, sha256
 from .installer import installation, uninstallation
 from .outbox import QueueError
 from .permissions import pairs
-from .source import local_runner
+from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
 
 NAME = "astrbot_plugin_hindsight_bridge"
 
@@ -44,6 +44,7 @@ class MemoryPanel:
             ("bootstrap", "GET", self.bootstrap),
             ("connection/check", "POST", self.check),
             ("settings/save", "POST", self.save),
+            ("accounts/authorize", "POST", self.authorize),
             ("install/prepare", "POST", self.prepare),
             ("models/save", "POST", self.save_models),
             ("models/status", "GET", self.model_status),
@@ -127,9 +128,11 @@ class MemoryPanel:
 
     def platforms(self):
         return [
-            {"id": str(row["id"]), "name": str(row.get("name") or row["id"])}
+            {
+                "id": str(row["id"]), "name": str(row.get("name") or row["id"]),
+                "enabled": row.get("enable", True), **platform_details(row.get("type", "")),
+            }
             for row in self.plugin.context.get_config().get("platform", [])
-            if row.get("type") == "aiocqhttp" and row.get("enable", True)
         ]
 
     def directory(self):
@@ -241,18 +244,31 @@ class MemoryPanel:
         queue = plugin.outbox if not plugin.stopping else None
         if queue:
             plugin.refresh_permissions()
-            scopes = [dict(row) for row in queue.list_scopes() if row["allowed"]]
-        known = {(row["platform_instance_id"], row["user_id"]) for row in scopes}
-        bot_ids = {}
+            scopes = [dict(row) for row in queue.list_scopes()]
+        bot_ids = {platform: await self.bot_id(platform) for platform in sorted({p for p, _ in accounts})}
+        if queue:
+            scopes = [dict(row) for row in queue.list_scopes()]
+        known = set()
+        for scope in scopes:
+            source = Scope(*json.loads(scope["identity_json"]))
+            current = bool(
+                scope["allowed"] and bot_ids.get(source.platform_instance_id) == source.bot_id
+            )
+            scope["historical"] = not current
+            if current:
+                known.add((source.platform_instance_id, source.user_id))
         for platform, user in sorted(accounts - known):
             if queue and not queue.recovering:
-                if platform not in bot_ids:
-                    bot_ids[platform] = await self.bot_id(platform)
                 if bot_ids[platform] and plugin.outbox is queue and not plugin.stopping:
-                    scopes.append(dict(queue.scope(Incoming(
+                    incoming = Incoming(
                         "aiocqhttp", platform, bot_ids[platform], user, "", int(time.time()), "",
-                    ))))
-                    continue
+                    )
+                    if queue.access.permitted(incoming.scope(queue.deployment_id)):
+                        current = dict(queue.scope(incoming))
+                        if not any(row["scope_id"] == current["scope_id"] for row in scopes):
+                            scopes.append(current)
+                        known.add((platform, user))
+                        continue
             scopes.append({
                 "scope_id": "pending-" + sha256(json.dumps([
                     plugin.config.get("service_id", ""), platform, user,
@@ -262,7 +278,7 @@ class MemoryPanel:
                 "pending_reason": "recovering" if queue else "service",
             })
             if queue and not queue.recovering:
-                scopes[-1]["pending_reason"] = "platform"
+                scopes[-1]["pending_reason"] = "authorization" if bot_ids.get(platform) else "platform"
         result = []
         for scope in scopes:
             summary = queue.summary(scope["scope_id"]) if queue and not scope.get("pending") else {
@@ -279,22 +295,80 @@ class MemoryPanel:
             )} | {
                 "pending": scope.get("pending", False),
                 "pending_reason": scope.get("pending_reason", ""),
+                "historical": scope.get("historical", False),
+                "bot_id": Scope(*json.loads(scope["identity_json"])).bot_id if scope.get("identity_json") else "",
                 "summary": summary,
             })
         return result
 
     async def bot_id(self, platform):
-        try:
-            get_platform = getattr(self.plugin.context, "get_platform_inst", None)
-            adapter = get_platform(platform) if get_platform else None
-            if adapter is None:
-                return ""
-            async with self.plugin.using_resources(), asyncio.timeout(1):
-                login = await adapter.get_client().get_login_info()
-            identity = str(login.get("user_id", ""))
-            return identity if identity.isdecimal() and int(identity) > 0 else ""
-        except Exception:  # An offline QQ adapter must not hide configured users.
-            return ""
+        identity = await prepare_bot_identity(self.plugin.context, platform)
+        queue = self.plugin.outbox
+        if identity and queue:
+            contract = next((row for row in self.platforms() if row["id"] == platform), None)
+            if contract and queue.access.observe_bot(platform, contract["logical_type"], identity):
+                queue.sync_permissions(pairs(self.plugin.config.get("allowed_accounts", [])))
+                self.plugin.confirmations.clear()
+        return identity
+
+    async def authorize(self):
+        from astrbot.api.web import request
+
+        payload = await self.body()
+        async with self.lock, self.plugin.using_resources():
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            self.check_revision(payload)
+            plugin, queue = self.plugin, self.plugin.outbox
+            platform, user = payload.get("platform_instance_id"), payload.get("user_id")
+            if (platform, user) not in pairs(plugin.config.get("allowed_accounts", [])):
+                raise PanelError("请先保存这个用户的设置，再确认授权。")
+            plugin.refresh_permissions()
+            contract = next((row for row in self.platforms() if row["id"] == platform), None)
+            if not contract or not contract["supported"] or not contract["enabled"] or queue.recovering:
+                raise PanelError("平台尚不可用或数据正在恢复，请稍后重试。")
+            revision = self.config_revision()
+            grant = queue.access.authorization(platform, user)
+            if not grant:
+                raise PanelError("授权状态未就绪，请刷新页面。")
+            bot = await self.bot_id(platform)
+            if not bot or revision != self.config_revision() or plugin.outbox is not queue:
+                raise PanelError("无法确认机器人身份，请连接机器人后刷新页面重试。")
+            latest = queue.access.authorization(platform, user)
+            if latest["revision"] != grant["revision"]:
+                raise PanelError("授权已变化，请重新确认。")
+            incoming = Incoming(contract["logical_type"], platform, bot, user, "", int(time.time()), "")
+            key = "authorize:" + sha256(json.dumps([platform, user]))
+            if payload.get("action") == "prepare":
+                token = secrets.token_hex(16)
+                plugin.confirmations[key] = {
+                    "token": token, "username": request.username, "source": incoming.scope(queue.deployment_id).id,
+                    "config_revision": revision, "revision": grant["revision"],
+                    "control_revision": queue.control.setting("revision"),
+                    "until": time.monotonic() + 120,
+                }
+                return {"confirmation": token, "bot_id": bot, "message": f"将为机器人 {bot} 授权用户 {user}。"}
+            old = plugin.confirmations.pop(key, None)
+            if (
+                payload.get("action") != "confirm" or not old or old["until"] < time.monotonic()
+                or old["username"] != request.username or old["config_revision"] != revision
+                or old["source"] != incoming.scope(queue.deployment_id).id
+                or old["revision"] != grant["revision"]
+                or old["control_revision"] != queue.control.setting("revision")
+                or not secrets.compare_digest(old["token"], str(payload.get("confirmation", "")))
+            ):
+                raise PanelError("授权确认已失效，请重新确认当前机器人身份。")
+            await plugin.prepare_sources()
+            evidence = plugin.source_accounts.get(platform, {})
+            if (
+                evidence.get("bot_id") != bot or plugin.outbox is not queue
+                or revision != self.config_revision()
+                or queue.access.authorization(platform, user)["revision"] != grant["revision"]
+            ):
+                raise PanelError("机器人身份或授权已变化，请刷新后重新确认。")
+            queue.activate(incoming, grant["revision"])
+            plugin.worker.wake.set()
+            return {"message": "账号已授权，从现在开始接收新消息。"}
 
     async def _bootstrap(self):
         plugin, config = self.plugin, self.plugin.config
@@ -588,11 +662,18 @@ class MemoryPanel:
         )
         accounts = payload.get("allowed_accounts", [])
         selected = pairs(accounts)
-        valid_platforms = {row["id"] for row in self.platforms()}
-        if any(platform not in valid_platforms for platform, _ in selected):
-            raise PanelError("请选择 AstrBot 中已启用的 OneBot 接入实例。")
-        if any(not user.isdecimal() or len(user) > 20 for _, user in selected):
-            raise PanelError("用户账号请填写自己的 QQ 号。")
+        valid_platforms = {row["id"]: row for row in self.platforms()}
+        previous_accounts = pairs(plugin.config.get("allowed_accounts", []))
+        for platform, user in selected:
+            contract = valid_platforms.get(platform)
+            if (platform, user) in previous_accounts and (
+                not contract or not contract["supported"] or not contract["enabled"]
+            ):
+                continue
+            if not contract or not contract["supported"] or not contract["enabled"]:
+                raise PanelError("请选择已开放记忆功能的平台实例。")
+            if not valid_user_id(contract["type"], user):
+                raise PanelError("用户 ID 格式无效，请按所选平台的提示填写。")
         for platform, user in selected:
             profile = plugin.context.get_config(f"{platform}:FriendMessage:{user}")
             if not local_runner(profile):
@@ -636,6 +717,9 @@ class MemoryPanel:
         if revision != self.config_revision():
             raise PanelError("连接检查期间配置已被更新，请刷新页面后重新保存。")
         previous = copy.deepcopy(dict(plugin.config))
+        # Revoke before writing configuration; a failed save must keep the tombstone.
+        if plugin.outbox:
+            plugin.outbox.sync_permissions(selected & previous_accounts)
         if local_change:
             try:
                 self.write_config(updates)
@@ -695,10 +779,10 @@ class MemoryPanel:
         if not plugin.outbox or plugin.stopping:
             raise PanelError("请先在设置中完成记忆服务配置。")
         if scope_id.startswith("pending-"):
-            raise PanelError("请先连接所选 QQ 机器人，连接后会自动更新。")
+            raise PanelError("请先连接所选机器人，并在设置中确认账号授权。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
-        if not scope or not scope["allowed"] or plugin.outbox.recovering:
+        if not scope or plugin.outbox.recovering:
             raise PanelError("这个用户的记忆正在恢复或已停用，请稍后刷新。")
         owner = plugin.outbox.control.owner(plugin.outbox.connection_id, scope["owner_id"])
         if not owner or owner["bank"] != scope["bank"] or owner["revision"] != scope["revision"]:
@@ -714,27 +798,41 @@ class MemoryPanel:
         if reading and action != "maintenance_status":
             raise PanelError("GET 仅支持查询维护状态。")
         async with self.lock, self.plugin.using_resources():
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
             scope = self.scope(scope_id)
             plugin, queue = self.plugin, self.plugin.outbox
             maintenance = plugin.worker.maintenance
+            management = queue.management(scope_id)
+            if action in {"mode", "retry"}:
+                await plugin.prepare_sources()
+                scope = self.scope(scope_id)
+                if not scope["allowed"]:
+                    raise PanelError("历史范围只能维护或清空；请在设置中确认当前机器人身份后使用记忆。")
+                source = Scope(*json.loads(scope["identity_json"]))
+                if await self.bot_id(source.platform_instance_id) != source.bot_id:
+                    raise PanelError("无法确认当前机器人身份，请连接机器人并在设置中确认授权。")
+                latest = self.scope(scope_id)
+                if not latest["allowed"] or latest["revision"] != scope["revision"]:
+                    raise PanelError("记忆范围已变化，请刷新后重试。")
             if action == "maintenance_begin":
                 discard = payload.get("discard_pending", False)
                 if not isinstance(discard, bool):
                     raise PanelError("discard_pending 须为布尔值。")
-                state = maintenance.begin(scope_id, discard_pending=discard)
+                state = maintenance.begin(scope_id, discard_pending=discard, management=management)
                 plugin.worker.wake.set()
                 return {
                     "maintenance": state,
                     "message": "维护已开始，新记录和记忆查询已暂停。请等到显示「可以修改记忆」后再去官方面板操作。",
                 }
             if action == "maintenance_status":
-                state = await maintenance.status(scope_id)
+                state = await maintenance.status(scope_id, management=management)
                 plugin.worker.wake.set()
                 return {"maintenance": state}
             if action == "maintenance_resume":
-                await maintenance.resume(scope_id)
+                await maintenance.resume(scope_id, management=management)
                 plugin.worker.wake.set()
-                state = await maintenance.status(scope_id)
+                state = await maintenance.status(scope_id, management=queue.management(scope_id))
                 return {"maintenance": state, "message": "维护已结束，请确认记忆模式。"}
             if action == "mode":
                 mode = payload.get("mode")
@@ -749,6 +847,8 @@ class MemoryPanel:
                     latest = self.scope(scope_id)
                     if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
                         raise PanelError("记忆范围已变化，请刷新后重试。")
+                    if await self.bot_id(source.platform_instance_id) != source.bot_id or not self.scope(scope_id)["allowed"]:
+                        raise PanelError("机器人身份或授权已变化，请刷新后重试。")
                     summary = queue.summary(scope_id)
                     if summary.get("maintenance") or summary.get("bank_missing"):
                         raise PanelError("请先结束维护；如果记忆库已被删除，请恢复原记忆库或清空旧记忆后重新开始。")
@@ -764,6 +864,7 @@ class MemoryPanel:
                 plugin.confirmations["panel:" + scope["owner_id"]] = {
                     "token": token, "source": scope_id, "bank": scope["bank"],
                     "revision": scope["revision"], "username": request.username,
+                    "generation": scope["generation"], "connection": queue.connection_id,
                     "until": time.monotonic() + 120,
                 }
                 return {
@@ -779,10 +880,11 @@ class MemoryPanel:
                     or old["username"] != request.username
                     or old["source"] != scope_id or old["bank"] != scope["bank"]
                     or old["revision"] != scope["revision"]
+                    or old["generation"] != scope["generation"] or old["connection"] != queue.connection_id
                     or not secrets.compare_digest(old["token"], confirmation)
                 ):
                     raise PanelError("确认已失效，请重新点击「清空此用户的记忆」。")
-                queue.forget(scope_id)
+                queue.forget(scope_id, management=management)
                 message = "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「正常记忆」重新开始。"
             else:
                 raise PanelError("操作无效。")

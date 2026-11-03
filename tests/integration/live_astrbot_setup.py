@@ -14,7 +14,7 @@ settings = json.loads(Path("/delivery/live-settings.json").read_text())
 
 from astrbot.core.config.default import DEFAULT_CONFIG, VERSION
 
-assert VERSION == "4.29.1", VERSION
+assert VERSION == settings.get("astrbot_version", "4.29.1"), VERSION
 config = copy.deepcopy(DEFAULT_CONFIG)
 config["dashboard"].update(host=settings.get("listen_host", "127.0.0.1"), port=settings["dashboard_port"],
                            auth_rate_limit={"enable": False})

@@ -17,27 +17,31 @@ function harness() {
   const nodes = new Map();
   function node() {
     return {
-      children: [], textContent: "", hidden: false, disabled: false, value: "", dataset: {},
+      children: [], textContent: "", hidden: false, disabled: false, value: "", dataset: {}, listeners: {},
       classList: { add() {}, remove() {}, toggle() {} },
       get options() { return this.children; },
       querySelector() { return node(); }, closest() { return null; },
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
-      addEventListener() {}, setAttribute() {},
+      addEventListener(name, handler) { this.listeners[name] = handler; }, setAttribute() {},
+      removeAttribute(name) { delete this[name === "maxlength" ? "maxLength" : name]; },
+      showModal() { this.open = true; }, close() { this.open = false; },
     };
   }
   const context = vm.createContext({
     console, Promise, Date, Error, setTimeout: (callback) => setTimeout(callback, 5), clearTimeout,
     $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
-    el: (tag, kind, content) => Object.assign(node(), { textContent: content }),
+    el: (tag, kind, content) => Object.assign(node(), { textContent: content, className: kind || "" }),
     window: { AstrBotPluginView: null, location: { reload() { context.reloads++; } } },
     document: { documentElement: { dataset: {} }, querySelector: () => ({ value: "existing" }) },
     data: null, bridge: null, startRunning: false, viewReady: false, offContext: undefined, reloads: 0,
-    locks: new Set(), scopeId: "", modeDirty: false, maintenanceState: null, maintenanceReadRevision: 0, statusSignature: "",
+    locks: new Set(), scopeId: "", modeDirty: false, maintenanceState: null,
+    authorizationState: null, settingsRevision: "",
+    maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     modelWatch: null, feedbackTimer: null, modeHelp: { active: "读取并保存" },
     hydrateConfig() {}, providerSelect() {}, refreshAccountPlatforms() {}, updateProviderHelp() {},
     readMaintenanceStatus: async () => {},
-    option: (value, label) => Object.assign(node(), { value, textContent: label }),
+    option: (value, label, disabled = false) => Object.assign(node(), { value, textContent: label, disabled }),
     activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "正常记忆" },
     scopeName: () => "user", countDescription: () => "queue", maintenanceDescription: () => "maintenance",
     refreshBootstrap: async () => {
@@ -75,6 +79,46 @@ test("missing SDK and singleton pending handshake require reloading the plugin f
   assert.equal(reloaded.$("refresh").disabled, false);
 });
 
+test("account fields use platform hints and keep opaque identifiers as strings", () => {
+  const context = harness();
+  vm.runInContext(declaration("addAccount"), context);
+  context.data = { platforms: [
+    { id: "onebot", supported: true, numeric_user_id: true, user_label: "用户 QQ 号" },
+    { id: "official", supported: false, numeric_user_id: false, user_label: "用户 OpenID", user_hint: "OpenID，不是 QQ 号" },
+  ] };
+  const select = context.addAccount({ platform_instance_id: "onebot", user_id: "9007199254740993" });
+  const row = context.$("accounts").children[0];
+  const caption = row.children[1].children[0];
+  const input = row.children[1].children[1];
+  assert.equal(input.value, "9007199254740993");
+  assert.equal(input.inputMode, "numeric");
+  assert.equal(input.pattern, "[0-9]+");
+  assert.equal(select.children[2].disabled, true);
+  input.value = "AbC_opaque-id";
+  select.value = "official";
+  select.listeners.change();
+  assert.equal(caption.textContent, "用户 OpenID");
+  assert.equal(input.placeholder, "OpenID，不是 QQ 号");
+  assert.equal(input.inputMode, "text");
+  assert.equal(input.pattern, undefined);
+  assert.equal(input.value, "AbC_opaque-id");
+});
+
+test("historical scope disables modes and retry while preserving maintenance and deletion", () => {
+  const context = harness();
+  vm.runInContext(declaration("text"), context);
+  vm.runInContext(declaration("renderScope"), context);
+  context.data = { config: {}, scopes: [{
+    scope_id: "old", historical: true, mode: "paused", bank: "old-bank",
+    summary: { counts: {}, maintenance: null },
+  }] };
+  context.scopeId = "old";
+  context.renderScope();
+  for (const id of ["scope-mode", "save-mode", "retry"]) assert.equal(context.$(id).disabled, true);
+  for (const id of ["maintenance-begin", "forget"]) assert.equal(context.$(id).disabled, false);
+  assert.match(context.$("mode-help").textContent, /历史范围/);
+});
+
 function installBootstrapChain(context) {
   for (const name of ["text", "pendingScopeHelp", "maintenanceDescription", "renderScope", "endpoint", "readMaintenanceStatus", "selectScope", "refreshBootstrap", "perform", "maintenanceAction"]) {
     vm.runInContext(declaration(name), context);
@@ -89,6 +133,72 @@ function maintenanceBootstrap() {
     }],
   };
 }
+
+test("late bootstrap cannot restore an older bank or reenable historical controls", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  let older;
+  context.bridge = { apiGet: () => new Promise((resolve) => { older = resolve; }) };
+  const first = context.refreshBootstrap({ automatic: true });
+  const current = maintenanceBootstrap();
+  current.scopes[0].bank = "new-bank";
+  current.scopes[0].historical = true;
+  current.scopes[0].summary.maintenance = null;
+  context.bridge.apiGet = async () => current;
+  await context.refreshBootstrap({ automatic: true });
+  older(maintenanceBootstrap());
+  await first;
+  assert.equal(context.$("scope-bank").value, "new-bank");
+  assert.equal(context.$("save-mode").disabled, true);
+});
+
+test("starting an action invalidates an outstanding automatic bootstrap", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  context.data = maintenanceBootstrap();
+  let older;
+  context.bridge = { apiGet: () => new Promise((resolve) => { older = resolve; }) };
+  const first = context.refreshBootstrap({ automatic: true });
+  await context.perform(null, "memory", async () => {
+    context.data.scopes[0].historical = true;
+    context.data.scopes[0].bank = "after-action";
+  });
+  older(maintenanceBootstrap());
+  await first;
+  assert.equal(context.data.scopes[0].bank, "after-action");
+  assert.equal(context.$("save-mode").disabled, true);
+});
+
+test("failed authorization drops the consumed token and allows preparing a fresh confirmation", async () => {
+  const context = harness();
+  for (const name of ["perform", "prepareAuthorization", "confirmAuthorization"]) {
+    vm.runInContext(declaration(name), context);
+  }
+  const calls = [];
+  let prepared = 0;
+  context.bridge = {
+    apiPost: async (endpoint, payload) => {
+      calls.push(payload);
+      if (payload.action === "prepare") return { confirmation: `token-${++prepared}`, message: "确认机器人" };
+      if (payload.confirmation === "token-1") throw new Error("授权确认已失效，请重新确认当前机器人身份。");
+      return { message: "账号已授权" };
+    },
+  };
+  await context.prepareAuthorization(null, "onebot", "2001");
+  assert.equal(context.$("authorization-dialog").open, true);
+  await context.confirmAuthorization();
+  assert.equal(context.authorizationState, null);
+  assert.equal(context.$("authorization-dialog").open, false);
+  assert.match(context.$("feedback-message").textContent, /授权确认已失效/);
+  assert.equal(context.$("feedback").hidden, false);
+  await context.confirmAuthorization();
+  assert.equal(calls.length, 2);
+  await context.prepareAuthorization(null, "onebot", "2001");
+  await context.confirmAuthorization();
+  assert.equal(calls[3].confirmation, "token-2");
+  assert.equal(context.authorizationState, null);
+  assert.equal(context.$("authorization-dialog").open, false);
+});
 
 test("actual startup completes while optional maintenance waits, times out and ignores late success", async () => {
   const context = harness();

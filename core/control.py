@@ -5,6 +5,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from .identity import Scope, canonical, sha256
@@ -18,6 +19,7 @@ class Control:
     def __init__(self, directory: Path, deployment_id="", *, required=False):
         self.directory = Path(directory)
         self.db = self.lock = None
+        self._transaction_id = 0
         if required and not (self.directory / "control.sqlite3").is_file():
             raise QueueError("recovery_required:control_missing")
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -34,7 +36,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -95,12 +97,33 @@ class Control:
                     phase TEXT NOT NULL DEFAULT 'draining',
                     PRIMARY KEY(connection_id,bank)
                 );
+                CREATE TABLE IF NOT EXISTS authorizations(
+                    connection_id TEXT NOT NULL, platform_instance_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL, source_id TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
+                    accept_from REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY(connection_id,platform_instance_id,user_id)
+                );
+                CREATE TABLE IF NOT EXISTS command_receipts(
+                    connection_id TEXT NOT NULL, source_id TEXT NOT NULL,
+                    event_key TEXT NOT NULL, digest TEXT NOT NULL, occurred_at REAL NOT NULL,
+                    authorization_revision INTEGER NOT NULL, bank TEXT NOT NULL,
+                    generation INTEGER NOT NULL, result TEXT NOT NULL,
+                    PRIMARY KEY(connection_id,source_id,event_key)
+                );
+                CREATE TABLE IF NOT EXISTS retry_intents(
+                    operation_id TEXT PRIMARY KEY REFERENCES requests(operation_id),
+                    pending INTEGER NOT NULL DEFAULT 1
+                );
             """)
             for table, column, declaration in (
                 ("banks", "state", "TEXT NOT NULL DEFAULT 'established'"),
                 ("erasures", "cleanup_step", "INTEGER NOT NULL DEFAULT 0"),
                 ("erasures", "cleanup_epoch", "INTEGER NOT NULL DEFAULT 0"),
                 ("erasure_refs", "checked_pass", "INTEGER NOT NULL DEFAULT 0"),
+                ("owners", "command_from", "REAL NOT NULL DEFAULT 0"),
+                ("owners", "command_received_from", "REAL NOT NULL DEFAULT 0"),
+                ("owners", "receive_from", "REAL NOT NULL DEFAULT 0"),
             ):
                 if column not in {
                     row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")
@@ -110,8 +133,18 @@ class Control:
                 "CREATE INDEX IF NOT EXISTS erasure_refs_cleanup "
                 "ON erasure_refs(forget_id,kind,checked_pass,ref)"
             )
-            with self.db:
-                self.db.execute("PRAGMA user_version=3")
+            with self.transaction():
+                self.db.execute("PRAGMA user_version=5")
+                if version < 4:
+                    self.db.execute(
+                        "UPDATE owners SET command_from=MAX(accept_from,?)",
+                        (time.time(),),
+                    )
+                if version < 5:
+                    self.db.execute(
+                        "UPDATE owners SET command_received_from=?",
+                        (time.time(),),
+                    )
                 for key, value in (
                     ("deployment_id", deployment_id or str(uuid.uuid4())),
                     ("control_id", str(uuid.uuid4())),
@@ -135,6 +168,20 @@ class Control:
         ).fetchone()
         return row["value"] if row else ""
 
+    @contextmanager
+    def transaction(self):
+        """Allow a command receipt and its nested control changes to commit together."""
+        self._transaction_id += 1
+        name = f"control_{self._transaction_id}"
+        self.db.execute(f"SAVEPOINT {name}")
+        try:
+            yield
+        except BaseException:
+            self.db.execute(f"ROLLBACK TO {name}")
+            raise
+        finally:
+            self.db.execute(f"RELEASE {name}")
+
     def bump(self):
         self.db.execute(
             "UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='revision'"
@@ -149,7 +196,7 @@ class Control:
     def account(self, connection, source_id):
         return self.db.execute(
             "SELECT a.*,o.principal_id,o.agent_id,o.memory_space_id,o.bank,o.generation,"
-            "o.mode,o.accept_from,o.revision FROM accounts a JOIN owners o "
+            "o.mode,o.accept_from,o.receive_from,o.revision FROM accounts a JOIN owners o "
             "USING(connection_id,owner_id) WHERE connection_id=? AND source_id=?",
             (connection, source_id),
         ).fetchone()
@@ -170,9 +217,11 @@ class Control:
         generation = legacy["generation"] if legacy else 0
         mode = legacy["mode"] if legacy else "active"
         lower = legacy["accept_from"] if legacy else accept_from
-        with self.db:
+        with self.transaction():
             self.db.execute(
-                "INSERT INTO owners VALUES (?,?,?,?,?,?,?,?,?,1)",
+                "INSERT INTO owners(connection_id,owner_id,principal_id,agent_id,"
+                "memory_space_id,bank,generation,mode,accept_from,revision,command_from,"
+                "command_received_from) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
                 (
                     connection,
                     owner_id,
@@ -183,6 +232,8 @@ class Control:
                     generation,
                     mode,
                     lower,
+                    time.time(),
+                    time.time(),
                 ),
             )
             self.db.execute(
@@ -215,7 +266,7 @@ class Control:
             if previous["owner_id"] != owner_id:
                 raise QueueError("existing_account_requires_explicit_migration")
             return previous
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 "INSERT INTO accounts VALUES (?,?,?,?,?,?)",
                 (
@@ -236,18 +287,23 @@ class Control:
         row = self.owner(connection, owner_id)
         if not row:
             raise QueueError("memory_owner_missing")
-        if row["mode"] == mode:
-            return row
         lower = (
-            max(row["accept_from"], math.ceil(time.time() if now is None else now))
+            max(
+                row["accept_from"], math.ceil(row["command_from"]),
+                math.ceil(time.time() if now is None else now),
+            )
             if mode == "active"
             else row["accept_from"]
         )
-        with self.db:
+        stamp = time.time() if now is None else now
+        received = max(stamp, row["command_received_from"], row["receive_from"])
+        with self.transaction():
             self.db.execute(
-                "UPDATE owners SET mode=?,accept_from=?,revision=revision+1 "
+                "UPDATE owners SET mode=?,accept_from=?,revision=revision+1,"
+                "command_from=MAX(command_from,?),command_received_from=MAX(command_received_from,?),"
+                "receive_from=CASE WHEN ? THEN MAX(receive_from,?) ELSE receive_from END "
                 "WHERE connection_id=? AND owner_id=?",
-                (mode, lower, connection, owner_id),
+                (mode, lower, stamp, received, mode == "active", received, connection, owner_id),
             )
             self.bump()
         return self.owner(connection, owner_id)
@@ -257,10 +313,11 @@ class Control:
         if row is None:
             raise QueueError("memory_owner_missing")
         stamp = time.time() if now is None else now
+        received = max(stamp, row["command_received_from"], row["receive_from"])
         fid, generation = str(uuid.uuid4()), row["generation"] + 1
         bank = f"abm-v1-{uuid.uuid4().hex}-g{generation}"
-        lower = max(row["accept_from"], math.ceil(stamp))
-        with self.db:
+        lower = max(row["accept_from"], math.ceil(row["command_from"]), math.ceil(stamp))
+        with self.transaction():
             self.db.execute(
                 "INSERT INTO erasures(forget_id,connection_id,owner_id,principal_id,"
                 "old_bank,old_generation,new_bank,new_generation,accept_from,created_at) "
@@ -285,8 +342,10 @@ class Control:
             )
             self.db.execute(
                 "UPDATE owners SET bank=?,generation=?,mode='paused',accept_from=?,"
-                "revision=revision+1 WHERE connection_id=? AND owner_id=?",
-                (bank, generation, lower, connection, owner_id),
+                "revision=revision+1,command_from=MAX(command_from,?),"
+                "command_received_from=MAX(command_received_from,?),receive_from=MAX(receive_from,?) "
+                "WHERE connection_id=? AND owner_id=?",
+                (bank, generation, lower, stamp, received, received, connection, owner_id),
             )
             self.bump()
         return self.db.execute(
@@ -319,7 +378,7 @@ class Control:
     def set_bank_state(self, connection, bank, state):
         if state not in {"new", "established", "missing"}:
             raise QueueError("invalid_bank_state")
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 "UPDATE banks SET state=? WHERE connection_id=? AND bank=?",
                 (state, connection, bank),
@@ -341,7 +400,7 @@ class Control:
         owner = self.owner(connection, owner_id)
         if not owner:
             raise QueueError("memory_owner_missing")
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 "INSERT INTO maintenance(connection_id,bank,started_at,discard_pending) "
                 "VALUES (?,?,?,?) ON CONFLICT(connection_id,bank) DO UPDATE SET "
@@ -349,8 +408,10 @@ class Control:
                 (connection, owner["bank"], time.time(), int(discard_pending)),
             )
             self.db.execute(
-                "UPDATE owners SET revision=revision+1 WHERE connection_id=? AND owner_id=?",
-                (connection, owner_id),
+                "UPDATE owners SET revision=revision+1,command_from=MAX(command_from,?),"
+                "command_received_from=MAX(command_received_from,?) "
+                "WHERE connection_id=? AND owner_id=?",
+                (time.time(), time.time(), connection, owner_id),
             )
             self.bump()
         return self.maintenance(connection, owner["bank"])
@@ -359,15 +420,22 @@ class Control:
         owner = self.owner(connection, owner_id)
         if not owner:
             raise QueueError("memory_owner_missing")
-        with self.db:
+        stamp = time.time()
+        received = max(stamp, owner["command_received_from"], owner["receive_from"])
+        with self.transaction():
             self.db.execute(
                 "DELETE FROM maintenance WHERE connection_id=? AND bank=?",
                 (connection, owner["bank"]),
             )
             self.db.execute(
-                "UPDATE owners SET revision=revision+1,accept_from=MAX(accept_from,?) "
+                "UPDATE owners SET revision=revision+1,accept_from=MAX(accept_from,?),"
+                "command_from=MAX(command_from,?),command_received_from=MAX(command_received_from,?),"
+                "receive_from=MAX(receive_from,?) "
                 "WHERE connection_id=? AND owner_id=?",
-                (math.ceil(time.time()), connection, owner_id),
+                (
+                    max(math.ceil(stamp), math.ceil(owner["command_from"])),
+                    stamp, received, received, connection, owner_id,
+                ),
             )
             self.bump()
 
@@ -404,7 +472,7 @@ class Control:
         ]
 
     def cleanup_ref_done(self, forget_id, kind, ref, checked_pass, epoch):
-        with self.db:
+        with self.transaction():
             return bool(self.db.execute(
                 "UPDATE erasure_refs SET checked_pass=? WHERE forget_id=? AND kind=? AND ref=? "
                 "AND EXISTS (SELECT 1 FROM erasures WHERE forget_id=? AND cleanup_epoch=?)",
@@ -426,7 +494,7 @@ class Control:
         return bool(changed)
 
     def cleanup_state(self, forget_id, phase, error="", *, delay=60, step=None, epoch=None):
-        with self.db:
+        with self.transaction():
             return bool(self.db.execute(
                 "UPDATE erasures SET phase=?,last_error=?,next_at=?,verified_at="
                 "CASE WHEN ?='verified' THEN ? ELSE verified_at END,"
@@ -437,7 +505,7 @@ class Control:
             ).rowcount)
 
     def retired_request_returned(self, connection, bank):
-        with self.db:
+        with self.transaction():
             row = self.db.execute(
                 "SELECT forget_id FROM erasures WHERE connection_id=? AND old_bank=?",
                 (connection, bank),
@@ -467,7 +535,7 @@ class Control:
             and previous["cancel_intent"] >= int(cancel)
         ):
             return
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 "INSERT INTO requests VALUES (?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(operation_id) DO UPDATE SET "

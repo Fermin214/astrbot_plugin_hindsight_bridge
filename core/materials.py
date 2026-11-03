@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import tiktoken
 
 from .identity import Scope, canonical, sha256
+from .source import TIME_SOURCES
 
 FORMAT = "user_window_v1"
 _loaded_encodings = {}
@@ -188,7 +189,7 @@ def retain_payload(
                     "conversation_id": conversation_id,
                     "occurred_at": current.iso_time(zone),
                     "time_source": (
-                        "history_observed_at" if assistant else "onebot.time"
+                        "history_observed_at" if assistant else TIME_SOURCES[scope.platform_type]
                     ),
                     "timezone": zone_label,
                     "content_sha256": sha256(content),

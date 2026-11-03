@@ -118,6 +118,11 @@ class OneBot:
             await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
 
     async def send(self, user, text, *, group=False, message_id=None):
+        if any(text.startswith("/hindsight " + command) for command in (
+            "on", "readonly", "pause", "retry", "cancel", "forget",
+        )):
+            # OneBot seconds cannot order a command against a boundary in the same second.
+            await asyncio.sleep(1.05)
         type(self).sequence += 1
         self.message_id = type(self).sequence
         while not self.replies.empty():
@@ -158,7 +163,8 @@ class Acceptance:
         self.prefix = "/api/v1/plugins/extensions/" + NAME
         self.token = ""
         self.report = {
-            "astrbot": "4.29.1", "hindsight": "1.1.0", "postgres": "17 + PGroonga 4.0.8 + pgvector 0.8.6",
+            "astrbot": self.settings.get("astrbot_version", "4.29.1"),
+            "hindsight": "1.1.0", "postgres": "17 + PGroonga 4.0.8 + pgvector 0.8.6",
             "chat_model": self.settings["chat_model"], "embedding_model": "qwen3.7-text-embedding-flash",
             "rerank_model": "qwen3.7-text-rerank", "message_peer": "local OneBot V11 protocol simulator, no QQ login",
             "acceptance_scope": "existing-service bridge end-to-end with real models and browser",
@@ -343,6 +349,85 @@ class Acceptance:
                 await context.close()
                 await browser.close()
         await self.action(scope, "maintenance_resume")
+
+    async def browser_authorization(self):
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(args=["--no-sandbox"])
+            context = await browser.new_context(viewport={"width": 390, "height": 844})
+            await context.add_init_script(
+                "localStorage.setItem('token'," + json.dumps(self.token) + ");localStorage.setItem('user','delivery-admin');"
+            )
+            page = await context.new_page()
+            await page.goto(self.dashboard + "/#/plugin-view/" + NAME + "/memory")
+            await self.dismiss_host_notice(page)
+            frame = page.frame_locator("iframe")
+            await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+            await frame.locator("#tab-setup").click()
+            await frame.get_by_role("button", name="确认账号授权", exact=True).click()
+            await frame.locator("#authorization-dialog").wait_for(state="visible")
+            assert str(BOT) in await frame.locator("#authorization-description").inner_text()
+            snapshot = await self.bootstrap()
+            await self.http("POST", self.prefix + "/accounts/authorize", payload={
+                "action": "prepare", "platform_instance_id": "delivery-onebot",
+                "user_id": str(ALICE), "config_revision": snapshot["config_revision"],
+            })
+            await frame.locator("#confirm-authorization").click()
+            await frame.locator("#authorization-dialog").wait_for(state="hidden")
+            assert "失效" in await frame.locator("#feedback").inner_text()
+            await frame.get_by_role("button", name="确认账号授权", exact=True).click()
+            await frame.locator("#authorization-dialog").wait_for(state="visible")
+            await frame.locator("#confirm-authorization").click()
+            await frame.locator("#authorization-dialog").wait_for(state="hidden")
+            assert await page.frames[-1].evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+            await page.screenshot(path=str(ROOT / "authorization-mobile.png"), full_page=True)
+            await context.close()
+            await browser.close()
+        self.passed("real_mobile_browser_explicit_identity_authorization")
+        self.passed("real_invalidated_confirmation_closes_dialog_and_new_authorization_recovers")
+
+    async def fresh_authorization_lifecycle(self):
+        await self.config(
+            api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
+            service_id="stage1-fresh-authorization",
+            allowed_accounts=[{
+                "__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(ALICE),
+            }],
+        )
+        state = await self.bootstrap()
+        assert len(state["scopes"]) == 1 and state["scopes"][0]["pending"]
+        assert state["scopes"][0]["pending_reason"] == "authorization"
+        before = len(self.tasks())
+        await self.bot.chat(ALICE, "Before authorization I prefer synthetic red apples. Reply briefly.")
+        assert len(self.tasks()) == before
+        await self.browser_authorization()
+        state = await self.usable()
+        scope = state["scopes"][0]
+        await asyncio.sleep(1.05)
+        await self.bot.chat(ALICE, "The new authorized test marker is Birch-17. Reply briefly.")
+        await self.drained()
+        assert len(self.tasks()) > before
+        first_bank = scope["bank"]
+        await self.http("POST", "/api/v1/plugins/" + NAME + "/reload", payload={})
+        after = await self.usable()
+        assert after["scopes"][0]["bank"] == first_bank
+        await self.http("PATCH", "/api/v1/plugins/" + NAME + "/enabled", payload={"enabled": False})
+        before = len(self.tasks())
+        await self.bot.chat(ALICE, "Plugin disabled marker is not memory. Reply briefly.")
+        assert len(self.tasks()) == before
+        await self.http("PATCH", "/api/v1/plugins/" + NAME + "/enabled", payload={"enabled": True})
+        after = await self.usable()
+        assert after["scopes"][0]["bank"] == first_bank
+        self.passed("real_fresh_authorization_reload_disable_enable_preserve_bank_and_no_backfill")
+        await self.config(allowed_accounts=[])
+        historical = (await self.bootstrap())["scopes"][0]
+        assert historical["historical"]
+        await self.action(scope["scope_id"], "maintenance_begin", discard_pending=True)
+        await self.action(scope["scope_id"], "maintenance_status")
+        prepared = await self.action(scope["scope_id"], "forget_prepare")
+        await self.action(scope["scope_id"], "forget_confirm", confirmation=prepared["confirmation"])
+        latest = (await self.bootstrap())["scopes"][0]
+        assert latest["historical"] and latest["mode"] == "paused" and latest["bank"] != first_bank
+        self.passed("real_revoked_historical_admin_maintenance_and_forget_without_reauthorization")
 
     async def maintenance_failed(self, frame):
         return "暂时无法确认保存进度" in await frame.locator("#maintenance-state").inner_text()
@@ -604,6 +689,7 @@ class Acceptance:
                 initial = await self.bootstrap()
                 assert initial["config"]["missing_fields"] == ["api_url", "api_key", "service_id"]
                 self.passed("fresh_distribution_default_10_and_no_host_config_mutation")
+                await self.fresh_authorization_lifecycle()
                 await self.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + NAME)
                 self.passed("actual_dashboard_uninstall")
                 self.report["complete"] = True

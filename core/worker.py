@@ -21,10 +21,12 @@ class Worker:
         *,
         poll_interval=2,
         refresh_permissions=None,
+        prepare_sources=None,
     ):
         self.outbox, self.client, self.logger = outbox, client, logger
         self.poll_interval = poll_interval
         self.refresh_permissions = refresh_permissions
+        self.prepare_sources = prepare_sources
         self.wake = asyncio.Event()
         self.running = {}
         self.last_prune = 0.0
@@ -113,6 +115,8 @@ class Worker:
                     row["connection_id"], row["bank"]
                 ) == "new"
                 await self.client.ensure_auth()
+                if self.prepare_sources:
+                    await self.prepare_sources()
                 exists = await self.client.bank_exists(row["bank"])
                 if not self.outbox.current(row):
                     self.outbox.update(task_id, "unknown", delay=self.poll_interval)
@@ -127,6 +131,8 @@ class Worker:
                     # Only the creation PUT crosses the durable first-creation
                     # boundary; a failed read must leave a new Bank retryable.
                     await self.client.create_bank(row["bank"])
+                if self.prepare_sources:
+                    await self.prepare_sources()
                 if not self.outbox.current(row, writing=False):
                     self.outbox.control.retired_request_returned(
                         row["connection_id"], row["bank"]
@@ -167,6 +173,8 @@ class Worker:
                     attempts=0,
                 )
             elif "failed" in statuses:
+                if self.prepare_sources and row["retry_requested"]:
+                    await self.prepare_sources()
                 if row["retry_requested"] and self.outbox.current(row):
                     await self.retry_failed(row, root, nodes)
                 else:

@@ -17,6 +17,7 @@ import weakref
 import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
+from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
@@ -29,7 +30,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
-from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner
+from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, prepare_bot_identity, source_identity
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
@@ -48,6 +49,11 @@ class TextPart:
         return self
 
 
+class Plain:
+    def __init__(self, text):
+        self.text = text
+
+
 class Configuration(dict):
     def save_config(self):
         pass
@@ -62,6 +68,11 @@ def bridge_class(directory, logger):
         "control_directory", "warning", "monitor_connection", "record_recall",
         "recall_status", "recall_text", "conversation_history", "add_memory",
         "record_history", "_close_resources", "using_resources", "terminate",
+        "prepare_sources",
+        "allowed", "snapshot", "source_header", "observe_incoming", "command_scope",
+        "prepare_command", "apply_command", "mode", "memory_forget", "memory_retry",
+        "memory_cancel",
+        "readable", "unavailable_message", "memory_recall", "memory_show", "memory_view",
     }
     bridge.body = [node for node in bridge.body if node.name in selected]
     for method in bridge.body:
@@ -72,6 +83,7 @@ def bridge_class(directory, logger):
         "missing_connection", "recall_description", "recall_notice", "recall_timeout",
     )})
     namespace.update(
+        __package__="plugins.astrbot_plugin_hindsight_bridge",
         AstrBotConfig=dict, Context=object, AstrMessageEvent=object, ProviderRequest=object,
         logger=logger, Worker=Mock(return_value=SimpleNamespace(run=AsyncMock())),
         StarTools=SimpleNamespace(get_data_dir=lambda name: directory / (
@@ -155,6 +167,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin.snapshot = lambda event: self.incoming
         self.incoming = Incoming("aiocqhttp", "qq", "456", "123", "one", int(time.time()), "hello")
         self.plugin.refresh_permissions()
+        grant = self.plugin.outbox.access.authorization("qq", "123")
+        self.plugin.outbox.activate(self.incoming, grant["revision"])
 
     async def asyncTearDown(self):
         self.plugin.stopping = True
@@ -249,6 +263,10 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         for change in ("permission", "maintenance", "forget"):
             with self.subTest(change=change):
                 self.config["allowed_accounts"] = [{"platform_instance_id": "qq", "user_id": "123"}]
+                self.plugin.refresh_permissions()
+                grant = self.plugin.outbox.access.authorization("qq", "123")
+                if not grant["enabled"]:
+                    self.plugin.outbox.activate(self.incoming, grant["revision"])
                 scope = self.plugin.outbox.scope(self.incoming)
                 async def result(*args, **kwargs):
                     if change == "permission":
