@@ -254,11 +254,17 @@ class Worker:
             retry_requested=0,
             delay=self.poll_interval,
         )
-        for operation_id in targets:
+        async def before_send():
+            if self.prepare_sources:
+                await self.prepare_sources()
+            if self.refresh_permissions:
+                self.refresh_permissions()
             if not self.outbox.current(row) or self.outbox.connection_error():
-                return
+                raise QueueError("scope_changed")
+
+        for operation_id in targets:
             try:
-                await self.client.retry(row["bank"], operation_id)
+                await self.client.retry(row["bank"], operation_id, before_send=before_send)
             except HindsightError as exc:
                 if exc.code == "http_409":
                     self.outbox.update(

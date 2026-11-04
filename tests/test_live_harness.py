@@ -7,10 +7,12 @@ import json
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+from urllib.request import Request
 
 
 spec = importlib.util.spec_from_file_location("live_harness", Path(__file__).parents[1] / "tools/run-live-e2e.py")
@@ -19,6 +21,58 @@ spec.loader.exec_module(harness)
 
 
 class LiveHarnessTests(unittest.TestCase):
+    def test_gateway_relays_first_stream_event_before_upstream_finishes(self):
+        release = threading.Event()
+        finished = threading.Event()
+        first = b'data: {"choices":[{"delta":{"content":"alpha"}}]}\n\n'
+        last = b"data: [DONE]\n\n"
+
+        class Upstream(harness.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(first)
+                self.wfile.flush()
+                release.wait(4)
+                self.wfile.write(last)
+                self.wfile.flush()
+                finished.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            upstream = harness.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+            state = SimpleNamespace(
+                output=Path(directory), settings={"chat_token": "synthetic-chat-token"},
+                magpie="http://127.0.0.1:" + str(upstream.server_port) + "/v1",
+            )
+            gateway = harness.Gateway(state)
+            body = {"stream": True, "messages": [{"role": "user", "content": "synthetic"}]}
+            try:
+                with harness.serving(upstream), harness.serving(gateway):
+                    request = Request(
+                        "http://127.0.0.1:" + str(gateway.server_port) + "/v1/chat/completions",
+                        data=json.dumps(body).encode(),
+                        headers={"Content-Type": "application/json",
+                                 "Authorization": "Bearer synthetic-chat-token"},
+                    )
+                    with gateway.opener.open(request, timeout=2) as response:
+                        self.assertEqual(response.headers.get_content_type(), "text/event-stream")
+                        received = response.readline() + response.readline()
+                        self.assertEqual(received, first)
+                        self.assertFalse(finished.is_set())
+                        release.set()
+                        self.assertEqual(response.read(), last)
+            finally:
+                release.set()
+            trace = json.loads((Path(directory) / "chat-stream-trace.jsonl").read_text())
+            self.assertEqual(trace["request"], body)
+            self.assertEqual(trace["response_sse"].encode(), first + last)
+            self.assertFalse((Path(directory) / "chat-trace.jsonl").exists())
+
     def test_actual_extraction_can_use_json_schema_or_json_object(self):
         self.assertTrue(harness.extraction_response({"response_format": {
             "type": "json_schema", "json_schema": {"schema": {"properties": {"facts": {}}}},

@@ -24,9 +24,11 @@ PLATFORMS = {
     ),
     "qq_official": Platform(
         "qq_official", "用户 OpenID", "填写 /sid 中的用户 UID（OpenID，不是 QQ 号）",
+        supported=True,
     ),
     "qq_official_webhook": Platform(
         "qq_official", "用户 OpenID", "填写 /sid 中的用户 UID（OpenID，不是 QQ 号）",
+        supported=True,
     ),
     "weixin_oc": Platform("weixin_oc", "用户 UID", "填写 /sid 中的用户 UID"),
     "telegram": Platform("telegram", "用户 ID", "填写 /sid 中的用户 UID", True),
@@ -73,8 +75,15 @@ def valid_user_id(host_type, value):
     return not contract.numeric or (value.isascii() and value.isdecimal() and len(value) <= 20)
 
 
-def native_header(event, plain_type, wake_prefixes=()) -> Incoming | None:
+def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=None) -> Incoming | None:
     """Validate original identity, time and text for both commands and capture."""
+    host_type = event.get_platform_name()
+    if host_type in {"qq_official", "qq_official_webhook"}:
+        from .qq_source import header
+
+        if not PLATFORMS[host_type].supported:
+            return None
+        return header(event, plain_type, wake_prefixes, adapter, binding)
     if event.get_platform_name() != "aiocqhttp":
         return None
     return _onebot(event, plain_type, wake_prefixes)
@@ -155,8 +164,18 @@ def native_snapshot(event, plain_type, command_prefixes=("/",)) -> Incoming | No
     return None
 
 
-def source_identity(event, incoming, adapter=None, *, authorization_revision=0):
+def source_identity(event, incoming, adapter=None, *, authorization_revision=0, binding=None):
     """OneBot's original recipient is producer evidence, including queued events."""
+    if incoming.platform_type == "qq_official":
+        from .qq_source import bound_login
+
+        login = bound_login(event, adapter, binding)
+        if login is None or incoming.bot_id != login.appid:
+            return None
+        return SourceIdentity(
+            event.get_platform_name(), incoming.platform_instance_id, "qq_official",
+            login.appid, login.client, authorization_revision,
+        )
     if incoming.platform_type != "aiocqhttp":
         return None
     producer = getattr(event, "bot", None)
@@ -176,11 +195,18 @@ async def prepare_bot_identity(context, platform):
 
     configs = context.get_config().get("platform", [])
     record = next((row for row in configs if str(row.get("id")) == platform), None)
-    if not record or record.get("type") != "aiocqhttp" or not record.get("enable", True):
+    if not record or not record.get("enable", True):
         return ""
     getter = getattr(context, "get_platform_inst", None)
     adapter = getter(platform) if getter else None
     if adapter is None:
+        return ""
+    if record.get("type") in {"qq_official", "qq_official_webhook"}:
+        from .qq_source import native_login
+
+        login = native_login(adapter)
+        return login.appid if login and login.appid == record.get("appid") else ""
+    if record.get("type") != "aiocqhttp":
         return ""
     client = adapter.get_client()
     try:

@@ -8,10 +8,29 @@
 | --- | --- |
 | AstrBot | **4.29.1 及以上**，使用内置执行器 `local` |
 | Hindsight | 自托管 **1.1.0**，启用 API Key 认证，官方管理面板也使用 1.1.0 |
-| QQ 接入 | **OneBot v11**，AstrBot 中的平台类型为 `aiocqhttp` |
-| 对话类型 | QQ 私聊纯文字 |
+| QQ 接入 | OneBot v11（`aiocqhttp`）、官方 WS（`qq_official`）、官方 Webhook（`qq_official_webhook`） |
+| 对话类型 | OneBot 私聊纯文字；官方机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
 | 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 桥接网络，Hindsight 运行于 Linux Docker |
 | 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
+
+### QQ 官方入口
+
+两种入口均由 AstrBot 管理登录、事件接收和消息发送。AppID、AppSecret、事件订阅和 Webhook 回调地址在 AstrBot 与 QQ 开放平台配置；Bridge 使用已有机器人实例和私聊 `/sid` 返回的用户 OpenID。
+
+| 项目 | 官方 WS | 官方 Webhook |
+| --- | --- | --- |
+| 宿主类型 | `qq_official` | `qq_official_webhook` |
+| 私聊文字与跨会话回忆 | 支持 | 支持 |
+| 正常、只读与暂停记忆 | 支持 | 支持 |
+| 普通、流式和工具调用后的最终回复 | 支持 | 支持 |
+| 记忆查看、搜索和 JSON 导出 | 支持 | 支持 |
+| 同实例切换连接方式 | 保留已有记忆与授权 | 保留已有记忆与授权 |
+
+官方 QQ 联调环境为 AstrBot 4.29.4、qq-botpy 1.2.1；4.29.1 已完成宿主接口兼容检查。
+
+切换连接方式时，保持原平台实例、AppID 和使用者 OpenID。更换实例或机器人账号后，记忆按新账号分别保存，需在设置中确认授权。
+
+列表与详情提供内容预览，完整内容可通过 JSON 或官方 Control Plane 导出。QQ 文件发送受平台权限和文件大小限制。连接与发送问题的处理见 [安装指南](INSTALL.md#官方机器人没有回复)。
 
 ## 安装与管理
 
@@ -50,7 +69,7 @@
 
 ## 其他执行器与平台
 
-Dify、Coze、百炼、DeerFlow 等执行器，以及 QQ 官方机器人、其他聊天平台和 AstrBot WebChat，没有适配自动记录与记忆注入。
+Dify、Coze、百炼、DeerFlow 等执行器，以及其他聊天平台和 AstrBot WebChat，没有适配自动记录与记忆注入。
 
 QQ 文件导出使用 AstrBot 的文件发送功能。AstrBot 和 OneBot 程序分开运行时，需要配置文件回调地址或共享路径，见 [导出文件失败的处理](INSTALL.md#导出-json-文件失败)。
 

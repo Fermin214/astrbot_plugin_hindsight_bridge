@@ -116,7 +116,7 @@ def recall_query(current: str, history=(), *, budget=380, name="o200k_base") -> 
 class Message:
     event_key: str
     text: str
-    timestamp: int
+    timestamp: int | float
     role: str = "user"
 
     def iso_time(self, zone: str | None = None) -> str:

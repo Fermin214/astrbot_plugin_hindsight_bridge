@@ -261,7 +261,9 @@ class MemoryPanel:
             if queue and not queue.recovering:
                 if bot_ids[platform] and plugin.outbox is queue and not plugin.stopping:
                     incoming = Incoming(
-                        "aiocqhttp", platform, bot_ids[platform], user, "", int(time.time()), "",
+                        next((row["logical_type"] for row in self.platforms()
+                              if row["id"] == platform), ""),
+                        platform, bot_ids[platform], user, "", int(time.time()), "",
                     )
                     if queue.access.permitted(incoming.scope(queue.deployment_id)):
                         current = dict(queue.scope(incoming))
@@ -302,7 +304,12 @@ class MemoryPanel:
         return result
 
     async def bot_id(self, platform):
-        identity = await prepare_bot_identity(self.plugin.context, platform)
+        contract = next((row for row in self.platforms() if row["id"] == platform), None)
+        if contract and contract["logical_type"] == "qq_official":
+            await self.plugin.prepare_sources()
+            identity = self.plugin.source_accounts.get(platform, {}).get("bot_id", "")
+        else:
+            identity = await prepare_bot_identity(self.plugin.context, platform)
         queue = self.plugin.outbox
         if identity and queue:
             contract = next((row for row in self.platforms() if row["id"] == platform), None)

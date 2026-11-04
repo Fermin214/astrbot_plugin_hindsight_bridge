@@ -54,13 +54,15 @@ def main():
         "https://github.com/Fermin214/astrbot_plugin_hindsight_bridge"
     )
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", metadata["version"])
-    assert metadata["support_platforms"] == ["aiocqhttp"]
+    assert metadata["support_platforms"] == [
+        "aiocqhttp", "qq_official", "qq_official_webhook",
+    ]
     assert metadata["astrbot_version"] == ">=4.29.1"
     for name in (
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
-        "core/source.py", "core/access.py",
+        "core/source.py", "core/access.py", "core/qq_source.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
@@ -70,6 +72,7 @@ def main():
         "deploy/managed_service.py", "deploy/model_probe.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
         "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
+        "examples/config.qq-official.example.json",
     ):
         assert (root / name).is_file(), name
     for language in ("zh-CN", "en-US"):
@@ -94,6 +97,16 @@ def main():
     for obsolete in ("enabled", "permission_config_version", "allowed_user_ids", "allowed_platform_ids"):
         assert obsolete not in schema and obsolete not in example, obsolete
     assert not schema["api_key"]["default"] and not example["api_key"]
+    official_example = json.loads(
+        (root / "examples/config.qq-official.example.json").read_text(encoding="utf-8")
+    )
+    assert set(official_example) == set(example)
+    assert not official_example["api_key"]
+    assert not {"appid", "secret", "appsecret"} & set(schema)
+    account = official_example["allowed_accounts"]
+    assert len(account) == 1 and account[0]["__template_key"] == "account"
+    assert account[0]["platform_instance_id"] == "your-qq-official-instance"
+    assert account[0]["user_id"] == "your-openid-from-sid"
     for path in root.rglob("*.py"):
         if not {".git", ".local"} & set(path.relative_to(root).parts):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

@@ -394,8 +394,11 @@ class HindsightClient:
             children.append((child["operation_id"], child["status"]))
         return Operation(operation_id, status, tuple(children))
 
-    async def retry(self, bank: str, operation_id: str) -> None:
+    async def retry(self, bank: str, operation_id: str, *, before_send=None) -> None:
         await self.ensure_auth()
+        # Source checks must follow authentication I/O, including cache renewal.
+        if before_send is not None:
+            await before_send()
         await self.request(
             "POST",
             self.bank_path(bank)

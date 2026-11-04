@@ -61,7 +61,7 @@
             "description": "用户 ID",
             "type": "string",
             "default": "",
-            "hint": "填写私聊 /sid 回复中的 UID，去掉外侧括号。OneBot 使用用户 QQ 号；按所选平台的提示填写。"
+            "hint": "填写私聊 /sid 回复中的 UID，去掉外侧括号。OneBot 使用用户 QQ 号；QQ 官方机器人使用 OpenID，不填写 QQ 号。"
           }
         }
       }

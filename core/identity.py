@@ -66,7 +66,7 @@ class Incoming:
     bot_id: str
     user_id: str
     message_id: str
-    timestamp: int
+    timestamp: int | float
     text: str
     received_at: float = field(default_factory=lambda: time.time(), compare=False)
 

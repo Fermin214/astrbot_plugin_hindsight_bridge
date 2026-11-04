@@ -74,8 +74,8 @@ def serving(server):
 class Gateway(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, state):
-        super().__init__((getattr(state, "gateway_host", "127.0.0.1"), 0), GatewayHandler)
+    def __init__(self, state, port=0):
+        super().__init__((getattr(state, "gateway_host", "127.0.0.1"), port), GatewayHandler)
         self.state = state
         self.recall_delay = 0
         self.extraction_gate = threading.Event()
@@ -114,6 +114,28 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.connection.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+
+    def relay_chat_stream(self, response, request, started):
+        self.send_response(response.status)
+        self.send_header("Content-Type", response.headers["Content-Type"])
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        chunks = []
+        size = 0
+        while chunk := response.read1(16 * 1024):
+            size += len(chunk)
+            if size > 32 * 1024 * 1024:
+                self.drop()
+                return
+            chunks.append(chunk)
+            self.wfile.write(chunk)
+            self.wfile.flush()
+        self.server.record("chat-stream-trace", {
+            "request": request, "response_sse": b"".join(chunks).decode("utf-8"),
+            "seconds": round(time.monotonic() - started, 3),
+        })
 
     def do_GET(self):
         self.dispatch()
@@ -186,6 +208,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         started = time.monotonic()
         try:
             with self.server.opener.open(Request(url, data=raw, headers=headers, method=self.command), timeout=120) as response:
+                if (
+                    self.path == "/v1/chat/completions"
+                    and response.headers.get_content_type() == "text/event-stream"
+                ):
+                    self.relay_chat_stream(response, json.loads(raw), started)
+                    return
                 value = response.read(32 * 1024 * 1024 + 1)
                 # Hold the genuine response until the requested minimum latency;
                 # cloud processing time counts toward the same test deadline.

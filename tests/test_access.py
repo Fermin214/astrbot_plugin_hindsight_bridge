@@ -170,16 +170,21 @@ class AuthorizationTests(unittest.TestCase):
         restored = self.queue.get(capture.task_id)
         self.assertEqual(restored["state"], "unknown")
         self.assertTrue(restored["retry_requested"])
+
+        async def retry(bank, operation_id, *, before_send):
+            await before_send()
+
         client = SimpleNamespace(
             operation=AsyncMock(return_value=Operation(frozen["operation_id"], "failed")),
-            retry=AsyncMock(),
+            retry=AsyncMock(side_effect=retry),
         )
         worker = Worker(self.queue, client, Mock())
         async def recover():
             self.assertTrue(await worker.maintenance.startup())
             await worker.process(self.queue.get(capture.task_id))
         asyncio.run(recover())
-        client.retry.assert_awaited_once_with(frozen["bank"], frozen["operation_id"])
+        client.retry.assert_awaited_once()
+        self.assertEqual(client.retry.await_args.args, (frozen["bank"], frozen["operation_id"]))
         self.assertEqual(self.queue.get(capture.task_id)["payload"], frozen["payload"])
         self.assertFalse(self.queue.get(capture.task_id)["retry_requested"])
         self.assertEqual(self.queue.control.db.execute(
@@ -500,7 +505,9 @@ class SourceContracts(unittest.TestCase):
 
     def test_unreleased_platforms_and_opaque_ids_do_not_inherit_onebot_rules(self):
         self.assertTrue(platform_details("aiocqhttp")["supported"])
-        for kind in ("qq_official", "qq_official_webhook", "weixin_oc", "telegram", "unknown"):
+        self.assertTrue(platform_details("qq_official")["supported"])
+        self.assertTrue(platform_details("qq_official_webhook")["supported"])
+        for kind in ("weixin_oc", "telegram", "unknown"):
             self.assertFalse(platform_details(kind)["supported"])
         self.assertTrue(valid_user_id("qq_official", "AbC_x-123"))
         self.assertFalse(valid_user_id("aiocqhttp", "AbC_x-123"))

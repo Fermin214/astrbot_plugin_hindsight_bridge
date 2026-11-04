@@ -36,7 +36,8 @@ from .core.materials import TokenizerError, load_encoding, memory_block, recall_
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel
-from .core.source import local_runner, native_header, prepare_bot_identity, source_identity
+from .core.qq_source import native_login
+from .core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
 from .core.worker import Worker
 
 
@@ -204,7 +205,14 @@ class HindsightBridge(Star):
         if self.outbox is not None:
             for instance, evidence in self.source_accounts.items():
                 adapter = self.context.get_platform_inst(instance)
-                if adapter is None or adapter is not evidence["adapter"] or adapter.get_client() is not evidence["client"]:
+                login = evidence.get("login")
+                if login is not None and not login.matches(native_login(adapter)):
+                    evidence["invalid_login"] = True
+                if (
+                    adapter is None or adapter is not evidence["adapter"]
+                    or adapter.get_client() is not evidence["client"]
+                    or evidence.get("invalid_login")
+                ):
                     evidence["bot_id"] = ""
             for row in self.outbox.list_scopes():
                 evidence = self.source_accounts.get(row["platform_instance_id"])
@@ -239,8 +247,25 @@ class HindsightBridge(Star):
                     return
                 if getter(instance) is not adapter or (adapter and adapter.get_client() is not client):
                     bot = ""
-                self.source_accounts[instance] = {"adapter": adapter, "client": client, "bot_id": bot}
-                if bot and self.outbox.access.observe_bot(instance, "aiocqhttp", bot):
+                previous = self.source_accounts.get(instance, {})
+                login = native_login(adapter)
+                same_adapter = previous.get("adapter") is adapter
+                invalid = same_adapter and (
+                    previous.get("invalid_login", False)
+                    or previous.get("login") is not None
+                    and not previous["login"].matches(login)
+                )
+                if invalid:
+                    bot = ""
+                self.source_accounts[instance] = {
+                    "adapter": adapter, "client": client, "bot_id": bot,
+                    "login": previous.get("login") if invalid else login,
+                    "invalid_login": invalid,
+                }
+                record = next((row for row in self.context.get_config().get("platform", [])
+                               if str(row.get("id")) == instance), {})
+                logical_type = platform_details(record.get("type", ""))["logical_type"]
+                if bot and self.outbox.access.observe_bot(instance, logical_type, bot):
                     self.outbox.sync_permissions(accounts)
                     self.confirmations.clear()
                     self.permission_revision += 1
@@ -266,16 +291,18 @@ class HindsightBridge(Star):
         )
 
     def source_header(self, event):
+        getter = getattr(self.context, "get_platform_inst", None)
+        adapter = getter(event.get_platform_id()) if getter else None
+        binding = self.source_accounts.get(event.get_platform_id())
         incoming = native_header(
             event, Plain, self.context.get_config().get("wake_prefix", []),
+            adapter=adapter, binding=binding,
         )
         if incoming is None:
             return None
-        getter = getattr(self.context, "get_platform_inst", None)
-        adapter = getter(incoming.platform_instance_id) if getter else None
         if getter and adapter is None:
             return None
-        return incoming if source_identity(event, incoming, adapter) else None
+        return incoming if source_identity(event, incoming, adapter, binding=binding) else None
 
     def snapshot(self, event):
         if not self.allowed(event):
