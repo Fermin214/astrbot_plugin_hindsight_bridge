@@ -28,6 +28,7 @@
         <legend class="sr-only">记忆服务设置</legend>
         <div class="section-heading">
           <h2>记忆服务</h2>
+          <p>Hindsight 负责保存和整理长期记忆，AstrBot 负责与你聊天。首次使用选择配套安装，已经有 Hindsight 才需要填写现有连接。</p>
         </div>
         <fieldset class="connection-options">
           <legend class="sr-only">安装方式</legend>
@@ -84,7 +85,19 @@
             <p id="connection-result" role="status" class="hint" hidden></p>
           </div>
           <div id="models-settings" class="settings-section">
-            <div class="section-heading"><h2>模型配置</h2></div>
+            <div class="section-heading with-help">
+              <h2>模型配置</h2>
+              <details class="help" name="page-help">
+                <summary aria-label="这几种模型分别有什么用" title="模型分别有什么用">?</summary>
+                <div class="help-content">
+                  <p>聊天模型：从聊天中整理记忆，生成和更新知识页。</p>
+                  <p>嵌入模型（Embedding）：按文字含义查找相关记忆。请从 AstrBot「模型供应商 → 嵌入」中选择。</p>
+                  <p>重排模型（Reranker）：对检索结果再次排序，可选。</p>
+                  <p>这些模型供 Hindsight 使用，从 AstrBot 已有供应商中选择。AstrBot 的日常聊天模型在宿主设置中管理。</p>
+                  <p>验证、整理、检索和知识页更新可能产生模型调用费用，请确认供应商计费。</p>
+                </div>
+              </details>
+            </div>
             <div class="surface">
               <div class="form-grid">
                 <label>聊天模型 <span class="required">必选</span><select id="chat-provider"></select></label>
@@ -97,7 +110,18 @@
             </div>
           </div>
           <div class="section-heading">
-            <h2>使用者</h2>
+            <div class="with-help">
+              <h2>使用者</h2>
+              <details class="help" name="page-help">
+                <summary aria-label="怎样添加使用者和确认授权" title="使用者与授权">?</summary>
+                <div class="help-content">
+                  <p>名单决定谁可以保存和查看记忆；不同用户的记忆分开保存。</p>
+                  <p>让使用者在目标机器人的私聊发送 /sid。OneBot 填用户 QQ 号；QQ 官方机器人填回复中的 UID（OpenID）。</p>
+                  <p>先保存使用者名单，再点击「确认账号授权」，把该用户与当前登录的机器人关联。授权完成后开始记录新消息。</p>
+                  <p>移除用户并保存后，撤销该用户的记忆访问权限，已有记忆保留。重新添加或换机器人账号后，请再次确认授权。</p>
+                </div>
+              </details>
+            </div>
             <p>选择平台实例并填写用户 ID。保存后点击「确认账号授权」，核对机器人身份。</p>
           </div>
           <div class="surface">
@@ -129,7 +153,7 @@
     </section>
 
     <section id="panel-memories" role="tabpanel" aria-labelledby="tab-memories">
-      <div class="section-heading"><h2>运行状态</h2></div>
+      <div class="section-heading"><h2>运行状态</h2><p>设置完成后正常聊天即可：Hindsight 保存和整理记忆，插件在之后的聊天中自动查找相关内容。</p></div>
       <div class="service-state surface">
         <span id="status-dot" class="status-dot" aria-hidden="true"></span>
         <div><h3 id="status-label">状态未知</h3><p id="status-description" class="hint">等待服务返回状态。</p></div>
@@ -149,6 +173,7 @@
           </select></label>
           <button id="save-mode" type="button">应用模式</button>
           <p id="mode-help" class="hint full-width"></p>
+          <p class="hint full-width">切换模式保留已有记忆。更正、删除或导入前，请使用下方的「开始维护」。</p>
         </div>
         <div id="scope-error" class="notice error" role="status" hidden></div>
         <div class="surface settings-section">
@@ -157,7 +182,8 @@
             <details class="help" name="page-help">
               <summary aria-label="怎样访问记忆面板和获取登录密钥" title="访问方式与登录密钥">?</summary>
               <div class="help-content">
-                <p>首次保存聊天时会自动创建记忆库，无需手动建库。登录后按下方编号选择对应的记忆库。</p>
+                <p>记忆库在首次保存聊天时创建。登录后按下方编号选择对应的记忆库。</p>
+                <p>官方面板中的 Bank 就是记忆库。这里查看原始记忆和知识页；插件页面负责连接、选页、模式和保存进度。</p>
                 <p>服务装在远程服务器上时，先配置域名反向代理或 SSH 隧道。127.0.0.1 指你自己的电脑，建立隧道后才能用它访问服务器。</p>
                 <h4>登录密钥</h4>
                 <p id="control-plane-key-help">连接已有 Hindsight 时，请向服务维护者获取网页登录密钥。</p>
@@ -165,6 +191,7 @@
               </div>
             </details>
           </div>
+          <p class="hint">想知道机器人记住了什么，或更正一条记忆，请打开 Hindsight 官方面板。使用者也可在私聊发送 /hindsight view 查看自己的记忆。</p>
           <div class="form-grid">
             <label>官方管理地址<input id="control-plane-address" readonly spellcheck="false" aria-describedby="control-plane-help"></label>
             <label>记忆库编号<input id="scope-bank" readonly spellcheck="false"></label>
@@ -174,23 +201,62 @@
         </div>
         <div class="surface settings-section">
           <div class="with-help">
+            <h3>背景页</h3>
+            <details class="help" name="page-help">
+              <summary aria-label="怎样准备和使用背景页" title="怎样使用背景页">?</summary>
+              <div class="help-content">
+                <h4>它与普通记忆检索有什么区别？</h4>
+                <p>普通检索按当前问题查找相关记忆，背景页补充一份选定主题的简短资料。例如：从之前聊过的内容中整理「当前项目及约束」，供新会话参考。</p>
+                <h4>怎样准备？</h4>
+                <p>打开上方官方管理地址，按「记忆库编号」选择 Bank。在 Knowledge Base（知识库）中创建 Knowledge Page（知识页），填写名称和希望它从已有记忆中回答的问题，选择较短的生成长度，等待正文生成。</p>
+                <p>已有记忆没有标签时，创建页的标签留空。生成和刷新可能产生模型费用。</p>
+                <p>回到这里点击「获取知识页列表」，选择一份页，勾选「自动使用背景页」并保存。使用者发送 /hindsight background 核对正文；创建和更新仍在官方面板操作。</p>
+                <h4>关闭、更新和超限</h4>
+                <p>关闭后停止自动使用，知识页和手动查看保留。暂停记忆时停止自动使用，维护时暂停所有记忆读取。</p>
+                <p>新鲜度显示「未知」时，请在官方面板核对内容是否已更新。修改或删除前先开始维护。</p>
+                <p>整页太长或读取超时时，本轮跳过背景页，普通检索照常使用。超长内容请在官方面板调整为短页后再试。</p>
+              </div>
+            </details>
+          </div>
+          <p id="background-purpose" class="hint">可选：让机器人在新会话中参考一份简短资料，例如项目目标和约束。默认关闭，普通记忆检索照常使用。</p>
+          <p id="background-native-help" class="hint">背景页使用 Hindsight 的知识页（Knowledge Page），由 Hindsight 从已有记忆按主题整理。</p>
+          <div class="form-grid">
+            <label>选择已有知识页<select id="background-page"><option value="">尚未选择</option></select></label>
+            <label class="check-label"><input id="background-enabled" type="checkbox">自动使用背景页</label>
+          </div>
+          <div class="actions">
+            <button id="background-load" type="button">获取知识页列表</button>
+            <button id="background-save" type="button">保存背景设置</button>
+            <button id="background-close" type="button">关闭背景</button>
+          </div>
+          <p id="background-status" class="hint" role="status"></p>
+          <p id="background-feedback" class="hint" role="status" hidden></p>
+        </div>
+        <div class="surface settings-section">
+          <div class="with-help">
             <h3>记忆保存与维护</h3>
             <details class="help" name="page-help">
               <summary aria-label="什么时候需要维护，怎样操作" title="什么时候需要维护">?</summary>
               <div class="help-content">
-                <p>聊天记录会在后台发送给 Hindsight，再整理成记忆。这里显示保存进度；保存失败时，修复问题后点击「重试失败记录」。</p>
-                <h4>修改记忆前</h4>
-                <p>查看、搜索和导出记忆无需维护。修改、删除或导入前，先等需要保留的记录保存完成，再点击「开始维护」。新记录和记忆查询会暂停，Hindsight 已接收的记录继续处理。</p>
-                <p>勾选下方选项会放弃尚未发送或保存失败的记录；已发送并在处理的记录会继续处理。已开始维护时，勾选后再次点击「开始维护」。放弃后无法恢复。</p>
-                <p>等到显示「可以修改记忆」，再去官方面板操作。完成后点击「结束维护并恢复」。</p>
-                <h4>删除整个记忆库后</h4>
-                <p>需从备份恢复原记忆库，或点击「清空此用户的记忆」重新开始。清空会删除这个用户的全部记忆，AstrBot 聊天记录保留。</p>
+                <h4>保存进度怎么看？</h4>
+                <p>这里显示聊天记录交给 Hindsight 的保存进度。「已完成」表示已保存；出现失败时，先按错误提示处理，再点击「重试失败记录」。</p>
+                <h4>什么时候开始维护？</h4>
+                <p>例如机器人记错了项目名称，你准备去官方面板更正；或需要删除一条记忆、导入备份。维护会暂时停止这个用户的记忆保存和查询，普通聊天继续。</p>
+                <p>1. 先等要保留的聊天记录保存完成。失败记录修复后重试。</p>
+                <p>2. 点击「开始维护」，再点击「刷新维护状态」，等到显示「可以修改记忆」。</p>
+                <p>3. 打开上方「官方管理地址」，按记忆库编号选择 Bank，完成更正、删除或导入。</p>
+                <p>4. 回到这里点击「结束维护并恢复」，继续按当前记忆模式使用。</p>
+                <h4>还有待保存记录怎么办？</h4>
+                <p>想保留这些记录，请在开始维护前等它们保存完成。决定放弃时，勾选「放弃尚未发送或保存失败的记录」，再点击「开始维护」；已经在维护中时再次点击即可。放弃的记录无法恢复。</p>
+                <h4>什么时候清空全部记忆？</h4>
+                <p>想让这个用户的长期记忆从头开始时，使用「清空此用户的记忆」。确认后删除其全部长期记忆、知识页及来源材料，AstrBot 聊天记录保留。</p>
               </div>
             </details>
           </div>
+          <p class="hint">这里查看聊天的保存进度。要去官方面板更正、删除或导入记忆时，先开始维护，完成后回来恢复。</p>
           <p id="queue-summary" class="hint"></p>
           <p id="maintenance-state" class="hint" role="status"></p>
-          <p class="hint">修改或删除记忆前，先开始维护。具体步骤见右上角问号。</p>
+          <p class="hint">保存失败时，先按错误提示处理，再点击「重试失败记录」。维护步骤见右上角问号。</p>
           <label class="check-label"><input id="discard-pending" type="checkbox">放弃尚未发送或保存失败的记录（不可恢复）</label>
           <div class="actions">
             <button id="maintenance-begin" type="button">开始维护</button>
@@ -214,9 +280,15 @@
     <p id="authorization-description"></p>
     <div class="actions dialog-actions"><button type="button" id="cancel-authorization" autofocus>取消</button><button type="button" id="confirm-authorization" class="primary">确认授权</button></div>
   </dialog>
+  <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading" aria-describedby="remove-account-description">
+    <div class="dialog-header"><h2 id="remove-account-heading">移除此使用者？</h2></div>
+    <p id="remove-account-user" class="account-removal-user"></p>
+    <p id="remove-account-description">确认后从使用者名单移除。保存设置后，撤销该用户的记忆访问权限，已有记忆保留。</p>
+    <div class="actions dialog-actions"><button type="button" id="cancel-remove-account" autofocus>取消</button><button type="button" id="confirm-remove-account" class="danger">确认移除</button></div>
+  </dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading" aria-describedby="forget-description">
     <div class="dialog-header"><h2 id="forget-heading">清空此用户的全部记忆？</h2></div>
-    <p id="forget-description">删除这个用户在 Hindsight 中的全部记忆、用于生成记忆的聊天内容，以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。</p>
+    <p id="forget-description">删除这个用户在 Hindsight 中的全部记忆、知识页（包括所选背景页）及其历史、用于生成记忆的聊天内容，以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。</p>
     <p id="forget-user" class="forget-user"></p>
     <p id="forget-message" class="hint"></p>
     <label class="check-label"><input id="forget-agree" type="checkbox">我确认删除这个用户的全部记忆</label>

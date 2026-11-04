@@ -18,6 +18,7 @@ import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
+from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_background, reference
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
@@ -67,13 +68,14 @@ def bridge_class(directory, logger):
     selected = {
         "__init__", "initialize", "diagnostic", "error_code", "refresh_permissions",
         "control_directory", "warning", "monitor_connection", "record_recall",
-        "recall_status", "recall_text", "conversation_history", "add_memory",
+        "recall_status", "recall_text", "recall_background", "conversation_history", "add_memory",
         "record_history", "_close_resources", "using_resources", "terminate",
         "prepare_sources",
         "allowed", "snapshot", "source_header", "observe_incoming", "command_scope",
         "prepare_command", "apply_command", "mode", "memory_forget", "memory_retry",
         "memory_cancel",
         "readable", "unavailable_message", "memory_recall", "memory_show", "memory_view",
+        "memory_background",
     }
     bridge.body = [node for node in bridge.body if node.name in selected]
     for method in bridge.body:

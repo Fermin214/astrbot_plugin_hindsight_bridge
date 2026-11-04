@@ -2,9 +2,9 @@ const $ = (id) => document.getElementById(id);
 let bridge = window.AstrBotPluginView;
 const modeLabels = { active: "正常记忆", readonly: "只用已有记忆", paused: "暂停记忆" };
 const modeHelp = {
-  active: "读取已有记忆，并保存新的记忆。",
-  readonly: "读取已有记忆，不保存新的记忆。",
-  paused: "不读取记忆，也不保存新的记忆。",
+  active: "日常聊天使用：自动查找已有记忆，并保存新的聊天内容。",
+  readonly: "想继续用旧记忆、但不记录这次聊天时使用：自动查找已有记忆，不保存新的聊天内容。",
+  paused: "想暂时不使用记忆时选择：不自动查找记忆，也不保存新的聊天内容；仍可手动查看。",
 };
 let data = null;
 let settingsRevision = "";
@@ -12,8 +12,11 @@ let scopeId = "";
 let modeDirty = false;
 let forgetState = null;
 let authorizationState = null;
+let accountRemovalState = null;
 let maintenanceState = null;
 let maintenanceReadRevision = 0;
+let backgroundReadRevision = 0;
+let backgroundDraft = null;
 let bootstrapReadRevision = 0;
 let refreshTimer;
 let refreshRunning = false;
@@ -74,6 +77,7 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
   if (locks.has(group)) return;
   bootstrapReadRevision++;
   maintenanceReadRevision++;
+  backgroundReadRevision++;
   locks.add(group);
   const fieldset = $(`${group}-fields`);
   if (fieldset) fieldset.disabled = true;
@@ -155,7 +159,7 @@ function updateProviderHelp() {
   }
   $("provider-help").textContent = missing.length
     ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，模型列表会自动更新。`
-    : "聊天模型用于整理记忆，嵌入模型用于查找记忆；重排模型可不选。";
+    : "供 Hindsight 使用：聊天模型整理记忆，嵌入模型按含义检索，重排模型优化结果顺序（可选）。";
   $("save-models").disabled = missing.length > 0 || locks.has("setup");
 }
 
@@ -225,14 +229,44 @@ function addAccount(account = {}) {
   const remove = el("button", "danger-quiet", "移除");
   remove.type = "button";
   remove.setAttribute("aria-label", account.user_id ? `移除用户 ${account.user_id}` : "移除此用户");
-  remove.addEventListener("click", () => {
-    row.remove();
-    $("add-account").focus();
-  });
+  remove.addEventListener("click", () => requestAccountRemoval(row, remove));
   row.append(platformLabel, userLabel, authorize, remove);
   $("accounts").append(row);
   return select;
 }
+
+function requestAccountRemoval(row, button) {
+  if (locks.has("setup") || $("remove-account-dialog").open) return;
+  const platform = row.querySelector(".account-platform").value;
+  const user = row.querySelector(".account-user").value.trim();
+  const name = (data.platforms || []).find((item) => item.id === platform)?.name || platform || "未选择平台";
+  accountRemovalState = { row, button, platform, user };
+  $("remove-account-user").textContent = `${name} · ${user || "未填写用户 ID"}`;
+  $("remove-account-dialog").showModal();
+}
+
+$("cancel-remove-account").addEventListener("click", () => $("remove-account-dialog").close());
+$("remove-account-dialog").addEventListener("close", () => {
+  const button = accountRemovalState?.button;
+  accountRemovalState = null;
+  (button?.isConnected ? button : $("add-account")).focus();
+});
+$("confirm-remove-account").addEventListener("click", () => {
+  const pending = accountRemovalState;
+  if (!pending) return;
+  if (
+    locks.has("setup") || !$("accounts").contains(pending.row)
+    || pending.row.querySelector(".account-platform").value !== pending.platform
+    || pending.row.querySelector(".account-user").value.trim() !== pending.user
+  ) {
+    $("remove-account-dialog").close();
+    notify("使用者信息已变化，请重新选择要移除的用户。", true);
+    return;
+  }
+  pending.row.remove();
+  $("remove-account-dialog").close();
+  notify("已从使用者名单移除，请保存设置使更改生效。");
+});
 
 function refreshAccountPlatforms() {
   $("accounts").querySelectorAll(".account-platform").forEach((select) => {
@@ -462,6 +496,100 @@ function renderScope() {
   $("scope-bank").value = scope?.bank || "";
   $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : countDescription(summary.counts);
   $("maintenance-state").textContent = maintenanceDescription(summary, maintenanceState);
+  renderBackground();
+}
+
+function backgroundSnapshot(scope) {
+  return JSON.stringify([
+    scope?.scope_id, scope?.bank, scope?.background?.scope_revision, scope?.background?.revision,
+    data?.config_revision,
+    !!scope?.historical, !!scope?.pending, !!scope?.summary?.maintenance, !!scope?.summary?.bank_missing,
+  ]);
+}
+
+function renderBackground() {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
+  const snapshot = backgroundSnapshot(scope);
+  if (!backgroundDraft || backgroundDraft.snapshot !== snapshot) {
+    backgroundReadRevision++;
+    backgroundDraft = {
+      snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
+      revision: saved.revision, scope_revision: saved.scope_revision,
+      config_revision: data?.config_revision, pages: [], loaded: false,
+    };
+    $("background-feedback").hidden = true;
+    $("background-feedback").textContent = "";
+  }
+  const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
+  const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing;
+  for (const id of ["background-page", "background-enabled", "background-load", "background-save"]) $(id).disabled = !!blocked || locks.has("memory");
+  $("background-load").disabled ||= backgroundDraft.loading === true;
+  $("background-close").disabled = !!unavailable || !saved.enabled || locks.has("memory");
+  const select = $("background-page");
+  const options = [option("", "不选择背景页（仍可检索记忆）")];
+  backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path)));
+  if (backgroundDraft.page_id && !backgroundDraft.pages.some((page) => page.page_id === backgroundDraft.page_id)) {
+    options.push(option(backgroundDraft.page_id, `${backgroundDraft.page_id}（已选；请获取列表确认）`));
+  }
+  select.replaceChildren(...options);
+  select.value = backgroundDraft.page_id;
+  $("background-enabled").checked = backgroundDraft.enabled;
+  let status = !saved.page_id ? "尚未选择背景页。普通记忆检索照常使用；准备步骤见右上角问号。"
+    : saved.enabled ? "自动使用背景页已开启。" : "自动使用背景页已关闭；已选知识页保留，仍可手动查看。";
+  if (unavailable) status = saved.error || "请连接当前机器人并确认授权后选择背景页。";
+  else if (blocked) status = "维护或恢复期间不读取背景页；可以关闭自动使用。";
+  else if (scope.mode === "paused" && saved.enabled) status = "背景设置已开启，但记忆已暂停，本轮不自动使用。";
+  else if (saved.status?.message) status += ` ${saved.status.message}`;
+  else if (saved.status?.used) status += " 最近一轮已提供背景参考。新鲜度未知，请在官方面板核对更新。";
+  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "这个记忆库还没有知识页。可继续正常聊天；想用背景页，请按右上角说明在官方面板创建，再重新获取列表。";
+  $("background-status").textContent = status;
+}
+
+async function loadBackground() {
+  const draft = backgroundDraft;
+  if (!draft || $("background-load").disabled) return;
+  const revision = ++backgroundReadRevision;
+  draft.loading = true;
+  $("background-load").disabled = true;
+  try {
+    const response = await withTimeout(
+      bridge.apiGet(endpoint("background", draft.id)), 8500, "获取知识页列表超时，请检查服务后重试。",
+    );
+    if (revision !== backgroundReadRevision || backgroundDraft !== draft || scopeId !== draft.id) return;
+    if (!Array.isArray(response.pages)) throw new Error("知识页列表无法读取，请检查服务后重试。");
+    if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision) {
+      throw new Error("背景设置已变化，请重新获取插件状态后再选择。");
+    }
+    draft.pages = response.pages;
+    draft.loaded = true;
+    draft.config_revision = response.config_revision;
+    renderBackground();
+  } catch (error) {
+    if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) {
+      notify(errorMessage(error), true, "background-feedback");
+    }
+  } finally {
+    draft.loading = false;
+    if (backgroundDraft === draft && scopeId === draft.id) renderBackground();
+  }
+}
+
+async function saveBackground(close = false) {
+  const draft = backgroundDraft;
+  if (!draft) return;
+  const saved = data.scopes.find((scope) => scope.scope_id === draft.id)?.background;
+  const payload = {
+    page_id: close ? saved?.page_id || "" : draft.page_id,
+    enabled: close ? false : draft.enabled,
+    revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision,
+  };
+  await perform($(close ? "background-close" : "background-save"), "memory", async () => {
+    const response = await bridge.apiPost(endpoint("background", draft.id), payload);
+    if (backgroundDraft !== draft || scopeId !== draft.id) return;
+    await refreshBootstrap();
+    notify(response.message || "背景设置已保存。", false, "background-feedback");
+  }, "background-feedback");
 }
 
 function pendingScopeHelp(scope) {
@@ -474,6 +602,8 @@ function pendingScopeHelp(scope) {
 function selectScope(id) {
   bootstrapReadRevision++;
   maintenanceReadRevision++;
+  backgroundReadRevision++;
+  backgroundDraft = null;
   scopeId = id;
   $("scope-picker").value = id;
   modeDirty = false;
@@ -828,6 +958,11 @@ async function maintenanceAction(button, action, extra = {}) {
 $("maintenance-begin").addEventListener("click", () => void maintenanceAction($("maintenance-begin"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
 $("maintenance-status").addEventListener("click", () => void maintenanceAction($("maintenance-status"), "maintenance_status"));
 $("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
+$("background-load").addEventListener("click", () => void loadBackground());
+$("background-save").addEventListener("click", () => void saveBackground());
+$("background-close").addEventListener("click", () => void saveBackground(true));
+$("background-page").addEventListener("change", () => { if (backgroundDraft) backgroundDraft.page_id = $("background-page").value; });
+$("background-enabled").addEventListener("change", () => { if (backgroundDraft) backgroundDraft.enabled = $("background-enabled").checked; });
 
 for (const id of ["control-plane-address", "scope-bank", "control-plane-key-command"]) $(id).addEventListener("focus", () => $(id).select());
 for (const [details, field] of [["installation", "install-command"], ["uninstallation", "uninstall-command"]]) {
@@ -837,6 +972,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearCommands();
 });
 window.addEventListener("pagehide", clearCommands);
+window.addEventListener("pagehide", () => { backgroundReadRevision++; backgroundDraft = null; });
 document.addEventListener("click", (event) => {
   document.querySelectorAll(".help[open]").forEach((help) => {
     if (!help.contains(event.target)) help.open = false;

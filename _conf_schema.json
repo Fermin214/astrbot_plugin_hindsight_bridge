@@ -55,13 +55,13 @@
             "description": "平台实例 ID",
             "type": "string",
             "default": "",
-            "hint": "私聊发送 /sid，复制回复中的 Bot ID，去掉外侧括号；这是平台实例 ID，不是机器人登录账号。"
+            "hint": "私聊发送 /sid，复制回复中的 Bot ID，去掉外侧括号，用作平台实例 ID。"
           },
           "user_id": {
             "description": "用户 ID",
             "type": "string",
             "default": "",
-            "hint": "填写私聊 /sid 回复中的 UID，去掉外侧括号。OneBot 使用用户 QQ 号；QQ 官方机器人使用 OpenID，不填写 QQ 号。"
+            "hint": "填写私聊 /sid 回复中的 UID，去掉外侧括号。OneBot 使用用户 QQ 号；QQ 官方机器人使用 OpenID。"
           }
         }
       }
@@ -77,19 +77,19 @@
     "description": "召回结果长度（token）",
     "type": "int",
     "default": 1200,
-    "hint": "限制每次从 Hindsight 取回的记忆长度。"
+    "hint": "每轮记忆参考的 token 预算，背景页与普通检索共用。默认 1200，范围 256 到 1200。"
   },
   "recall_query_tokens": {
     "description": "查询 token 上限",
     "type": "int",
     "default": 380,
-    "hint": "限制发送给 Hindsight 的查询长度，优先保留这条消息，最多 400 token。"
+    "hint": "限制发送给 Hindsight 的查询长度，优先保留当前消息。默认 380，最多 400 token。"
   },
   "query_tokenizer": {
     "description": "查询分词编码",
     "type": "string",
     "default": "o200k_base",
-    "hint": "用于计算查询的 token 数量。与 Hindsight 配置不同时，由维护者调整。"
+    "hint": "用于计算查询与记忆参考的 token 数。与 Hindsight 配置不同时，由维护者调整。"
   },
   "queue_max_tasks": {
     "description": "待保存记录数量上限",
@@ -113,6 +113,6 @@
     "description": "提供给聊天模型的记忆字符上限",
     "type": "int",
     "default": 4000,
-    "hint": "限制每次聊天附带的记忆文字长度。"
+    "hint": "每轮提供给聊天模型的记忆字符上限，背景页与普通检索共用。默认 4000，范围 256 到 4000。"
   }
 }

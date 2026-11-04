@@ -135,6 +135,7 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .memory-toolbar > label:not(.scope-picker) { flex: 1 1 150px; }
 .full-width { flex-basis: 100%; margin: 0; }
 .memory-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 24px; }
+#forget { margin-top: 12px; }
 #update-error button { margin-left: 8px; }
 .empty { text-align: center; padding: 42px 20px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
 .empty h3 { color: var(--text); margin-bottom: 6px; }
@@ -187,6 +188,7 @@ dialog { width: min(660px, calc(100% - 32px)); max-height: 88vh; padding: 24px; 
 dialog::backdrop { background: #12223566; }
 .dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
 .forget-user { margin: 16px 0; font-weight: 650; background: var(--danger-bg); padding: 12px; border-radius: 6px; }
+.account-removal-user { margin-bottom: 14px; font-weight: 650; overflow-wrap: anywhere; }
 #forget-dialog .check-label { margin-top: 20px; align-items: flex-start; }
 #forget-agree { margin-top: 3px; }
 .dialog-actions { justify-content: flex-end; }

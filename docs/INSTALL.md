@@ -61,7 +61,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ## 三、选择使用者并完成设置
 
-1. 先在 AstrBot 配置并连接 QQ 机器人，再在插件中选择该实例。OneBot 填发消息者自己的 QQ 号；官方机器人填私聊 `/sid` 返回的用户 UID（OpenID），不是 QQ 号。多人使用时分别添加。
+1. 先在 AstrBot 配置并连接 QQ 机器人，再在插件中选择该实例。OneBot 填发消息者自己的 QQ 号；官方机器人填私聊 `/sid` 返回的用户 UID（OpenID）。多人使用时分别添加。
 2. 点击 **完成设置** 保存账号，再到 **设置** 点击这个账号的 **确认账号授权**，核对当前机器人登录账号并确认。
 3. 在 **运行管理 → 用户记忆** 中选择用户，调整“正常记忆 / 只用已有记忆 / 暂停记忆”，之后正常聊天即可。
 
@@ -97,7 +97,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ### 模型列表中没有嵌入模型
 
-普通对话模型不能替代嵌入模型。到 AstrBot **模型供应商 → 嵌入** 添加模型，保存后返回插件，模型列表会自动更新。无需在插件里再次输入模型 Key。
+到 AstrBot **模型供应商 → 嵌入** 添加 Embedding 模型，保存后返回插件，模型列表会自动更新。插件沿用供应商的连接信息。
 
 ### 模型验证或保存超时
 
@@ -117,7 +117,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ### 提示无法连接后端
 
-配套安装需在运行这套 AstrBot 的 Docker 主机执行。已有服务请检查 API 地址、端口和网络是否可达；Docker 容器之间一般使用服务名称，而不是 `localhost`。
+配套安装需在运行这套 AstrBot 的 Docker 主机执行。已有服务请检查 API 地址、端口和网络是否可达；Docker 容器之间一般使用服务名称访问。
 
 ### 记忆检索超时
 

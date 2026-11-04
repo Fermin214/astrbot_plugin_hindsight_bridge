@@ -38,6 +38,8 @@ function harness() {
     locks: new Set(), scopeId: "", modeDirty: false, maintenanceState: null,
     authorizationState: null, settingsRevision: "",
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
+    backgroundReadRevision: 0, backgroundDraft: null,
+    renderBackground() {},
     modelWatch: null, feedbackTimer: null, modeHelp: { active: "读取并保存" },
     hydrateConfig() {}, providerSelect() {}, refreshAccountPlatforms() {}, updateProviderHelp() {},
     readMaintenanceStatus: async () => {},
@@ -347,4 +349,149 @@ test("connection errors retain specific guidance and existing services hide mode
   context.document.querySelector = () => ({ value: "existing" });
   context.updateConnectionMode();
   assert.equal(context.$("models-settings").hidden, true);
+});
+
+function backgroundHarness() {
+  const context = harness();
+  for (const name of ["backgroundSnapshot", "renderBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
+    vm.runInContext(declaration(name), context);
+  }
+  context.renderScope = context.renderBackground;
+  context.refreshBootstrap = async () => {};
+  context.data = {
+    config: {}, config_revision: "config-1", status: {}, scopes: [{
+      scope_id: "one", bank: "bank-1", summary: {}, background: {
+        revision: 1, scope_revision: 2, page_id: "kp-1", enabled: true,
+      },
+    }],
+  };
+  context.scopeId = "one";
+  context.renderBackground();
+  return context;
+}
+
+test("background polling preserves an unsaved choice but clears an old bank draft", () => {
+  const context = backgroundHarness();
+  context.backgroundDraft.page_id = "unsaved-page";
+  context.backgroundDraft.enabled = false;
+  context.renderBackground();
+  assert.equal(context.$("background-page").value, "unsaved-page");
+  assert.equal(context.$("background-enabled").checked, false);
+  context.data.scopes[0].bank = "new-bank";
+  context.data.scopes[0].background = { revision: 2, scope_revision: 3, enabled: false, page_id: "" };
+  context.renderBackground();
+  assert.equal(context.$("background-page").value, "");
+  assert.equal(context.$("background-enabled").checked, false);
+});
+
+test("historical and maintenance scopes never offer page reads; maintenance permits closing", () => {
+  const context = backgroundHarness();
+  context.data.scopes[0].summary.maintenance = {};
+  context.renderBackground();
+  for (const id of ["background-page", "background-load", "background-save"]) assert.equal(context.$(id).disabled, true);
+  assert.equal(context.$("background-close").disabled, false);
+  context.data.scopes[0].historical = true;
+  context.renderBackground();
+  assert.equal(context.$("background-close").disabled, true);
+});
+
+test("late background index cannot overwrite another user's draft", async () => {
+  const context = backgroundHarness();
+  let release;
+  context.bridge = { apiGet: () => new Promise((resolve) => { release = resolve; }) };
+  const loading = context.loadBackground();
+  context.data.scopes.push({ scope_id: "two", bank: "bank-2", summary: {}, background: { revision: 0, scope_revision: 4, enabled: false, page_id: "" } });
+  context.scopeId = "two";
+  context.renderBackground();
+  release({ pages: [{ page_id: "private-page", path: "Other user's page" }], selection: { revision: 1 }, scope_revision: 2 });
+  await loading;
+  assert.equal(context.backgroundDraft.id, "two");
+  assert.equal(context.backgroundDraft.pages.length, 0);
+  assert.equal(context.$("background-page").value, "");
+});
+
+test("background index timeout releases controls and never interprets names as HTML", async () => {
+  const context = backgroundHarness();
+  context.bridge = { apiGet: () => new Promise(() => {}) };
+  await context.loadBackground();
+  assert.match(context.$("background-feedback").textContent, /超时/);
+  assert.equal(context.$("background-load").disabled, false);
+  context.bridge.apiGet = async () => ({
+    pages: [{ page_id: "kp-1", path: "<img src=x onerror=alert(1)>" }],
+    selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1",
+  });
+  await context.loadBackground();
+  assert.equal(context.$("background-page").children[1].textContent, "<img src=x onerror=alert(1)>");
+  assert.equal(context.$("background-page").children[1].innerHTML, undefined);
+});
+
+test("background save carries original revisions and closing does not delete a page", async () => {
+  const context = backgroundHarness();
+  const calls = [];
+  context.bridge = { apiPost: async (endpoint, payload) => { calls.push({ endpoint, payload }); return { message: "saved" }; } };
+  context.backgroundDraft.page_id = "kp-2";
+  context.data.config_revision = "new-config";
+  await context.saveBackground();
+  assert.equal(calls[0].payload.config_revision, "config-1");
+  assert.equal(calls[0].payload.page_id, "kp-2");
+  await context.saveBackground(true);
+  assert.equal(calls[1].payload.enabled, false);
+  assert.equal(calls[1].payload.page_id, "kp-1");
+  assert.equal(calls[1].endpoint, "scopes/one/background");
+  assert.equal("bank" in calls[1].payload, false);
+});
+
+test("settings refresh invalidates old drafts and allows closing during maintenance without a tree read", async () => {
+  const context = backgroundHarness();
+  vm.runInContext(declaration("refreshBootstrap"), context);
+  context.hydrateConfig = () => {};
+  const oldDraft = context.backgroundDraft;
+  oldDraft.page_id = "unsaved-page";
+  oldDraft.enabled = false;
+  const next = structuredClone(context.data);
+  next.config_revision = "config-2";
+  next.scopes[0].summary.maintenance = {};
+  const calls = [];
+  context.bridge = {
+    apiGet: async (route) => {
+      calls.push(route);
+      assert.equal(route, "bootstrap");
+      return next;
+    },
+    apiPost: async (route, payload) => {
+      assert.equal(route, "scopes/one/background");
+      assert.equal(payload.config_revision, "config-2");
+      assert.equal(payload.page_id, "kp-1");
+      assert.equal(payload.enabled, false);
+      next.scopes[0].background = { ...next.scopes[0].background, enabled: false, revision: 2 };
+      return { message: "saved" };
+    },
+  };
+  await context.refreshBootstrap({ hydrate: true, pollMaintenance: false });
+  assert.notEqual(context.backgroundDraft, oldDraft);
+  assert.equal(context.backgroundDraft.page_id, "kp-1");
+  assert.equal(context.backgroundDraft.config_revision, "config-2");
+  assert.equal(context.$("background-load").disabled, true);
+  assert.equal(context.$("background-close").disabled, false);
+  await context.refreshBootstrap({ pollMaintenance: false });
+  assert.equal(context.backgroundDraft.config_revision, "config-2");
+  await context.saveBackground(true);
+  assert.equal(context.data.scopes[0].background.enabled, false);
+  assert.ok(calls.length >= 3);
+});
+
+test("configuration change drops a pending old page list and unsaved choice rather than rebasing it", async () => {
+  const context = backgroundHarness();
+  let release;
+  context.backgroundDraft.page_id = "unsaved-page";
+  context.bridge = { apiGet: () => new Promise((resolve) => { release = resolve; }) };
+  const loading = context.loadBackground();
+  context.data.config_revision = "config-2";
+  context.renderBackground();
+  release({ pages: [{ page_id: "old-page", path: "old list" }], selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1" });
+  await loading;
+  assert.equal(context.backgroundDraft.config_revision, "config-2");
+  assert.equal(context.backgroundDraft.page_id, "kp-1");
+  assert.equal(context.backgroundDraft.pages.length, 0);
+  assert.equal(context.$("background-page").value, "kp-1");
 });

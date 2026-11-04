@@ -1,6 +1,7 @@
 """Durable ownership and erasure records outside the restorable message queue."""
 
 import math
+import json
 import os
 import sqlite3
 import time
@@ -347,6 +348,20 @@ class Control:
                 "WHERE connection_id=? AND owner_id=?",
                 (bank, generation, lower, stamp, received, received, connection, owner_id),
             )
+            # Keep a monotonic tombstone so an old page selection cannot return.
+            key = "background:" + sha256(canonical([connection, owner_id]))
+            previous = self.setting(key)
+            if previous:
+                try:
+                    revision = json.loads(previous)["revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError):
+                    raise QueueError("background_settings_invalid") from None
+                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
+                    "format": 1, "revision": revision + 1, "enabled": False,
+                    "page_id": "", "mental_model_id": "",
+                }), key))
             self.bump()
         return self.db.execute(
             "SELECT * FROM erasures WHERE forget_id=?", (fid,)

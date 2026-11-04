@@ -1,6 +1,8 @@
 """Small adapter for the Hindsight 1.1 public HTTP API."""
 
 import asyncio
+import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,6 +18,13 @@ STATUSES = {"pending", "processing", "completed", "failed", "cancelled", "not_fo
 EXPORT_FORMAT = "astrbot-hindsight-memory-export"
 EXPORT_VERSION = 1
 FACT_TYPES = {"world", "experience", "observation"}
+BACKGROUND_MAX_BYTES = 256 * 1024
+
+
+def native_page_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", value):
+        raise HindsightError("invalid_background_id", permanent=True)
+    return value
 
 
 def _identifier(value, *, document=False):
@@ -266,6 +275,121 @@ class HindsightClient:
         if key is None and time.monotonic() < self.auth_until:
             self.connection_result(True)
         return value
+
+    async def read_bounded(self, path, *, max_bytes=BACKGROUND_MAX_BYTES):
+        """Bound decoded response bytes while streaming, not after buffering JSON."""
+        try:
+            async with self.http.stream(
+                "GET", self.url + path, headers={"Authorization": "Bearer " + self.api_key},
+            ) as response:
+                if not response.is_success:
+                    raise HindsightError(
+                        f"http_{response.status_code}",
+                        permanent=400 <= response.status_code < 500
+                        and response.status_code not in {408, 429},
+                        retry_after=retry_after(response.headers.get("Retry-After")),
+                    )
+                body = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    if len(body) + len(chunk) > max_bytes:
+                        raise HindsightError("background_response_too_large")
+                    body.extend(chunk)
+            value = json.loads(body)
+            if not isinstance(value, dict):
+                raise ValueError
+            return value
+        except (ValueError, RecursionError):
+            raise HindsightError("invalid_background_response") from None
+        except httpx.TimeoutException:
+            raise HindsightError("background_timeout") from None
+        except httpx.HTTPError:
+            raise HindsightError("connection_error") from None
+
+    async def _background_read(self, bank, suffix):
+        try:
+            return await self.read_bounded(self.bank_path(bank) + suffix)
+        except HindsightError as exc:
+            if exc.code != "http_404":
+                raise
+            try:
+                await self.read_bounded(self.bank_path(bank) + "/config")
+            except HindsightError as bank_error:
+                if bank_error.code == "http_404":
+                    raise HindsightError("bank_missing") from None
+                raise
+            raise HindsightError("background_missing") from None
+
+    async def knowledge_pages(self, bank):
+        value = await self._background_read(bank, "/knowledge-base/tree")
+        if not isinstance(value.get("roots"), list):
+            raise HindsightError("invalid_background_response")
+        stack = [(node, (), 1) for node in reversed(value["roots"])]
+        pages, seen, models = [], set(), set()
+        while stack:
+            node, parents, depth = stack.pop()
+            if len(seen) >= 500 or depth > 12:
+                raise HindsightError("background_index_too_large")
+            if not isinstance(node, dict):
+                raise HindsightError("invalid_background_response")
+            identity = native_page_id(node.get("id"))
+            name, kind, children = node.get("name"), node.get("kind"), node.get("children")
+            if (
+                identity in seen or not isinstance(name, str) or not name.strip() or len(name) > 1024
+                or not isinstance(kind, str) or kind not in {"folder", "page"} or not isinstance(children, list)
+                or (kind == "page" and children)
+                or (kind == "folder" and node.get("mental_model_id") is not None)
+                or (node.get("is_stale") is not None and type(node["is_stale"]) is not bool)
+            ):
+                raise HindsightError("invalid_background_response")
+            seen.add(identity)
+            if kind == "page":
+                model = native_page_id(node.get("mental_model_id"))
+                if model in models:
+                    raise HindsightError("invalid_background_response")
+                models.add(model)
+                pages.append({
+                    "page_id": identity, "mental_model_id": model,
+                    "name": name, "path": " / ".join((*parents, name)),
+                    "index_stale": node.get("is_stale"),
+                })
+            if len(stack) + len(seen) + len(children) > 500:
+                raise HindsightError("background_index_too_large")
+            stack.extend((child, (*parents, name), depth + 1) for child in reversed(children))
+        return pages
+
+    async def knowledge_page(self, bank, page_id):
+        value = await self._background_read(
+            bank, "/knowledge-base/pages/" + quote(native_page_id(page_id), safe=""),
+        )
+        if (
+            value.get("id") != page_id or not isinstance(value.get("name"), str)
+            or len(value["name"]) > 1024
+            or (value.get("body") is not None and not isinstance(value["body"], str))
+        ):
+            raise HindsightError("invalid_background_response")
+        return {"id": page_id, "name": value["name"], "body": value.get("body") or ""}
+
+    async def background_page(self, bank, model_id):
+        value = await self._background_read(
+            bank, "/mental-models/" + quote(native_page_id(model_id), safe="") + "?detail=content",
+        )
+        if (
+            value.get("id") != model_id or value.get("bank_id") != bank
+            or value.get("is_knowledge_page") is not True
+            or (value.get("content") is not None and not isinstance(value["content"], str))
+        ):
+            raise HindsightError("invalid_background_response")
+        result = {"id": model_id, "content": value.get("content") or "", "freshness": "unknown"}
+        for key in ("last_refreshed_at", "last_memory_seen_at", "last_refresh_failed_at"):
+            stamp = value.get(key)
+            if stamp is not None:
+                try:
+                    if not isinstance(stamp, str) or datetime.fromisoformat(stamp).tzinfo is None:
+                        raise ValueError
+                except ValueError:
+                    raise HindsightError("invalid_background_response") from None
+            result[key] = stamp
+        return result
 
     async def ensure_auth(self, force: bool = False, *, timeout: float | None = None) -> None:
         if not force and time.monotonic() < self.auth_until:

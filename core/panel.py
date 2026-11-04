@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .client import HindsightClient, HindsightError
+from .background import ReadGuard, reference, save_reference
 from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -50,6 +51,7 @@ class MemoryPanel:
             ("models/status", "GET", self.model_status),
             ("uninstall/prepare", "POST", self.prepare_uninstall),
             ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
+            ("scopes/<scope_id>/background", ["GET", "POST"], self.background),
         ]
         if hasattr(plugin.context, "register_web_api"):
             for route, method, handler in routes:
@@ -301,6 +303,26 @@ class MemoryPanel:
                 "bot_id": Scope(*json.loads(scope["identity_json"])).bot_id if scope.get("identity_json") else "",
                 "summary": summary,
             })
+            if queue and not scope.get("pending"):
+                try:
+                    selection = reference(queue, scope)
+                    result[-1]["background"] = {
+                        **selection, "scope_revision": scope["revision"],
+                    }
+                    state = getattr(plugin, "background_outcomes", {}).get(
+                        (queue.connection_id, scope["owner_id"]), {},
+                    )
+                    if (
+                        state.get("bank") == scope["bank"] and state.get("revision") == scope["revision"]
+                        and state.get("selection_revision") == selection["revision"]
+                        and not summary.get("maintenance") and not scope.get("historical")
+                    ):
+                        result[-1]["background"]["status"] = {
+                            "used": state["used"], "checked_at": state["checked_at"],
+                            "message": self.error_message(state["code"]) if state["code"] else "",
+                        }
+                except QueueError as exc:
+                    result[-1]["background"] = {"error": self.error_message(str(exc))}
         return result
 
     async def bot_id(self, platform):
@@ -795,6 +817,86 @@ class MemoryPanel:
         if not owner or owner["bank"] != scope["bank"] or owner["revision"] != scope["revision"]:
             raise PanelError("记忆范围已变化，请刷新后重试。")
         return scope
+
+    async def background(self, scope_id):
+        from astrbot.api.web import request
+
+        reading = request.method == "GET"
+        payload = dict(request.query) if reading else await self.body()
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            plugin = self.plugin
+            await plugin.prepare_sources()
+            scope = self.scope(scope_id)
+            source = Scope(*json.loads(scope["identity_json"]))
+            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
+                raise PanelError("请连接当前机器人并确认账号授权；历史范围不能选择或读取背景页。")
+            scope = self.scope(scope_id)
+            guard = ReadGuard.freeze(plugin, scope, manual=True)
+            revision = self.config_revision()
+            if not reading:
+                if payload.get("config_revision") != revision:
+                    raise QueueError("background_changed")
+                if (
+                    type(payload.get("scope_revision")) is not int
+                    or payload["scope_revision"] != scope["revision"]
+                    or payload.get("revision") != guard.selection["revision"]
+                    or type(payload.get("enabled")) is not bool
+                    or not isinstance(payload.get("page_id"), str)
+                    or set(payload) != {"page_id", "enabled", "revision", "scope_revision", "config_revision"}
+                ):
+                    raise QueueError("background_changed")
+            closing = not reading and not payload["enabled"] and payload["page_id"] in {
+                "", guard.selection["page_id"],
+            }
+            if not guard.valid(plugin, metadata=closing):
+                raise QueueError("scope_not_available")
+            page_id = "" if reading else payload["page_id"]
+            if not reading and payload["enabled"] and not page_id:
+                raise QueueError("background_missing")
+
+            async def recheck():
+                await plugin.prepare_sources()
+                if not guard.valid(plugin, metadata=closing) or self.config_revision() != revision:
+                    raise QueueError("background_changed")
+                if (
+                    await self.bot_id(source.platform_instance_id) != source.bot_id
+                    or not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
+                ):
+                    raise QueueError("background_changed")
+
+            pages = []
+            model_id = ""
+            if reading or (page_id and not closing):
+                await guard.client.ensure_auth()
+                await recheck()
+                pages = await guard.client.knowledge_pages(scope["bank"])
+                await recheck()
+            if page_id and closing:
+                model_id = guard.selection["mental_model_id"]
+            elif page_id:
+                selected = next((page for page in pages if page["page_id"] == page_id), None)
+                if not selected:
+                    raise QueueError("background_missing")
+                model_id = selected["mental_model_id"]
+                page = await guard.client.knowledge_page(scope["bank"], page_id)
+                await recheck()
+                model = await guard.client.background_page(scope["bank"], model_id)
+                if page["body"] != model["content"]:
+                    raise QueueError("background_changed")
+            await recheck()
+            if not reading:
+                selection = save_reference(
+                    guard.queue, scope, revision=payload["revision"], page_id=page_id,
+                    model_id=model_id, enabled=payload["enabled"],
+                )
+                return {"selection": selection, "message": "背景设置已保存。"}
+            return {
+                "pages": [{k: page[k] for k in ("page_id", "path", "index_stale")} for page in pages],
+                "selection": guard.selection, "scope_revision": scope["revision"],
+                "config_revision": revision,
+            }
 
     async def action(self, scope_id):
         from astrbot.api.web import request
