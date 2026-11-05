@@ -19,25 +19,25 @@
     "hint": "填写浏览器中打开 Hindsight 官方记忆面板的地址。远程服务器需先配置域名反向代理或 SSH 隧道；127.0.0.1 是你自己的电脑。"
   },
   "service_id": {
-    "description": "稳定服务标识",
+    "description": "记忆服务识别码",
     "type": "string",
     "default": "",
-    "hint": "由设置页面自动生成，用于识别同一套记忆服务。手工迁移时按数据维护指南操作。"
+    "hint": "由设置页面自动生成，用于识别同一套记忆服务。手工迁移时按备份与恢复指南操作。"
   },
   "service_address_revision": {
-    "description": "服务地址版本",
+    "description": "服务地址变更序号",
     "type": "int",
     "default": 1,
-    "hint": "同一服务搬迁地址时递增此值，步骤见数据维护指南。新安装保持默认。"
+    "hint": "同一服务搬迁地址时递增此值，步骤见备份与恢复指南。新安装保持默认。"
   },
   "control_state_dir": {
-    "description": "独立控制目录",
+    "description": "身份与删除记录存放目录",
     "type": "string",
     "default": "",
     "hint": "留空时在 AstrBot 数据目录下创建 astrbot_plugin_hindsight_bridge_control。恢复备份时须保留此目录中的最新数据，以免重新上传已删除的记忆。"
   },
   "agent_id": {
-    "description": "稳定 Agent 标识",
+    "description": "记忆归属识别码（Agent ID）",
     "type": "string",
     "default": "default",
     "hint": "用于区分记忆归属，默认 default。修改后会影响记忆库对应关系；修改机器人显示名称无需改此项。"
@@ -68,16 +68,16 @@
     }
   },
   "recall_timeout": {
-    "description": "召回总超时（秒）",
+    "description": "记忆检索最长等待时间（秒）",
     "type": "float",
     "default": 10,
-    "hint": "查找记忆的最长等待时间，默认 10 秒，可设为 0.2 到 30 秒。服务冷启动较慢时可适当增加；超时后继续聊天。"
+    "hint": "查找记忆的最长等待时间，默认 10 秒，可设为 0.2 到 30 秒。超时后不使用该次检索结果，聊天继续；新聊天的保存独立进行。"
   },
   "recall_max_tokens": {
-    "description": "召回结果长度（token）",
+    "description": "检索记忆长度上限（token）",
     "type": "int",
     "default": 1200,
-    "hint": "每轮记忆参考的 token 预算，背景页与普通检索共用。默认 1200，范围 256 到 1200。"
+    "hint": "每轮记忆参考的 token 预算，知识页（Knowledge Page）与记忆召回（Recall）共用。默认 1200，范围 256 到 1200。"
   },
   "recall_query_tokens": {
     "description": "查询 token 上限",
@@ -89,7 +89,7 @@
     "description": "查询分词编码",
     "type": "string",
     "default": "o200k_base",
-    "hint": "用于计算查询与记忆参考的 token 数。与 Hindsight 配置不同时，由维护者调整。"
+    "hint": "用于计算查询与记忆参考的 token 数。与 Hindsight 配置不同时，由管理员调整。"
   },
   "queue_max_tasks": {
     "description": "待保存记录数量上限",
@@ -113,6 +113,6 @@
     "description": "提供给聊天模型的记忆字符上限",
     "type": "int",
     "default": 4000,
-    "hint": "每轮提供给聊天模型的记忆字符上限，背景页与普通检索共用。默认 4000，范围 256 到 4000。"
+    "hint": "每轮提供给聊天模型的记忆字符上限，知识页（Knowledge Page）与记忆召回（Recall）共用。默认 4000，范围 256 到 4000。"
   }
 }

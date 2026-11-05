@@ -78,6 +78,31 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         event.message_obj.raw_message["time"] = None
         self.assertIsNone(self.plugin.command_scope(event))
 
+    async def test_native_forget_waits_for_upgrade_including_an_earlier_confirmation(self):
+        panel = self.plugin.panel
+        panel.directory = lambda: self.root / "setup"
+        scope = dict(self.plugin.outbox.scope(self.incoming))
+        awaitable = self.plugin.memory_forget(self.event("/hindsight forget", mid="forget-prepare"))
+        replies = [text async for text in awaitable]
+        self.assertIn("120 秒", str(replies))
+        token = self.plugin.confirmations[scope["owner_id"]]["token"]
+        panel.store_state({"upgrade_check": {"connection_id": self.plugin.outbox.connection_id, "verified": False}})
+        for index, confirmation in enumerate(("", token)):
+            replies = [text async for text in self.plugin.memory_forget(
+                self.event(
+                    "/hindsight forget" + (" " + confirmation if confirmation else ""),
+                    mid="forget-blocked-" + str(index), timestamp=102 + index,
+                ), confirmation,
+            )]
+            self.assertIn("服务升级期间", str(replies))
+            self.assertEqual(self.plugin.outbox.scope(self.incoming)["bank"], scope["bank"])
+        panel.store_state({"upgrade_check": {"connection_id": self.plugin.outbox.connection_id, "verified": True}})
+        replies = [text async for text in self.plugin.memory_forget(
+            self.event("/hindsight forget " + token, mid="forget-confirm", timestamp=104), token,
+        )]
+        self.assertIn("正在清空", str(replies))
+        self.assertNotEqual(self.plugin.outbox.scope(self.incoming)["bank"], scope["bank"])
+
     async def test_first_observation_of_old_event_after_bot_switch_is_rejected(self):
         old = self.event()
         self.bot.get_login_info.return_value = {"user_id": 1002}

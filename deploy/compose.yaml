@@ -21,9 +21,10 @@ services:
     networks: [backend]
 
   hindsight:
-    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0-slim}
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.2.0-slim}
     restart: unless-stopped
     init: true
+    stop_grace_period: 90s
     depends_on:
       db:
         condition: service_healthy

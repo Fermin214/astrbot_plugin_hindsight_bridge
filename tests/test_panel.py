@@ -260,7 +260,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.config["service_id"] = ""
         snapshot = await self.panel.bootstrap()
         self.assertEqual(snapshot["config"]["missing_fields"], ["service_id"])
-        self.assertIn("稳定服务标识", snapshot["status"]["label"])
+        self.assertIn("记忆服务识别码", snapshot["status"]["label"])
         self.panel.has_identity_data = lambda: True
         before = copy.deepcopy(self.config)
         with self.assertRaisesRegex(module.PanelError, "恢复原插件配置"):
@@ -491,7 +491,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.panel.store_state(state)
         self.panel.managed_request = AsyncMock(return_value={"configured": False, "ready": False})
         before = copy.deepcopy(self.config)
-        with self.assertRaisesRegex(module.PanelError, "先在设置中选择模型"):
+        with self.assertRaisesRegex(module.PanelError, "验证并保存模型"):
             await self.save(api_url=state["api_url"])
         self.assertEqual(self.config, before)
         self.profile.save_config.assert_not_called()
@@ -633,7 +633,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         _, queue, maintenance = self.management_resources()
         for summary in ({"maintenance": {"phase": "ready"}}, {"bank_missing": True}):
             queue.summary.return_value = summary
-            with self.subTest(summary=summary), self.assertRaisesRegex(module.PanelError, "维护"):
+            with self.subTest(summary=summary), self.assertRaisesRegex(module.PanelError, "恢复原记忆模式"):
                 await self.action("mode", mode="active")
         queue.set_mode.assert_not_called()
         maintenance.check.assert_not_awaited()

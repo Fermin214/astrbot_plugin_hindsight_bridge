@@ -18,6 +18,8 @@ from model_transport import TransportServer
 
 
 MAX_BODY = 256 * 1024
+# The upstream supervisor allows 60s to drain workers; Compose outlasts this wait.
+STOP_TIMEOUT = 75
 OPENER = build_opener(ProxyHandler({}))
 
 
@@ -119,7 +121,7 @@ class Runtime:
                 except ProcessLookupError:
                     pass
                 try:
-                    self.process.wait(timeout=40)
+                    self.process.wait(timeout=STOP_TIMEOUT)
                 except subprocess.TimeoutExpired:
                     os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(timeout=5)

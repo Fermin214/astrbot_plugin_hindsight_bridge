@@ -123,13 +123,7 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
 .status-dot.bad { background: var(--danger); }
 .badge { display: inline-block; border-radius: 5px; padding: 3px 9px; font-size: 12px; background: var(--tint); color: var(--accent); }
 .service-state > .badge { margin-left: auto; white-space: nowrap; }
-.scope-statuses { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.scope-status { padding: 17px 20px; border-bottom: 1px solid var(--line); }
-.scope-status:last-child { border-bottom: 0; }
-.scope-status-header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.scope-status-header strong { min-width: 0; overflow-wrap: anywhere; }
-.scope-status-header button { margin-left: auto; }
-.scope-status .error-text { color: var(--danger); }
+.user-progress { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
 .memory-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; }
 .scope-picker { flex: 1 1 250px; }
 .memory-toolbar > label:not(.scope-picker) { flex: 1 1 150px; }
@@ -166,7 +160,6 @@ fieldset > .section-heading:first-of-type { margin-top: 0; }
   .service-state { flex-wrap: wrap; }
   .service-state > div { flex: 1; }
   .service-state > .badge { margin-left: 26px; }
-  .scope-status-header button { margin-left: 0; }
   .feedback { bottom: 8px; width: 100%; }
 }
 .control-plane-setting { margin-top: 16px; }

@@ -18,7 +18,7 @@ def settings(db):
     return dict(db.execute("SELECT key,value FROM settings"))
 
 
-def backup(data_dir, control_dir, output, latest_control=None, backend_version="1.1.0"):
+def backup(data_dir, control_dir, output, latest_control=None, backend_version=None):
     data_dir, control_dir, output = (
         Path(p).resolve() for p in (data_dir, control_dir, output)
     )
@@ -83,7 +83,7 @@ def main():
     parser.add_argument("--control-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--latest-control", type=Path)
-    parser.add_argument("--backend-version", default="1.1.0")
+    parser.add_argument("--backend-version", help="actual Hindsight version; omitted records null (unknown)")
     args = parser.parse_args()
     manifest = backup(
         args.data_dir,

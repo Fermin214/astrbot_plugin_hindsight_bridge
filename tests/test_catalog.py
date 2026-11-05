@@ -276,14 +276,29 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         page["items"][0]["text"] = "长文本\n" * 10000
         rendered = render_page(page, offset=20)
         self.assertLessEqual(len(rendered), 3500)
-        for text in ("记忆ID：m1", "事实", "经历", TIME, "session/1", "下一起始位置"):
+        for text in ("记忆 ID：m1", "世界事实（World Facts）", "经历（Experience）", TIME, "session/1", "下一起始位置"):
             self.assertIn(text, rendered)
         detail = await self.client.get_memory(BANK, "m3")
         detail["context"] = "语境" * 10000
         rendered = render_memory(detail)
         self.assertLessEqual(len(rendered), 6000)
-        for text in ("整合观察", "来源记忆：m1", TIME):
+        for text in ("观察（Observations）", "源记忆：m1", TIME):
             self.assertIn(text, rendered)
+
+    async def test_readonly_times_keep_their_native_field_meaning(self):
+        for field, label in (
+            ("occurred_start", "发生时间"), ("mentioned_at", "提及时间"),
+            ("date", "日期（date）"), ("created_at", "创建时间"),
+        ):
+            row = {"id": "m1", "type": "world", "text": "fact", field: TIME}
+            with self.subTest(field=field):
+                page = render_page({"items": [row], "total": 1})
+                self.assertIn(f"{label}：{TIME}", page)
+                detail = render_memory(row)
+                self.assertIn(f"{label}：{TIME}", detail)
+                if field != "occurred_start":
+                    self.assertNotIn(f"发生时间：{TIME}", page)
+                    self.assertNotIn(f"发生时间：{TIME}", detail)
 
     async def test_serializer_rejects_incomplete_and_foreign_payloads(self):
         payload = await self.client.export_memories(BANK)

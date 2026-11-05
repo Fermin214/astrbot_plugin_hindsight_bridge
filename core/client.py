@@ -1,4 +1,4 @@
-"""Small adapter for the Hindsight 1.1 public HTTP API."""
+"""Small adapter for the Hindsight 1.1/1.2 public HTTP API."""
 
 import asyncio
 import json
@@ -169,6 +169,28 @@ class Operation:
     id: str
     status: str
     children: tuple[tuple[str, str], ...] = ()
+    kind: str | None = None
+    completed_at: str | None = None
+
+
+def _operation_metadata(value):
+    for field in ("operation_type", "task_type"):
+        if value.get(field) is not None and (not isinstance(value[field], str) or not value[field]):
+            raise HindsightError("invalid_operation_type")
+    kind = value.get("operation_type") or value.get("task_type")
+    if (
+        value.get("operation_type") and value.get("task_type")
+        and value["operation_type"] != value["task_type"]
+    ):
+        raise HindsightError("inconsistent_operation_type")
+    completed_at = value.get("completed_at")
+    if completed_at is not None:
+        try:
+            if not isinstance(completed_at, str) or datetime.fromisoformat(completed_at).tzinfo is None:
+                raise ValueError
+        except ValueError:
+            raise HindsightError("invalid_operation_completion") from None
+    return kind, completed_at
 
 
 def retry_after(value: str | None) -> float:
@@ -495,7 +517,11 @@ class HindsightClient:
             if exc.code == "http_404":
                 return Operation(operation_id, "not_found")
             raise
-        if result.get("operation_id") != operation_id:
+        if (
+            result.get("operation_id") != operation_id
+            or (result.get("id") is not None and result["id"] != operation_id)
+            or result.get("bank_id", bank) != bank
+        ):
             raise HindsightError("invalid_operation_response")
         status = result.get("status")
         if not isinstance(status, str) or status not in STATUSES:
@@ -516,7 +542,8 @@ class HindsightClient:
             ):
                 raise HindsightError("invalid_operation_children")
             children.append((child["operation_id"], child["status"]))
-        return Operation(operation_id, status, tuple(children))
+        kind, completed_at = _operation_metadata(result)
+        return Operation(operation_id, status, tuple(children), kind, completed_at)
 
     async def retry(self, bank: str, operation_id: str, *, before_send=None) -> None:
         await self.ensure_auth()
@@ -610,7 +637,10 @@ class HindsightClient:
                     and row["operation_id"] != row["id"]
                 ):
                     raise HindsightError("inconsistent_operation_identity")
-                operations[oid] = Operation(oid, row["status"])
+                if row.get("bank_id", bank) != bank:
+                    raise HindsightError("inconsistent_operation_bank")
+                kind, completed_at = _operation_metadata(row)
+                operations[oid] = Operation(oid, row["status"], kind=kind, completed_at=completed_at)
             offset += len(rows)
             if offset >= total:
                 return list(operations.values())

@@ -54,13 +54,17 @@ jobs:
   hindsight-model-contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      matrix:
+        hindsight: ["1.1.0", "1.2.0"]
     steps:
       - uses: actions/checkout@v4
       - name: Pinned Hindsight model SDK contracts against local fixtures
         run: |
           docker run --rm --name hindsight-bridge-delivery-models \
             --label hindsight-bridge.test=delivery --network none --memory 1536m \
+            -e HINDSIGHT_TEST_VERSION=${{ matrix.hindsight }} \
             -v "${{ github.workspace }}:/verify/plugins/astrbot_plugin_hindsight_bridge:ro" \
             -w /verify/plugins/astrbot_plugin_hindsight_bridge \
-            ghcr.io/vectorize-io/hindsight:1.1.0-slim \
+            ghcr.io/vectorize-io/hindsight:${{ matrix.hindsight }}-slim \
             python tools/check-model-protocols.py

@@ -23,12 +23,23 @@ from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 class MaintenanceService(MemoryService):
     fail_config_once = False
+    fail_operation = None
 
     async def __call__(self, request):
         if request.url.path.endswith("/config") and self.fail_config_once:
             self.fail_config_once = False
             return httpx.Response(503, json={})
-        return await super().__call__(request)
+        if request.method == "GET" and request.url.path.endswith("/operations/" + str(self.fail_operation)):
+            return httpx.Response(503, json={})
+        response = await super().__call__(request)
+        if request.url.path.endswith("/operations") and response.status_code == 200:
+            value = response.json()
+            for operation in value["operations"]:
+                # The actual list omits completion timestamps and internal metadata.
+                operation.pop("completed_at", None)
+                operation.pop("result_metadata", None)
+            return httpx.Response(200, json=value)
+        return response
 
 
 class BankMaintenance(unittest.IsolatedAsyncioTestCase):
@@ -189,6 +200,64 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         )["dispatched"])
         self.assertFalse((await self.worker.maintenance.status(pending.scope_id))["ready"])
         self.assertEqual(len(self.service.submissions), 1)
+
+    async def test_finished_cancelled_consolidation_allows_maintenance_after_replacement_finishes(self):
+        captured = await self.seed()
+        for identity, status in (("superseded", "cancelled"), ("replacement", "processing")):
+            self.service.op_banks[identity] = captured.bank
+            self.service.operations[identity] = {
+                "operation_id": identity, "operation_type": "consolidation", "status": status,
+                "completed_at": "2026-11-04T12:00:00Z" if identity == "superseded" else None,
+            }
+        self.worker.maintenance.begin(captured.scope_id)
+        state = await self.worker.maintenance.status(captured.scope_id)
+        self.assertFalse(state["ready"])
+        self.assertEqual(state["remote_active"], 1)
+        self.service.operations["replacement"]["status"] = "completed"
+        self.assertTrue((await self.worker.maintenance.status(captured.scope_id))["ready"])
+        await self.worker.maintenance.resume(captured.scope_id)
+        self.assertIsNone(self.queue.control.maintenance("test", captured.bank))
+
+    async def test_unfinished_or_ordinary_cancellation_still_blocks_maintenance(self):
+        captured = await self.seed()
+        self.service.op_banks["cancelled"] = captured.bank
+        self.worker.maintenance.begin(captured.scope_id)
+        for kind, stamp, children in (
+            ("consolidation", None, []),
+            ("retain", "2026-11-04T12:00:00Z", []),
+            (None, "2026-11-04T12:00:00Z", []),
+            ("consolidation", "2026-11-04T12:00:00Z", [
+                {"operation_id": "child", "status": "processing"},
+            ]),
+        ):
+            with self.subTest(kind=kind, stamp=stamp, children=children):
+                self.service.operations["cancelled"] = {
+                    "operation_id": "cancelled", "operation_type": kind,
+                    "status": "cancelled", "completed_at": stamp, "child_operations": children,
+                }
+                self.assertFalse((await self.worker.maintenance.status(captured.scope_id))["ready"])
+                with self.assertRaisesRegex(QueueError, "maintenance_pending"):
+                    await self.worker.maintenance.resume(captured.scope_id)
+
+    async def test_cancelled_consolidation_detail_errors_cannot_release_maintenance(self):
+        captured = await self.seed()
+        self.service.op_banks["cancelled"] = captured.bank
+        self.worker.maintenance.begin(captured.scope_id)
+        original = {"operation_id": "cancelled", "operation_type": "consolidation",
+                    "status": "cancelled", "completed_at": "2026-11-04T12:00:00Z"}
+        for delta in (
+            {"completed_at": "invalid"}, {"completed_at": "2026-11-04T12:00:00"},
+            {"completed_at": True}, {"id": "foreign"}, {"bank_id": "foreign"},
+            {"operation_type": "consolidation", "task_type": "retain"},
+        ):
+            with self.subTest(delta=delta), self.assertRaises(HindsightError):
+                self.service.operations["cancelled"] = {**original, **delta}
+                await self.worker.maintenance.status(captured.scope_id)
+        self.service.operations["cancelled"] = original
+        self.service.fail_operation = "cancelled"
+        with self.assertRaises(HindsightError):
+            await self.worker.maintenance.resume(captured.scope_id)
+        self.assertIsNotNone(self.queue.control.maintenance("test", captured.bank))
 
     async def test_first_creation_read_failure_keeps_new_bank_retryable(self):
         pending = self.enqueue()

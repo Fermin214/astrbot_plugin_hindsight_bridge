@@ -289,6 +289,37 @@ class ContextComposition(unittest.TestCase):
         self.assertLessEqual(token_count(block), 1200)
         self.assertIn("A complete fact. " * 30, block)
 
+    def test_native_name_keeps_existing_short_pages_within_the_same_budget(self):
+        for tokens, content in (
+            (256, "好"), (300, "项目目标：确保账号隔离；失败后能够重试。"),
+        ):
+            page = native_model(content=content)
+            page["id"] = "8a5563b4-597d-47fb-ae31-65a20d613daa"
+            with self.subTest(tokens=tokens):
+                block, code, _, used = compose_background(
+                    page, [{"text": "full fact"}], tokens=tokens, chars=4000,
+                    tokenizer="o200k_base",
+                )
+                self.assertTrue(used)
+                self.assertEqual(code, "")
+                self.assertIn(content, block)
+                self.assertIn("full fact", block)
+                self.assertLessEqual(token_count(block), tokens)
+
+    def test_page_failure_keeps_whole_recall_at_character_limit(self):
+        for chars, length in ((256, 172), (4000, 3916)):
+            text = "a" * length
+            with self.subTest(chars=chars):
+                block, _, facts_used, page_used = compose_background(
+                    None, [{"text": text}], tokens=1200, chars=chars,
+                    tokenizer="o200k_base", page_code="background_timeout",
+                )
+                self.assertTrue(facts_used)
+                self.assertFalse(page_used)
+                self.assertIn(text, block)
+                self.assertLessEqual(len(block), chars)
+                self.assertLessEqual(token_count(block), 1200)
+
     def test_large_page_is_skipped_without_clipping_or_summarization(self):
         page = native_model(content="unique-native-page " * 1000)
         block, code = self.compose(page, [{"id": "fact", "text": "full fact"}])

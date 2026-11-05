@@ -12,7 +12,7 @@ from .client import (
     _memory_record,
 )
 
-_TYPES = {"world": "事实", "experience": "经历", "observation": "整合观察"}
+_TYPES = {"world": "世界事实（World Facts）", "experience": "经历（Experience）", "observation": "观察（Observations）"}
 _PAGE_LIMIT = 3500
 _DETAIL_LIMIT = 6000
 
@@ -27,13 +27,15 @@ def _text(value, limit):
 
 
 def _time(record):
-    return (
-        record.get("occurred_start")
-        or record.get("mentioned_at")
-        or record.get("date")
-        or record.get("created_at")
-        or "未知"
-    )
+    for field, label in (
+        ("occurred_start", "发生时间"),
+        ("mentioned_at", "提及时间"),
+        ("date", "日期（date）"),
+        ("created_at", "创建时间"),
+    ):
+        if record.get(field):
+            return label, record[field]
+    return "时间", "未知"
 
 
 def render_page(page, offset=0) -> str:
@@ -54,11 +56,13 @@ def render_page(page, offset=0) -> str:
     for row in rows:
         if not isinstance(row, dict):
             raise HindsightError("invalid_catalog_page")
+        time_label, timestamp = _time(row)
+        document = row.get("document_id")
         prefix = (
-            f"\n{offset + shown + 1}. 记忆ID：{_text(row.get('id', ''), 80)}"
+            f"\n{offset + shown + 1}. 记忆 ID：{_text(row.get('id', ''), 80)}"
             f"\n类型：{_TYPES.get(row.get('type') or row.get('fact_type'), '未知')}"
-            f"；时间：{_text(_time(row), 32)}"
-            f"\n来源：{_text(row.get('document_id') or '整合来源见详情', 72)}"
+            f"；{time_label}：{_text(timestamp, 32)}"
+            + (f"\n文档 ID：{_text(document, 72)}" if document else "\n源记忆见详情")
         )
         preview_limit = max(
             12, min(240, (_PAGE_LIMIT - 240) // max(1, len(rows)) - len(prefix) - 1)
@@ -84,15 +88,18 @@ def render_memory(record) -> str:
     if not isinstance(sources, list) or any(not isinstance(s, str) for s in sources):
         raise HindsightError("invalid_catalog_memory")
     lines = [
-        f"记忆ID：{_text(record.get('id', ''), 200)}",
+        f"记忆 ID：{_text(record.get('id', ''), 200)}",
         f"类型：{_TYPES.get(record.get('type') or record.get('fact_type'), '未知')}",
-        f"时间：{_text(_time(record), 100)}",
+        f"发生时间：{_text(record.get('occurred_start') or '未知', 100)}",
         f"结束时间：{_text(record.get('occurred_end') or '未知', 100)}",
         f"提及时间：{_text(record.get('mentioned_at') or '未知', 100)}",
-        f"来源文档：{_text(record.get('document_id') or '无直接来源文档', 240)}",
-        f"来源记忆：{_text('、'.join(sources) or '无', 700)}",
-        f"内容：{_text(record.get('text', ''), 3000)}",
-        f"语境：{_text(record.get('context') or '无', 900)}",
+        f"日期（date）：{_text(record.get('date') or '未知', 100)}",
+        f"创建时间：{_text(record.get('created_at') or '未知', 100)}",
+        f"文档 ID：{_text(record.get('document_id') or '无直接来源文档', 240)}",
+        f"源记忆：{_text('、'.join(sources) or '无', 700)}",
+        f"{'文本' if (record.get('type') or record.get('fact_type')) == 'observation' else '记忆文本'}："
+        f"{_text(record.get('text', ''), 3000)}",
+        f"上下文：{_text(record.get('context') or '无', 900)}",
     ]
     return "\n".join(lines)[:_DETAIL_LIMIT]
 

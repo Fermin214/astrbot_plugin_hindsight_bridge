@@ -74,18 +74,34 @@ class LiveHarnessTests(unittest.TestCase):
             self.assertFalse((Path(directory) / "chat-trace.jsonl").exists())
 
     def test_actual_extraction_can_use_json_schema_or_json_object(self):
+        item = {"properties": {"what": {"type": "string"}, "fact_type": {"type": "string"}}}
         self.assertTrue(harness.extraction_response({"response_format": {
-            "type": "json_schema", "json_schema": {"schema": {"properties": {"facts": {}}}},
+            "type": "json_schema", "json_schema": {"schema": {"properties": {"facts": {"items": item}}}},
         }}, b"{}"))
-        response = json.dumps({"choices": [{"message": {"content": '{"facts": []}'}}]}).encode()
+        self.assertTrue(harness.extraction_response({"response_format": {
+            "type": "json_schema", "json_schema": {"schema": {
+                "$defs": {"ExtractedFact": item}, "properties": {"facts": {"items": {"$ref": "#/$defs/ExtractedFact"}}},
+            }},
+        }}, b"{}"))
+        response = json.dumps({"choices": [{"message": {"content": '{"facts": [{"what": "fixture", "fact_type": "world"}]}'}}]}).encode()
         self.assertTrue(harness.extraction_response({"response_format": {"type": "json_object"}}, response))
 
     def test_fault_gate_does_not_hold_chat_consolidation_or_invalid_responses(self):
-        for content in ('{"creates": [], "updates": [], "deletes": []}', "invalid", "[]"):
+        for content in ('{"creates": [], "updates": [], "deletes": []}', "invalid", "[]", '{"facts": []}',
+                        '{"facts": [{"fact_id": "F1", "about": "fixture", "kind": "lasting", "adds": true}]}'):
             response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
             self.assertFalse(harness.extraction_response({"response_format": {"type": "json_object"}}, response))
         self.assertFalse(harness.extraction_response({}, b"{}"))
         self.assertFalse(harness.extraction_response({"response_format": {"type": "json_object"}}, b"{}"))
+
+    def test_1_2_consolidation_schema_does_not_trigger_extraction_fault(self):
+        for item in ({}, {"$ref": "#/$defs/Fact"}, None):
+            schema = {"properties": {"facts": {"items": item}}, "$defs": {
+                "Fact": {"properties": {"fact_id": {}, "kind": {}, "adds": {}}},
+            }}
+            self.assertFalse(harness.extraction_response({"response_format": {
+                "type": "json_schema", "json_schema": {"schema": schema},
+            }}, b"{}"))
 
     def test_onebot_message_identity_remains_unique_after_socket_reconnect(self):
         path = Path(__file__).parent / "integration/live_e2e.py"

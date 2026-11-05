@@ -63,3 +63,28 @@ class ConfigurationTests(unittest.TestCase):
             with patch.object(runtime, "stop") as stop, self.assertRaisesRegex(service.ConfigurationError, "需要迁移"):
                 runtime.apply(self.environment)
             stop.assert_not_called()
+
+    def test_shutdown_outlasts_upstream_drain_before_forced_kill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = service.Runtime(directory, "service-key", "012345abcdef")
+            process = runtime.process = Mock(pid=12345)
+            process.poll.return_value = None
+            with patch.object(service.os, "killpg") as kill:
+                runtime.stop()
+            kill.assert_called_once_with(12345, service.signal.SIGTERM)
+            process.wait.assert_called_once_with(timeout=service.STOP_TIMEOUT)
+            self.assertGreater(service.STOP_TIMEOUT, 60)
+            self.assertIsNone(runtime.process)
+
+    def test_shutdown_kills_only_its_process_group_after_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = service.Runtime(directory, "service-key", "012345abcdef")
+            process = runtime.process = Mock(pid=12345)
+            process.poll.return_value = None
+            process.wait.side_effect = [subprocess.TimeoutExpired("supervisor", service.STOP_TIMEOUT), None]
+            with patch.object(service.os, "killpg") as kill:
+                runtime.stop()
+            self.assertEqual([call.args for call in kill.call_args_list], [
+                (12345, service.signal.SIGTERM), (12345, service.signal.SIGKILL),
+            ])
+            self.assertIsNone(runtime.process)

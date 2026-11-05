@@ -1,4 +1,4 @@
-"""Run local protocol fixtures with the pinned Hindsight 1.1.0 SDKs."""
+"""Run local protocol fixtures with a pinned Hindsight 1.1.0 or 1.2.0 runtime."""
 
 import asyncio
 from contextlib import contextmanager
@@ -124,10 +124,16 @@ def running(server):
 
 
 async def main():
+    from hindsight_api import __version__
     from hindsight_api.config import clear_config_cache
     from hindsight_api.engine.cross_encoder import create_cross_encoder_from_env
     from hindsight_api.engine.embeddings import create_embeddings_from_env
     from hindsight_api.engine.llm_wrapper import LLMProvider
+    from hindsight_api.engine.llm_interface import LLMToolChoice
+
+    assert __version__ in {"1.1.0", "1.2.0"}
+    if os.environ.get("HINDSIGHT_TEST_VERSION"):
+        assert __version__ == os.environ["HINDSIGHT_TEST_VERSION"]
 
     fixture = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     fixture.requests = []
@@ -171,6 +177,16 @@ async def main():
                 result = await llm.call([{"role": "user", "content": "probe"}], response_format=Probe,
                                         max_completion_tokens=64, max_retries=0)
                 assert result is not None
+                if __version__ == "1.2.0":
+                    result = await llm.call_with_tools(
+                        messages=[{"role": "user", "content": "probe"}],
+                        tools=[{"type": "function", "function": {
+                            "name": "probe", "description": "Check the connection.",
+                            "parameters": Probe.model_json_schema(),
+                        }}], tool_choice=LLMToolChoice.named("probe"), max_completion_tokens=64, max_retries=0,
+                    )
+                    assert len(result.tool_calls) == 1
+                    assert result.tool_calls[0].name == "probe" and result.tool_calls[0].arguments == {"ok": True}
             finally:
                 await llm.cleanup()
             if options.get("api_version"):
@@ -206,7 +222,8 @@ async def main():
             scores = await reranker.predict([("query", "one"), ("query", "two")])
             assert abs(scores[0] - 0.9) < 1e-6 and abs(scores[1] - 0.7) < 1e-6
             checked.append(adapter)
-        print(json.dumps({"sdk_protocols_passed": checked, "requests": len(fixture.requests)}))
+        print(json.dumps({"hindsight": __version__, "sdk_protocols_passed": checked,
+                          "schema_tool_calls_checked": __version__ == "1.2.0", "requests": len(fixture.requests)}))
 
 
 if __name__ == "__main__":

@@ -90,6 +90,8 @@ async def main():
             metadata.config.save_config()
             assert (await manager.reload(NAME))[0]
             plugin = context.get_registered_star(NAME).star_cls
+            native_version = (await plugin.client.request("GET", "/v1/version"))["api_version"]
+            assert native_version == os.environ["HINDSIGHT_TEST_VERSION"]
             async with asyncio.timeout(30):
                 while plugin.outbox.recovering:
                     await asyncio.sleep(0.1)
@@ -209,7 +211,7 @@ async def main():
         if plugin:
             await plugin.terminate()
         await db_helper.engine.dispose()
-    report = {"astrbot": VERSION, "hindsight": "1.1.0", "candidate_sha256": candidate_sha256, "passed": checks,
+    report = {"astrbot": VERSION, "hindsight": native_version, "candidate_sha256": candidate_sha256, "passed": checks,
               "platform_peer": "synthetic actual OneBot SDK objects, no real QQ login",
               "model_peer": "synthetic OpenAI-compatible fixture, not a production model", "complete": True}
     Path("/delivery/background-native-host-report-" + VERSION + ".json").write_text(json.dumps(report, indent=2))

@@ -36,7 +36,7 @@ from .core.identity import Incoming, sha256
 from .core.materials import TokenizerError, load_encoding, memory_block, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
-from .core.panel import MemoryPanel
+from .core.panel import MemoryPanel, PanelError
 from .core.qq_source import native_login
 from .core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
 from .core.worker import Worker
@@ -75,16 +75,16 @@ class HindsightBridge(Star):
             "server_auth_not_enforced": "后端未启用认证，请配置服务 API Key",
             "connection_error": "无法连接记忆服务，请检查 API 地址、网络和容器服务名",
             "connect_timeout": "连接记忆服务超时，请检查 API 地址、网络和服务状态",
-            "read_timeout": "等待记忆服务响应超时，可增加召回等待时间并检查服务负载",
+            "read_timeout": "等待记忆服务响应超时，请检查服务负载；记忆检索超时可增加「记忆检索最长等待时间」",
             "write_timeout": "向记忆服务发送请求超时，请检查网络连接",
             "pool_timeout": "等待可用连接超时，请检查服务负载后重试",
             "auth_timeout": "连接认证检查超时，请检查服务状态后重试",
             "history_timeout": "读取会话信息超时，请检查 AstrBot 会话服务",
             "conversation_not_available": "无法取得当前会话，请检查 AstrBot 会话状态",
-            "invalid_recall_timeout": "召回超时须设为 0.2 到 30 秒，请修改插件配置",
+            "invalid_recall_timeout": "记忆检索最长等待时间须设为 0.2 到 30 秒，请修改插件配置",
             "recall_content_unavailable": "检索结果无法放入当前记忆长度限制，请检查记忆内容与字符上限",
             "timeout": "记忆服务响应超时",
-            "recall_timeout": "查找记忆超时，可增加召回等待时间或检查服务负载",
+            "recall_timeout": "查找记忆超时，可增加「记忆检索最长等待时间」或检查服务负载",
             "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
             "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
@@ -92,11 +92,11 @@ class HindsightBridge(Star):
             "payload_digest_conflict": "待保存内容校验失败，请管理员检查插件本地数据库",
             "scope_not_active": "请先用 /hindsight on 开启记忆",
             "scope_not_available": "这个用户的记忆正在恢复或设置已变化，请稍后重试",
-            "bank_missing": "找不到原记忆库，记忆功能已暂停；请管理员恢复原库并结束维护，或清空旧记忆后重新开始",
-            "maintenance_active": "正在维护，新记录和记忆查询已暂停；请管理员在插件页查看进度，完成操作后结束维护",
+            "bank_missing": "找不到原记忆库，记忆功能已暂停；请管理员恢复原库并恢复原记忆模式，或清空旧记忆后重新开始",
+            "maintenance_active": "新记录和记忆查询已暂停；请管理员在插件页查看进度，完成操作后点击「恢复原记忆模式」",
             "maintenance_pending": "还有记录未处理完；请管理员在插件页查看保存进度，等待处理完成，或放弃尚未发送和保存失败的记录",
-            "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后刷新维护状态。需要清空全部旧记忆时，可使用清空操作重新开始",
-            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按数据维护指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
+            "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后检查暂停进度。需要清空全部旧记忆时，可使用清空操作重新开始",
+            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
             "authorization_changed": "账号授权已变化，请管理员在插件页确认当前机器人身份",
             "command_already_applied": "这条命令已处理，请发送一条新命令",
@@ -112,17 +112,17 @@ class HindsightBridge(Star):
             "catalog_changed": "查看期间记忆发生变化，请重新查看该页",
             "export_source_missing": "记忆来源不完整，请管理员检查 Hindsight 数据和保留设置",
             "invalid_identifier": "记忆 ID 无效，请从 view 列表复制完整 ID",
-            "invalid_background_id": "背景页编号无效，请从插件页的知识页列表重新选择",
+            "invalid_background_id": "知识页编号无效，请从插件页的知识页列表重新选择",
             "invalid_background_response": "知识页响应无法识别，请检查 Hindsight 版本后重试",
-            "background_response_too_large": "知识页响应过大，请在官方面板准备较短的背景页后重新选择",
+            "background_response_too_large": "知识页响应过大，请在官方面板准备较短的知识页后重新选择",
             "background_index_too_large": "知识页目录超过读取限制，请联系管理员从官方面板整理目录",
-            "background_settings_invalid": "背景设置无法读取，请管理员检查最新控制库；不要恢复旧控制快照",
-            "background_changed": "背景设置或账号范围已变化，请刷新后重试",
+            "background_settings_invalid": "知识页选择或使用开关无法读取，请管理员检查最新控制库；不要恢复旧控制快照",
+            "background_changed": "知识页选择、使用开关或账号范围已变化，请刷新后重试",
             "background_missing": "找不到所选知识页，请在官方面板确认后回到插件页重新选择",
             "background_empty": "知识页还没有正文，请等待官方生成完成；一直为空时请管理员检查已有记忆和标签筛选",
-            "background_timeout": "读取背景页超时，请检查记忆服务后重试",
-            "background_too_large": "背景页太长，本轮没有提供给机器人；请在官方面板调整为短页，普通记忆检索仍可使用",
-            "background_view_too_large": "背景页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
+            "background_timeout": "读取知识页超时，请检查记忆服务后重试",
+            "background_too_large": "知识页太长，该次聊天没有提供给机器人；请在官方面板调整为短页，记忆检索仍按所选记忆模式执行",
+            "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
         }
         if not code:
@@ -801,17 +801,17 @@ class HindsightBridge(Star):
             "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
             "/hindsight show 记忆ID：查看详情和来源\n"
             "/hindsight recall 问题：查找相关记忆\n"
-            "/hindsight background：查看本人已选背景页\n"
-            "背景页选用一份 Hindsight 知识页供新会话参考，例如项目目标与约束；默认关闭。\n"
+            "/hindsight background：查看本人已选知识页（Knowledge Page）\n"
+            "可在插件页选择一份 Hindsight 知识页供聊天参考，例如项目目标与约束；默认关闭。\n"
             "/hindsight export：导出记忆和来源（JSON）\n"
-            "修改记忆：联系管理员，在插件页开始维护后到 Hindsight 官方面板操作\n"
+            "修改记忆：联系管理员，在插件页暂停保存和查询后到 Hindsight 官方面板操作\n"
             "/hindsight on：保存新聊天，并自动使用已有记忆\n"
             "/hindsight readonly：继续使用已有记忆，不保存新聊天\n"
             "/hindsight pause：暂停保存和自动检索，已有记忆与手动查看保留\n"
             "/hindsight retry：重试保存失败的记录\n"
             "/hindsight cancel 任务编号：取消上传，已形成的记忆保留\n"
             "/hindsight forget：清空本人全部记忆，需再次确认\n"
-            "维护时暂停新记录和记忆查询，Hindsight 已接收的记录继续处理。\n"
+            "修改前暂停保存和查询，Hindsight 已接收的记录继续处理，普通聊天继续。\n"
             "自动记录你的原话和机器人保存到会话历史的最终回复。"
         )
 
@@ -864,9 +864,9 @@ class HindsightBridge(Star):
                 guard = ReadGuard.freeze(self, scope, manual=True)
                 if not guard.selection["page_id"]:
                     yield event.plain_result(
-                        "尚未选择背景页。普通记忆检索照常使用。\n"
-                        "背景页是从已有记忆整理的一份简短知识页，可让新会话参考项目目标等背景资料。"
-                        "想使用时，请管理员在插件页「背景页」按问号说明准备并选择 Hindsight 知识页。"
+                        "尚未选择知识页（Knowledge Page）。记忆检索按所选记忆模式运行。\n"
+                        "知识页由 Hindsight 从已有记忆按主题生成，可让新会话参考项目目标等资料。"
+                        "想使用时，请管理员在插件页「知识页（Knowledge Page）」按问号说明准备并选择知识页。"
                     )
                     return
                 async with asyncio.timeout(8):
@@ -882,11 +882,11 @@ class HindsightBridge(Star):
                     return
                 # One whole bounded response; larger documents remain in the official panel.
                 content = (
-                    f"背景页：{guard.selection['page_id']}\n"
-                    f"自动使用：{'开启' if guard.selection['enabled'] else '关闭'}\n"
+                    f"知识页（Knowledge Page）：{guard.selection['page_id']}\n"
+                    f"聊天时使用所选知识页（开关设置）：{'开启' if guard.selection['enabled'] else '关闭'}\n"
                     f"刷新时间：{page['last_refreshed_at'] or '未知'}\n"
                     f"最近刷新失败：{page['last_refresh_failed_at'] or '无记录'}\n"
-                    "新鲜度：未知；请在官方面板核对内容更新。\n\n" + page["content"]
+                    "内容是否过期：未知；请在官方面板核对内容更新。\n\n" + page["content"]
                 )
                 if len(content) > 3500 or len(content.encode("utf-8")) > 12000:
                     yield event.plain_result(self.diagnostic("background_view_too_large"))
@@ -977,8 +977,8 @@ class HindsightBridge(Star):
             yield event.plain_result("此私聊未开放记忆。")
             return
         yield event.plain_result(
-            "请联系管理员修改记忆：在 AstrBot 插件页开始维护，"
-            "等记录处理完成后，到 Hindsight 官方面板按记忆库编号找到并修改记忆。"
+            "请联系管理员修改记忆：在 AstrBot 插件页暂停保存和查询，"
+            "等记录处理完成后，到 Hindsight 官方面板按记忆库 ID找到并修改记忆。"
         )
 
     @hindsight.command("status")
@@ -1026,7 +1026,7 @@ class HindsightBridge(Star):
                 counts.get(s, 0)
                 for s in ("submitting", "unknown", "deferred", "tracking", "cancel_requested")
             )
-            modes = {"active": "正常记忆", "readonly": "只用已有记忆", "paused": "暂停记忆"}
+            modes = {"active": "保存并自动使用记忆", "readonly": "只自动使用已有记忆", "paused": "暂停保存和自动使用"}
             erasures = self.outbox.control.erasures(
                 self.outbox.connection_id, owner_id=scope["owner_id"]
             )
@@ -1054,13 +1054,13 @@ class HindsightBridge(Star):
                 f"Hindsight：{connection}\n{runner}；模式：{modes[scope['mode']]}\n"
                 f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
                 f"诊断编号：{scope['principal_id']} / {scope['generation']}\n"
-                f"等待发送 {waiting}，处理中 {tracking}，失败 {counts.get('failed', 0)}，"
+                f"等待发送 {waiting}，发送与保存确认中 {tracking}，失败 {counts.get('failed', 0)}，"
                 f"需核对 {counts.get('reconcile_required', 0)}，完成 {counts.get('done', 0)}\n"
                 f"最早记录已等待：{summary['oldest_seconds']} 秒；任务编号与进度：{tasks}\n"
-                f"整合记忆：{stats.get('total_observations', '未知')}；"
+                f"观察（Observations）：{stats.get('total_observations', '未知')}；"
                 f"待整合：{stats.get('pending_consolidation', '未知')}\n"
                 f"清空：{cleanup}\n"
-                f"维护：{maintenance}\n"
+                f"保存和查询暂停状态：{maintenance}\n"
                 f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
                 f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
                 f"最近记录状态：{self.status}\n"
@@ -1200,6 +1200,11 @@ class HindsightBridge(Star):
             return
         key = scope["owner_id"]
         async with self.using_resources():
+            try:
+                self.panel.ensure_no_upgrade()
+            except PanelError:
+                yield event.plain_result("服务升级期间暂时不能清空记忆。请先完成升级核对并解除升级造成的暂停，或在插件面板选择暂不升级。")
+                return
             if self.outbox.recovering:
                 yield event.plain_result("记忆范围正在恢复，请稍后清空。")
                 return
@@ -1245,7 +1250,7 @@ class HindsightBridge(Star):
                 }
                 yield event.plain_result(
                     f"用户：{event.get_platform_id()} / {event.get_sender_id()}。\n"
-                    "将删除这个用户在 Hindsight 中的全部记忆、知识页（包括所选背景页）及其历史、用于生成记忆的聊天内容，"
+                    "将删除这个用户在 Hindsight 中的全部记忆、知识页及其历史、用于生成记忆的聊天内容，"
                     "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。"
                     "如果其他账号共用此记忆库，它们的记忆也会一起清空。\n"
                     f"确认请在 120 秒内发送：/hindsight forget {token}"

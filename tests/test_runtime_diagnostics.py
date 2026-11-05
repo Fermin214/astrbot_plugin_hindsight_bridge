@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
+import secrets
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -29,7 +30,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
     TokenizerError, load_encoding, memory_block, recall_query,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel
+from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, PanelError
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.qq_source import native_login
 from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
@@ -118,7 +119,7 @@ class ConfigurationTests(unittest.TestCase):
         config = {"api_url": "http://private-host", "api_key": "private-key", "service_id": " "}
         self.assertEqual(diagnostics.missing_connection(config), ["service_id"])
         message = diagnostics.configuration_message(config)
-        self.assertIn("稳定服务标识", message)
+        self.assertIn("记忆服务识别码", message)
         self.assertNotIn("private", message)
         self.assertEqual(diagnostics.missing_connection({"api_url": None, "api_key": 12}),
                          ["api_url", "api_key", "service_id"])
@@ -213,7 +214,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         for message_id in ("three", "four"):
             event, req = self.turn(message_id)
             await self.plugin.add_memory(event, req)
-            self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 本轮检索超时，记忆暂未载入。")
+            self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。")
         summary = self.plugin.recall_status(scope)
         self.assertEqual(summary["consecutive_failures"], 2)
         self.assertNotIn("hello", json.dumps(summary))
@@ -314,7 +315,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
     async def test_missing_configuration_and_invalid_timeout_open_no_resources(self):
         await self.plugin._close_resources()
         for config, label in (
-            ({"api_url": "http://private", "api_key": "secret"}, "稳定服务标识"),
+            ({"api_url": "http://private", "api_key": "secret"}, "记忆服务识别码"),
             ({**self.config, "recall_timeout": 31}, "0.2 到 30"),
         ):
             self.plugin.config = config

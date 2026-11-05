@@ -87,10 +87,19 @@ class Maintenance:
             async with asyncio.timeout(10):
                 await self.client.ensure_auth()
                 operations = await self.client.list_operations(scope["bank"])
-                remote_active = [
-                    op.id for op in operations
-                    if op.status in {"pending", "processing", "cancelled"}
-                ]
+                for op in operations:
+                    if op.status not in {"pending", "processing", "cancelled"}:
+                        continue
+                    if op.status == "cancelled" and op.kind == "consolidation":
+                        current = await self.client.operation(scope["bank"], op.id)
+                        # Superseded consolidation is finished; cooperative cancellation
+                        # alone has no completed_at and may still write at a checkpoint.
+                        if (
+                            current.status == "cancelled" and current.kind == "consolidation"
+                            and current.completed_at is not None and not current.children
+                        ):
+                            continue
+                    remote_active.append(op.id)
         latest = self._scope(scope_id, management)
         if latest["bank"] != scope["bank"] or latest["revision"] != scope["revision"]:
             raise QueueError("scope_not_available")

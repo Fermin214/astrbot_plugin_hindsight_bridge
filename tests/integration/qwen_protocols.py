@@ -118,7 +118,8 @@ async def hindsight(args):
         assert len(vectors) == 2 and all(len(vector) == 1024 for vector in vectors)
         assert all(math.isfinite(float(value)) for vector in vectors for value in vector)
         assert len(scores) == 2 and all(math.isfinite(float(value)) for value in scores) and scores[1] > scores[0]
-    save_report(args.output, {"hindsight_image": "1.1.0-slim", "embedding_dimensions": 1024,
+    from hindsight_api import __version__
+    save_report(args.output, {"hindsight_version": __version__, "embedding_dimensions": 1024,
                 "passed": ["real_hindsight_embedding_via_bridge_transport", "real_hindsight_rerank_via_bridge_transport"]},
                 descriptors["embedding"]["api_key"])
 

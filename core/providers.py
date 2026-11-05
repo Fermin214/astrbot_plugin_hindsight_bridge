@@ -1,4 +1,4 @@
-"""Reuse public AstrBot 4.29.1 provider APIs for Hindsight 1.1 setup.
+"""Reuse public AstrBot 4.29.1 provider APIs for Hindsight setup.
 
 The resolve methods return secrets for backend configuration, never UI or logs.
 Only ``resolve_checked`` makes a provider request to verify embedding output.

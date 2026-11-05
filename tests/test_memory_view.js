@@ -40,6 +40,8 @@ function harness() {
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     backgroundReadRevision: 0, backgroundDraft: null,
     renderBackground() {},
+    renderServiceVersion() {},
+    clearUpgrade() {},
     modelWatch: null, feedbackTimer: null, modeHelp: { active: "读取并保存" },
     hydrateConfig() {}, providerSelect() {}, refreshAccountPlatforms() {}, updateProviderHelp() {},
     readMaintenanceStatus: async () => {},
@@ -56,6 +58,63 @@ function harness() {
   }
   return context;
 }
+
+test("version notices distinguish managed upgrades external services and unknown versions", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderServiceVersion"), context);
+  context.data = { config: { configured: true, managed: true }, backend: {
+    version: "1.1.0", supported: true, managed: true, upgrade_available: true, pending: false,
+  } };
+  context.renderServiceVersion();
+  assert.equal(context.$("service-upgrade").hidden, false);
+  assert.equal(context.$("reinstall").disabled, true);
+  assert.equal(context.$("upgrade-verify").disabled, true);
+  context.data.config.managed = false;
+  context.data.backend.managed = false;
+  context.renderServiceVersion();
+  assert.equal(context.$("service-upgrade").hidden, true);
+  assert.equal(context.$("go-upgrade").hidden, false);
+  context.data.backend = { version: null, upgrade_available: false };
+  context.renderServiceVersion();
+  assert.equal(context.$("go-upgrade").hidden, true);
+  assert.equal(context.$("upgrade-prepare").disabled, true);
+  context.data = { config: { configured: true, managed: true }, backend: {
+    version: "1.2.0", managed: true, upgrade_available: false, pending: false,
+    upgrade_paused: true, resume_available: true,
+  } };
+  context.renderServiceVersion();
+  assert.equal(context.$("service-upgrade").hidden, false);
+  assert.equal(context.$("upgrade-resume").hidden, false);
+  assert.equal(context.$("upgrade-resume").disabled, false);
+  assert.equal(context.$("upgrade-abandon").hidden, true);
+  assert.equal(context.$("upgrade-cancel").disabled, true);
+});
+
+test("upgrade controls require backup confirmation and preserve failure state", async () => {
+  const context = harness();
+  vm.runInContext(declaration("upgradeAction"), context);
+  let calls = 0;
+  context.perform = async (button, group, work) => { await work(); };
+  context.bridge = { apiPost: async () => { calls++; throw new Error("maintenance pending"); } };
+  await assert.rejects(context.upgradeAction("prepare", {}));
+  assert.equal(calls, 0);
+  context.$("upgrade-backup-confirmed").checked = true;
+  context.$("upgrade-command").value = "original";
+  await assert.rejects(context.upgradeAction("prepare", {}));
+  assert.equal(context.$("upgrade-command").value, "original");
+  assert.equal(calls, 1);
+});
+
+test("leaving or rebinding upgrade preparation clears secret commands and backup agreement", () => {
+  const context = harness();
+  vm.runInContext(declaration("clearUpgrade"), context);
+  context.$("upgrade-command").value = "private-command";
+  context.$("upgrade-backup-confirmed").checked = true;
+  context.clearUpgrade();
+  assert.equal(context.$("upgrade-command").value, "");
+  assert.equal(context.$("upgrade-installation").hidden, true);
+  assert.equal(context.$("upgrade-backup-confirmed").checked, false);
+});
 
 test("missing SDK and singleton pending handshake require reloading the plugin frame", async () => {
   const context = harness();
@@ -219,7 +278,7 @@ test("actual startup completes while optional maintenance waits, times out and i
   assert.equal(context.$("refresh").disabled, false);
   assert.equal(context.$("maintenance-resume").disabled, true);
   await new Promise((done) => setTimeout(done, 15));
-  assert.match(context.maintenanceState.error, /获取维护状态超时/);
+  assert.match(context.maintenanceState.error, /获取暂停进度超时/);
   resolveMaintenance({ maintenance: { ready: true, phase: "ready" } });
   await new Promise((done) => setImmediate(done));
   assert.equal(context.maintenanceState.ready, false);
@@ -300,7 +359,7 @@ test("manual maintenance status also times out and releases its controls", async
   await context.maintenanceAction(context.$("maintenance-status"), "maintenance_status");
   assert.equal(context.$("memory-fields").disabled, false);
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("feedback-message").textContent, /获取维护状态超时/);
+  assert.match(context.$("feedback-message").textContent, /获取暂停进度超时/);
 });
 
 test("a late bootstrap response cannot hydrate the page after timeout", async () => {
@@ -325,17 +384,20 @@ test("successful work clears its timeout", async () => {
 
 test("connected service does not hide the user's recall failure", () => {
   const context = harness();
+  vm.runInContext(declaration("text"), context);
+  vm.runInContext(declaration("renderScope"), context);
   context.data = {
     config: { managed: false }, status: { connected: true, label: "recall_timeout" },
-    scopes: [{ mode: "active", summary: { counts: {}, recall: {
+    scopes: [{ scope_id: "one", mode: "active", summary: { counts: {}, recall: {
       outcome: "error", code: "recall_timeout", elapsed_ms: 10000,
       last_at: 1700000000, consecutive_failures: 3, error_message: "可增加召回等待时间",
     } } }],
   };
+  context.scopeId = "one";
   context.renderStatus();
+  context.renderScope();
   assert.equal(context.$("status-label").textContent, "服务已连接");
-  const row = context.$("scope-statuses").children[0];
-  const text = row.children.map((child) => child.textContent).join(" ");
+  const text = context.$("scope-recall-status").textContent;
   assert.match(text, /最近记忆检索：超时/);
   assert.match(text, /连续失败 3 次/);
   assert.match(text, /增加召回等待时间/);

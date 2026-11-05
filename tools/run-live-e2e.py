@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -48,7 +49,11 @@ def private_json(path, value):
 
 def extraction_response(request, raw):
     schema = request.get("response_format", {}).get("json_schema", {}).get("schema", {})
-    if "facts" in schema.get("properties", {}):
+    item = schema.get("properties", {}).get("facts", {}).get("items", {})
+    if isinstance(item, dict) and item.get("$ref", "").startswith("#/$defs/"):
+        item = schema.get("$defs", {}).get(item["$ref"].removeprefix("#/$defs/"), {})
+    # Consolidation also returns `facts` in 1.2; only extraction has what/fact_type.
+    if isinstance(item, dict) and {"what", "fact_type"} <= item.get("properties", {}).keys():
         return True
     if request.get("response_format", {}).get("type") != "json_object":
         return False
@@ -56,7 +61,12 @@ def extraction_response(request, raw):
         value = json.loads(json.loads(raw)["choices"][0]["message"]["content"])
     except (ValueError, KeyError, IndexError, TypeError):
         return False
-    return isinstance(value, dict) and "facts" in value
+    facts = value.get("facts") if isinstance(value, dict) else None
+    return isinstance(facts, list) and bool(facts) and all(
+        isinstance(fact, dict) and isinstance(fact.get("what"), str)
+        and fact.get("fact_type") in {"world", "assistant"}
+        for fact in facts
+    )
 
 
 @contextmanager
@@ -171,14 +181,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 elif body["action"] == "extraction_status":
                     self.reply(200, json.dumps({"held": self.server.extraction_held}).encode())
                     return
-                elif body["action"] in {"managed_install", "managed_reinstall", "managed_uninstall"}:
+                elif body["action"] in {"managed_install", "managed_reinstall", "managed_upgrade", "managed_uninstall"}:
                     state.managed_control(body["action"])
                 elif body["action"] in {"stop_hindsight", "start_hindsight", "restart_hindsight", "rrf_hindsight", "restart_astrbot", "stop_astrbot", "start_astrbot"}:
                     state.control(body["action"])
                 else:
                     raise ValueError
                 self.reply(200, b'{"ok":true}')
-            except Exception:
+            except Exception as error:
+                self.server.record("control-failure", {
+                    "type": type(error).__name__,
+                    "trace": [{"file": Path(row.filename).name, "line": row.lineno, "function": row.name}
+                              for row in traceback.extract_tb(error.__traceback__)],
+                })
                 self.reply(500, b'{"error":"test_control_failed"}')
             return
         headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
@@ -251,6 +266,10 @@ class Environment:
         self.volume = self.owner + "-postgres"
         astrbot_version = getattr(args, "astrbot_version", "4.29.1")
         self.astrbot_image = "soulter/astrbot:v" + astrbot_version
+        hindsight_version = getattr(args, "hindsight_version", "1.2.0")
+        if hindsight_version not in {"1.1.0", "1.2.0"}:
+            raise ValueError("Unsupported Hindsight test version")
+        self.hindsight_image = "ghcr.io/vectorize-io/hindsight:" + hindsight_version + "-slim"
         self.magpie = args.magpie_url.rstrip("/")
         if self.magpie not in {"http://127.0.0.1:3425/v1", "http://localhost:3425/v1"}:
             raise ValueError("This harness expects the explicitly selected loopback Magpie gateway")
@@ -261,6 +280,7 @@ class Environment:
             "control_token": secrets.token_hex(20), "memory_key": secrets.token_hex(20),
             "database_password": secrets.token_hex(20),
             "chat_model": args.chat_model, "astrbot_version": astrbot_version,
+            "hindsight_version": hindsight_version, "hindsight_image": self.hindsight_image,
             "initial_password": "Delivery-Initial-2026!",
             "admin_password": "Delivery-Acceptance-2026!", "admin_name": "delivery-admin",
         }
@@ -316,7 +336,7 @@ class Environment:
         name = self.owner + "-hindsight"
         if name in self.containers:
             self.owned(name)
-            self.docker("stop", "-t", "30", name, stdout=subprocess.DEVNULL)
+            self.docker("stop", "-t", "90", name, stdout=subprocess.DEVNULL)
             self.docker("rm", name, stdout=subprocess.DEVNULL)
             self.containers.remove(name)
         s = self.settings
@@ -336,7 +356,7 @@ class Environment:
         with os.fdopen(os.open(self.output / "hindsight.env", os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as file:
             for key, value in env.items():
                 file.write(key + "=" + value + "\n")
-        self.launch("hindsight", "ghcr.io/vectorize-io/hindsight:1.1.0-slim", "--memory", "1536m", "--init",
+        self.launch("hindsight", self.hindsight_image, "--memory", "1536m", "--init", "--stop-timeout", "90",
                     "--env-file", str(self.output / "hindsight.env"))
 
     def control(self, action):
@@ -347,7 +367,7 @@ class Environment:
             self.start_hindsight(rrf=True)
         else:
             command = "restart" if action.startswith("restart") else "stop" if action.startswith("stop") else "start"
-            self.docker(command, *( ["-t", "30"] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
+            self.docker(command, *( ["-t", "90"] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
 
     def wait(self, predicate, timeout=240):
         deadline = time.monotonic() + timeout
@@ -383,6 +403,16 @@ class Environment:
         self.wait(db_ready, 60)
         self.start_hindsight()
         self.wait(lambda: self.ready_http(self.settings["hindsight_url"] + "/health"))
+        actual = subprocess.check_output([
+            "docker", "exec", self.owner + "-hindsight", "python", "-c",
+            "from hindsight_api import __version__; print(__version__)",
+        ], text=True).strip()
+        if actual != self.settings["hindsight_version"]:
+            raise RuntimeError("Hindsight runtime version differs from the selected image")
+        self.settings["hindsight_image_id"] = subprocess.check_output([
+            "docker", "inspect", "--format", "{{.Image}}", self.owner + "-hindsight",
+        ], text=True).strip()
+        private_json(self.output / "live-settings.json", self.settings)
         print("Real Hindsight and PostgreSQL are ready", flush=True)
         mounts = ["-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
@@ -408,7 +438,7 @@ class Environment:
                 self.owned(name)
                 result = subprocess.run(["docker", "logs", name], capture_output=True)
                 (self.output / (name + ".log")).write_bytes(result.stdout + result.stderr)
-                self.docker("stop", "-t", "30", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.docker("stop", "-t", "90", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.docker("rm", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except (subprocess.CalledProcessError, RuntimeError):
                 print("Cleanup needs inspection: " + name, file=sys.stderr)
@@ -427,6 +457,7 @@ def main():
     parser.add_argument("--magpie-url", default="http://127.0.0.1:3425/v1")
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
+    parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
     parser.add_argument("--scenario", choices=("full", "accepted"), default="full")
     args = parser.parse_args()
     state = Environment(args)

@@ -25,7 +25,7 @@ def configuration_message(config):
         return ""
     if len(missing) == 3:
         return "请在设置中连接记忆服务"
-    labels = {"api_url": "API 地址", "api_key": "连接密钥", "service_id": "稳定服务标识"}
+    labels = {"api_url": "API 地址", "api_key": "连接密钥", "service_id": "记忆服务识别码"}
     return "缺少" + "、".join(labels[name] for name in missing) + "，请在设置中完成连接"
 
 
@@ -57,7 +57,7 @@ def recall_description(value):
 
 def recall_notice(code):
     if code in {"recall_timeout", "auth_timeout", "read_timeout", "write_timeout", "pool_timeout", "timeout"}:
-        return "Hindsight 本轮检索超时，记忆暂未载入。"
+        return "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"
     if code in {"connection_error", "connect_timeout", "http_401", "http_403", "server_auth_not_enforced"}:
         return "Hindsight 连接失败，记忆暂未载入。"
     return "Hindsight 本轮记忆准备失败，记忆暂未载入。"

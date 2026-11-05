@@ -23,7 +23,7 @@ ALICE, BOB, OUTSIDER = 123001, 123002, 123003
 BOT = 990001
 SUCCESS = "Hindsight 长期记忆：插件已根据本轮对话自动检索"
 EMPTY = "Hindsight 检索完成，本轮未匹配到相关记忆。"
-TIMEOUT = "Hindsight 本轮检索超时，记忆暂未载入。"
+TIMEOUT = "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"
 FAILED = "Hindsight 连接失败，记忆暂未载入。"
 
 
@@ -164,7 +164,9 @@ class Acceptance:
         self.token = ""
         self.report = {
             "astrbot": self.settings.get("astrbot_version", "4.29.1"),
-            "hindsight": "1.1.0", "postgres": "17 + PGroonga 4.0.8 + pgvector 0.8.6",
+            "hindsight": self.settings["hindsight_version"],
+            "hindsight_image_id": self.settings.get("hindsight_image_id"),
+            "postgres": "17 + PGroonga 4.0.8 + pgvector 0.8.6",
             "chat_model": self.settings["chat_model"], "embedding_model": "qwen3.7-text-embedding-flash",
             "rerank_model": "qwen3.7-text-rerank", "message_peer": "local OneBot V11 protocol simulator, no QQ login",
             "acceptance_scope": "existing-service bridge end-to-end with real models and browser",
@@ -205,6 +207,10 @@ class Acceptance:
             except (aiohttp.ClientError, TimeoutError):
                 return False
         await until(ready, timeout=180)
+        async with self.session.get(self.settings["hindsight_url"] + "/v1/version") as response:
+            assert response.status == 200
+            assert (await response.json())["api_version"] == self.settings["hindsight_version"]
+        self.report["hindsight_image_id"] = self.settings.get("hindsight_image_id")
 
     async def install(self, filename):
         form = aiohttp.FormData()
@@ -556,7 +562,7 @@ class Acceptance:
                 await self.config(service_id="")
                 missing_state = await self.bootstrap()
                 assert missing_state["config"]["missing_fields"] == ["service_id"]
-                assert "稳定服务标识" in missing_state["status"]["label"]
+                assert "记忆服务识别码" in missing_state["status"]["label"]
                 await self.config(service_id="delivery-existing-service")
                 await self.usable()
                 self.passed("real_partial_configuration_names_missing_service_id")

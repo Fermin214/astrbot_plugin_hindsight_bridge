@@ -11,6 +11,9 @@ import shlex
 import tarfile
 from urllib.parse import urlsplit
 
+HINDSIGHT_VERSION = "1.2.0"
+SUPPORTED_VERSIONS = ("1.1.0", HINDSIGHT_VERSION)
+
 
 COMPOSE = """\
 services:
@@ -31,18 +34,18 @@ services:
       retries: 30
     networks: [memory_database]
   memory-settings-init:
-    image: ghcr.io/vectorize-io/hindsight:1.1.0-slim
+    image: ghcr.io/vectorize-io/hindsight:1.2.0-slim
     user: "0:0"
     entrypoint: [python, -c, "import os; os.chown('/settings',1000,1000); os.chmod('/settings',0o700)"]
     volumes: [memory_settings:/settings]
     network_mode: none
     restart: "no"
   memory-api:
-    image: ghcr.io/vectorize-io/hindsight:1.1.0-slim
+    image: ghcr.io/vectorize-io/hindsight:1.2.0-slim
     entrypoint: [python, /opt/astrbot-memory/managed_service.py]
     restart: unless-stopped
     init: true
-    stop_grace_period: 50s
+    stop_grace_period: 90s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -178,6 +181,8 @@ for port in HOST_PORTS; do
       fail "主机端口 $port 已占用。请释放该端口，或修改安装状态中的端口后重新生成命令；已有安装需同步修改 .env 中的端口。"
   fi
 done
+REDEPLOY_BEFORE
+UPGRADE_BEFORE
 printf '正在安装记忆服务。首次安装需要下载镜像和构建数据库，请保持终端打开。\n'
 cp -R "$stage/." "$target/"
 chmod 600 "$target/.env"
@@ -191,11 +196,61 @@ else
   docker compose --project-name "$project" up -d --build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
 fi
 docker compose --project-name "$project" up -d --wait --wait-timeout 600
+UPGRADE_AFTER
 printf '\n安装完成。回到插件的「设置」选择模型，点击「验证并保存模型」。\n'
 printf '服务文件位置：%s\n' "$target"
 printf '官方面板：http://127.0.0.1:CP_PORT_VALUE（远程电脑需先建立 SSH 隧道，或配置域名反向代理）\n'
 printf '在此服务器执行下面的命令，获取面板登录密钥：\n'
 printf '%s %q %s\n' "sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p'" "$target/.env" "| tr -d '\047\042'"
+"""
+
+# Generated commands pipe this script into Bash; exec must not consume that stream.
+UPGRADE_BEFORE = r"""[ -f "$target/identity" ] && [ -f "$target/.env" ] || fail '找不到原安装记录；升级不能创建另一套服务。'
+cd "$target"
+docker compose --project-name "$project" config --quiet
+docker compose --project-name "$project" exec -T memory-api python -c "import json,urllib.request; v=json.load(urllib.request.urlopen('http://127.0.0.1:8888/v1/version',timeout=5))['api_version']; assert v=='1.1.0', '仅支持从 1.1.0 升级，实际为 '+str(v)" < /dev/null || fail '无法确认原服务版本；未替换服务，请检查日志与版本。'
+docker pull ghcr.io/vectorize-io/hindsight:1.2.0-slim || fail '下载新版镜像失败；原服务尚未停止，请检查网络后重试。'
+[ ! -L "${target}-backups" ] || fail '备份目录不能是符号链接。'
+mkdir -p "${target}-backups"
+chmod 700 "${target}-backups"
+backup="$(mktemp -d "${target}-backups/upgrade-1.1.0-XXXXXX")"
+printf '升级备份位置：%s\n' "$backup"
+trap 'printf "升级未完成；保持保存和查询暂停，备份位置：%s。不要直接改回旧镜像，请按备份与恢复指南恢复。\n" "$backup" >&2' ERR
+cp "$target/.env" "$target/identity" "$target/compose.yaml" "$backup/"
+[ ! -f "$target/compose.override.yaml" ] || cp "$target/compose.override.yaml" "$backup/"
+cp -R "$target/service" "$target/postgres" "$backup/"
+docker compose --project-name "$project" exec -T memory-api python -c "from pathlib import Path; import sys; sys.stdout.buffer.write(Path('/settings/models.json').read_bytes())" < /dev/null > "$backup/models.json"
+docker compose --project-name "$project" stop --timeout 90 memory-api
+docker compose --project-name "$project" exec -T memory-db pg_dump -U hindsight -d hindsight -Fc < /dev/null > "$backup/hindsight.dump"
+[ -s "$backup/hindsight.dump" ] || fail '数据库备份为空；保持保存和查询暂停并检查数据库。'
+docker compose --project-name "$project" exec -T memory-db pg_restore --list < "$backup/hindsight.dump" > "$backup/dump-inventory.txt"
+printf '%s\n' 'from=1.1.0' 'to=1.2.0' > "$backup/upgrade.txt"
+chmod -R go-rwx "$backup"
+"""
+
+REDEPLOY_BEFORE = r"""if [ -f "$target/identity" ]; then
+  cd "$target"
+  docker compose --project-name "$project" exec -T memory-api python -c "import json,urllib.request; v=json.load(urllib.request.urlopen('http://127.0.0.1:8888/v1/version',timeout=5))['api_version']; assert v=='1.2.0', '同版本修复仅支持1.2.0，实际为 '+str(v)" < /dev/null || fail '无法确认已有服务为 1.2.0；未替换文件。请恢复连接，1.1.0 使用升级入口，不能用修复命令绕过暂停保存、查询与备份。'
+fi
+"""
+
+UPGRADE_AFTER = r"""docker compose --project-name "$project" exec -T memory-api python -c "import json,time,urllib.request
+deadline=time.monotonic()+180
+while True:
+    try:
+        version=json.load(urllib.request.urlopen('http://127.0.0.1:8888/v1/version',timeout=3))
+    except (OSError,ValueError):
+        if time.monotonic()>=deadline:
+            raise RuntimeError('新版 API 在三分钟内未就绪')
+        time.sleep(1)
+        continue
+    if version.get('api_version')!='1.2.0':
+        raise RuntimeError('升级后版本不符')
+    break
+" < /dev/null || fail '新版版本核对失败；保持保存和查询暂停并检查日志。'
+trap - ERR
+printf '\n服务已升级到 1.2.0，备份保存在：%s\n回到插件页点击「核对升级结果」，核对旧记忆后再恢复原记忆模式。\n' "$backup"
+exit 0
 """
 
 UNINSTALL = r"""#!/bin/bash
@@ -233,7 +288,7 @@ for network in $networks; do
 done
 printf '正在卸载配套服务，并删除该服务的全部记忆数据。\n'
 for container in $containers; do
-  docker stop --time 50 "$container" >/dev/null
+  docker stop --time 90 "$container" >/dev/null
   docker rm "$container" >/dev/null
 done
 for network in $networks; do docker network rm "$network" >/dev/null; done
@@ -264,7 +319,7 @@ def command(script):
     return f"printf '%s' '{encoded}' | base64 -d | gzip -d | bash"
 
 
-def installation(root, state, *, container_hostname="", control_plane_url=""):
+def installation(root, state, *, container_hostname="", control_plane_url="", upgrade=False):
     identifier = state["id"]
     if not re.fullmatch(r"[0-9a-f]{12}", identifier):
         raise ValueError("invalid_installation_id")
@@ -320,6 +375,9 @@ def installation(root, state, *, container_hostname="", control_plane_url=""):
             output.addfile(entry, io.BytesIO(data))
     script = SCRIPT
     for marker, value in {
+        "REDEPLOY_BEFORE": "" if upgrade else REDEPLOY_BEFORE,
+        "UPGRADE_BEFORE": UPGRADE_BEFORE if upgrade else "",
+        "UPGRADE_AFTER": UPGRADE_AFTER if upgrade else "",
         "PROJECT_VALUE": shlex.quote(project), "HOST_VALUE": shlex.quote(container_hostname),
         "NETWORK_VALUE": shlex.quote(network), "ALIAS_VALUE": alias,
         "HOST_PORTS": " ".join(str(ports[name]) for name in (
@@ -337,7 +395,10 @@ def installation(root, state, *, container_hostname="", control_plane_url=""):
         "control_plane_url": browser_url,
         "control_plane_key_file": "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/" + project + "/.env",
         "control_plane_key_env": "HINDSIGHT_CP_ACCESS_KEY",
-        "message": "在运行 AstrBot 的 Linux 主机执行，完成后回到设置中选择模型。",
+        "message": (
+            "在原服务器、原安装路径执行。命令先备份配置、模型和数据库，再升级；失败时保持保存和查询暂停。"
+            if upgrade else "在运行 AstrBot 的 Linux 主机执行，完成后回到设置中选择模型。"
+        ),
     }
 
 

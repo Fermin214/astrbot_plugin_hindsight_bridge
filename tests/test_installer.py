@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.installer import installation, uninstallation
 
@@ -48,6 +49,12 @@ def install_environment(root):
     executable.write_text('''#!/bin/sh
 printf '%s\\n' "$*" >> "$TEST_LOG"
 case "$*" in
+  *"同版本修复仅支持1.2.0"*) [ "$TEST_FAIL_STAGE" != repair_version ] || exit 50; cat >/dev/null ;;
+  "pull ghcr.io/vectorize-io/hindsight:1.2.0-slim") [ "$TEST_FAIL_STAGE" != pull ] || exit 51 ;;
+  *"exec -T memory-api python -c"*"models.json"*) printf '%s\n' '{"environment":{}}' ;;
+  *"exec -T memory-api python -c"*) cat >/dev/null ;;
+  *"exec -T memory-db pg_dump"*) [ "$TEST_FAIL_STAGE" != pg_dump ] || exit 52; printf '%s\n' fixture-dump ;;
+  *"exec -T memory-db pg_restore --list"*) [ "$TEST_FAIL_STAGE" != pg_restore ] || exit 53; printf '%s\n' fixture-inventory ;;
   "ps -q") printf '%s\\n' astrbot ;;
   "ps -q --filter"*) [ -z "$TEST_OWNED_PORT" ] || printf '%s\\n' owned ;;
   "inspect --format {{.Config.Hostname}}"*) printf '%s\\n' astrbot-host ;;
@@ -66,6 +73,86 @@ exit 0
 
 
 class InstallerTests(unittest.TestCase):
+    def test_upgrade_waits_for_api_and_rejects_wrong_version_or_startup_timeout(self):
+        from plugins.astrbot_plugin_hindsight_bridge.core.installer import UPGRADE_AFTER
+
+        code = re.search(r'python -c "(.*?)" < /dev/null', UPGRADE_AFTER, re.S)[1]
+        with patch("urllib.request.urlopen", side_effect=[OSError("not ready"), io.BytesIO(b'{"api_version":"1.2.0"}')]) as request, patch("time.sleep"):
+            exec(code, {})
+            self.assertEqual(request.call_count, 2)
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"api_version":"1.1.0"}')):
+            with self.assertRaises(RuntimeError):
+                exec(code, {})
+        with patch("urllib.request.urlopen", side_effect=OSError("not ready")), patch("time.monotonic", side_effect=[0, 181]):
+            with self.assertRaises(RuntimeError):
+                exec(code, {})
+
+    def test_encoded_pipeline_survives_docker_exec_reading_stdin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = install_environment(root)
+            state = {**STATE, **free_ports()}
+            subprocess.run(["bash", "-c", installation(ROOT, state)["command"]], env=env, check=True, capture_output=True)
+            result = subprocess.run(["bash", "-c", installation(ROOT, state, upgrade=True)["command"]],
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("服务已升级到 1.2.0", result.stdout)
+            self.assertTrue(list(root.glob("*-backups/upgrade-*/hindsight.dump")))
+            result = subprocess.run(["bash", "-c", installation(ROOT, state)["command"]],
+                                    env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("安装完成", result.stdout)
+    def test_same_version_repair_cannot_replace_old_or_unknown_existing_service(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = install_environment(root)
+            state = {**STATE, **free_ports()}
+            generated = script(installation(ROOT, state))
+            result = subprocess.run(["bash"], input=generated, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            target = root / ("astrbot-memory-" + STATE["id"])
+            before = (target / "compose.yaml").read_bytes()
+            (root / "calls").write_text("")
+            result = subprocess.run(["bash"], input=generated, env={**env, "TEST_FAIL_STAGE": "repair_version"}, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((target / "compose.yaml").read_bytes(), before)
+            self.assertNotIn(" up ", (root / "calls").read_text())
+    def test_upgrade_backup_failures_do_not_replace_original_service_files(self):
+        for failure in ("pull", "pg_dump", "pg_restore"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env = install_environment(root)
+                state = {**STATE, **free_ports()}
+                original = installation(ROOT, state)
+                result = subprocess.run(["bash"], input=script(original), env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                target = root / ("astrbot-memory-" + STATE["id"])
+                before = (target / "compose.yaml").read_bytes()
+                (root / "calls").write_text("")
+                result = subprocess.run(["bash"], input=script(installation(ROOT, state, upgrade=True)),
+                                        env={**env, "TEST_FAIL_STAGE": failure}, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((target / "compose.yaml").read_bytes(), before)
+                calls = (root / "calls").read_text()
+                self.assertNotIn(" up ", calls)
+                if failure == "pull":
+                    self.assertNotIn(" stop ", calls)
+                else:
+                    self.assertTrue(list(root.glob("*-backups/upgrade-*")))
+
+    def test_upgrade_script_backs_up_before_replacement_and_keeps_backup_on_failure(self):
+        generated = script(installation(ROOT, STATE, upgrade=True))
+        subprocess.run(["bash", "-n"], input=generated, text=True, check=True)
+        before = generated.index('pg_dump -U hindsight')
+        replacement = generated.index('cp -R "$stage/." "$target/"')
+        self.assertLess(generated.index('stop --timeout 90 memory-api'), before)
+        self.assertLess(before, replacement)
+        self.assertIn('pg_restore --list', generated)
+        self.assertIn('models.json', generated)
+        self.assertIn('upgrade-1.1.0-', generated)
+        self.assertNotIn('down -v', generated)
+        self.assertNotIn('docker.sock', generated)
+
     def test_installation_has_no_model_credentials_or_model_selection(self):
         result = installation(ROOT, STATE, container_hostname="astrbot-host")
         files = assets(result)
@@ -101,6 +188,14 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result["api_url"], "http://memory-012345abcdef:8888")
         result = installation(ROOT, {**STATE, "control_plane_url": "http://127.0.0.1:29999"})
         self.assertEqual(result["browser_url"], "http://127.0.0.1:29999")
+
+    def test_fixed_image_and_shutdown_grace_match_both_installation_paths(self):
+        compose = assets(installation(ROOT, STATE))["compose.yaml"]
+        self.assertEqual(compose.count("image: ghcr.io/vectorize-io/hindsight:1.2.0-slim"), 2)
+        for material in (compose, (ROOT / "deploy/compose.yaml").read_text()):
+            grace = int(re.search(r"stop_grace_period: (\d+)s", material)[1])
+            self.assertGreater(grace, 75)
+        self.assertIn("docker stop --time 90", script(uninstallation(STATE)))
 
     def test_invalid_or_overlapping_ports_are_rejected_before_generating_commands(self):
         for value in (0, 65536, True, "9999:9999", "9999\n", 8888):

@@ -236,14 +236,16 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.hooks, 0)
 
     async def test_personal_view_is_explicit_read_only_and_allows_paused_owner(self):
-        self.select(enabled=False)
+        self.select(enabled=True)
         self.plugin.outbox.set_mode(self.scope()["scope_id"], "paused")
+        self.assertFalse(self.plugin.outbox.can_recall(self.scope()))
         event, _ = self.turn()
         event.plain_result = lambda text: text
         self.plugin.command_scope = lambda event: self.scope()
         results = [result async for result in self.plugin.memory_background(event)]
         self.assertEqual(len(results), 1)
         self.assertIn("Native background marker.", results[0])
+        self.assertIn("聊天时使用所选知识页（开关设置）：开启", results[0])
         self.assertTrue(all(call.method == "GET" for call in self.requests))
         self.assertEqual(self.plugin.outbox.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
 

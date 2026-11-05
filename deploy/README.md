@@ -4,7 +4,7 @@ Hindsight 负责保存、整理和查找记忆，AstrBot 插件通过 API 连接
 
 在设置中生成安装命令，在运行 AstrBot 的 Linux 主机终端执行一次。随后回到设置，选择聊天、嵌入和可选重排模型，点击 **验证并保存模型**，再添加 QQ 机器人与使用者，保存并确认账号授权。主机需已安装 Docker Engine 和 Compose v2，执行账号需能使用 Docker。
 
-下文是服务维护者可选的 **手工 Linux 部署方式**，适合自行维护后端模型、网络和数据库的场景。完成后，在设置中选择「连接已有 Hindsight」，填写服务 **API 地址**和 **连接密钥**。
+下文是服务管理员可选的 **手工 Linux 部署方式**，适合自行管理后端模型、网络和数据库的场景。完成后，在设置中选择「连接已有 Hindsight」，填写服务 **API 地址**和 **连接密钥**。
 
 向导生成的配套服务文件位于执行账号的 `~/.local/share/astrbot-memory-<id>/`，`<id>` 为服务编号，准确路径由安装命令显示。设置 `HINDSIGHT_INSTALL_ROOT` 可改变安装根目录；重新部署和卸载必须使用同一根目录。配套部署使用独立的 Compose 项目和数据卷。
 
@@ -17,11 +17,11 @@ Docker 安装器只为 Hindsight 加入 AstrBot 的一个可出站自定义桥�
 
 API 地址供 AstrBot 连接服务；“官方管理地址”供管理员浏览器访问。容器名称与 `8766` 接口用于插件通信，不能作为浏览器管理地址。两种部署方式都需要 HTTPS 域名反向代理或 SSH 隧道，才能从管理员电脑打开服务器面板；浏览器里的 `127.0.0.1` 指管理员自己的电脑。面板在模型配置成功后随 Hindsight 启动，安装结束后先完成模型设置。
 
-重新部署沿用数据库、模型配置和已有凭据。安装器提示配置不一致时，从对应插件的 **设置 → 服务维护** 重新生成命令。
+重新部署沿用数据库、模型配置和已有凭据。安装器提示配置不一致时，从对应插件的 **设置 → 服务升级与卸载** 重新生成命令。
 
-端口被其他进程占用时，先释放端口。需要更换端口时，由维护者调整安装状态中的 `api_port`、`management_port`、`control_plane_port` 后重新生成命令；默认值分别为 `8888`、`8889`、`9999`。已有安装的 `.env` 中，对应的 `ASTRBOT_MEMORY_API_PORT`、`ASTRBOT_MEMORY_MANAGEMENT_PORT`、`ASTRBOT_MEMORY_CP_PORT` 也需同步修改。安装器不会自动换端口。
+端口被其他进程占用时，先释放端口。需要更换端口时，由管理员调整安装状态中的 `api_port`、`management_port`、`control_plane_port` 后重新生成命令；默认值分别为 `8888`、`8889`、`9999`。已有安装的 `.env` 中，对应的 `ASTRBOT_MEMORY_API_PORT`、`ASTRBOT_MEMORY_MANAGEMENT_PORT`、`ASTRBOT_MEMORY_CP_PORT` 也需同步修改。安装器不会自动换端口。
 
-下文的端口、服务名和数据卷名称适用于手工部署模板；维护配套服务时应使用其安装目录中的配置。
+下文的端口、服务名和数据卷名称适用于手工部署模板；管理配套服务时应使用其安装目录中的配置。
 
 ### 安装目录与登录密钥
 
@@ -39,7 +39,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' .env | tr -d '\047\042'
 ```
 
-连接已有服务时，向维护者获取网页登录密钥。`HINDSIGHT_CP_ACCESS_KEY` 用于网页登录，`HINDSIGHT_API_TENANT_API_KEY` 用于服务 API，`ASTRBOT_MEMORY_MANAGEMENT_KEY` 用于模型配置接口。官方管理地址 `control_plane_url` 填写浏览器中的面板首页地址。
+连接已有服务时，向管理员获取网页登录密钥。`HINDSIGHT_CP_ACCESS_KEY` 用于网页登录，`HINDSIGHT_API_TENANT_API_KEY` 用于服务 API，`ASTRBOT_MEMORY_MANAGEMENT_KEY` 用于模型配置接口。官方管理地址 `control_plane_url` 填写浏览器中的面板首页地址。
 
 ## 准备条件
 
@@ -50,7 +50,9 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' .env | tr -d '\047\042'
 
 手工部署将这些模型配置填写到 Hindsight 的 `.env` 中。使用配套安装器时，服务安装完成后再在设置中选择模型；插件后台读取所选 AstrBot 供应商的地址和 Key，检查模型连接后应用到配套服务，无需重复填写。
 
-服务包含 Hindsight **1.1.0 Slim** 与 PostgreSQL **17**，数据库构建包含 pgvector 和 PGroonga。模型通过远程接口调用，模板不需要本地显卡；API 调用费用按所用模型服务计费。
+服务包含 Hindsight **1.2.0 Slim** 与 PostgreSQL **17**，数据库构建包含 pgvector 和 PGroonga。模型通过远程接口调用，模板不需要本地显卡；API 调用费用按所用模型服务计费。
+
+已有 1.1.0 服务可继续连接。配套服务可在插件页的升级入口完成暂停与保存进度检查、备份确认、升级命令生成与结果核对；外部服务由管理员按 [服务升级步骤](../docs/DATA-MAINTENANCE.md#升级-hindsight-服务) 升级。保留原模型及嵌入维数。
 
 ## 一、下载部署文件
 
@@ -170,13 +172,13 @@ docker compose up -d
 
 按 [安装指南](../docs/INSTALL.md) 在 AstrBot 中从链接安装并填写配置。
 
-AstrBot 位于另一台主机时，需要给它提供可访问的 HTTPS API 地址，具体网络入口由服务维护者配置。
+AstrBot 位于另一台主机时，需要给它提供可访问的 HTTPS API 地址，具体网络入口由服务管理员配置。
 
 ## 五、打开官方 Control Plane
 
-官方管理页面使用 Hindsight 1.1.0 原生 Control Plane，提供浏览、搜索、更正、删除、导入和导出。在插件页 **运行管理 → 用户记忆 → 查看和管理记忆** 中复制官方管理地址和记忆库编号，登录后找到对应 Bank。Bank 是每个用户的记忆库，首次保存聊天时自动创建，无需在官方页面另建。
+官方管理页面使用与服务同版的原生 Control Plane，提供浏览、搜索、更正、删除、导入和导出。在插件页 **记忆与保存 → 用户记忆 → 查看和管理记忆** 中复制官方管理地址和记忆库 ID，登录后找到对应 Bank。Bank 是每个用户的记忆库，首次保存聊天时自动创建，无需在官方页面另建。
 
-浏览、搜索和导出无需维护。修改、删除或导入前，先在插件页开始维护，等页面显示“可以修改记忆”后再操作，完成后结束维护。待保存记录的处理及整库删除后的恢复见 [数据维护](../docs/DATA-MAINTENANCE.md#官方内容维护)。
+浏览、搜索和导出无需暂停保存和查询。修改、删除或导入前，先在插件页暂停保存和查询，等页面显示“可以修改记忆”后再操作，完成后恢复原记忆模式。待保存记录的处理及整库删除后的恢复见 [备份与恢复](../docs/DATA-MAINTENANCE.md#在官方面板修改记忆)。
 
 官方页面在服务器上的入口为 `http://127.0.0.1:9999`。配套安装和手工 Compose 都提供此入口；改过网页主机端口时使用修改后的值。管理员电脑上的浏览器不能直接通过这个地址访问服务器，需要下面的 SSH 隧道或 HTTPS 反向代理。登录使用 `.env` 中的 `HINDSIGHT_CP_ACCESS_KEY`，获取命令见 [安装目录与登录密钥](#安装目录与登录密钥)。
 
@@ -206,7 +208,7 @@ memory.example.com {
 
 只代理官方页面的网页端口，API 与模型配置接口继续用于内部通信。官方页面通过容器内 `HINDSIGHT_CP_DATAPLANE_API_URL` 和服务 API Key 访问记忆服务，浏览器无需填写这个 Key。使用独立域名的根路径，例如 `https://memory.example.com`，不要放在 AstrBot 的子路径下。
 
-## 日常维护
+## 服务启停与日志
 
 以下命令在本指南的 `deploy` 目录执行：
 
@@ -222,10 +224,10 @@ memory.example.com {
 
 完整备份需要包含数据库和 `.env`，以及插件数据。操作步骤见 [备份与恢复](../docs/DATA-MAINTENANCE.md)。数据库密码只在空数据库首次初始化时生效，已有数据库改密要使用 PostgreSQL 的密码修改流程。
 
-模板设置 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0`，持续保留后台操作记录，供任务重试和数据恢复使用。磁盘维护通过数据库备份和管理工具进行，不直接删除数据卷。
+模板设置 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0`，持续保留后台操作记录，供任务重试和数据恢复使用。磁盘空间管理通过数据库备份和管理工具进行，不直接删除数据卷。
 
 ## 卸载边界
 
-配套安装在插件的 **设置 → 服务维护** 生成专属卸载命令。它核对安装身份、目录和 Compose 资源标签，仅删除该安装所属的容器、数据卷、专属网络和安装目录；这套服务中所有用户的记忆都会删除，无法恢复。共享的 AstrBot 网络、镜像、Docker、AstrBot 本身及外部已有 Hindsight 服务均独立管理。
+配套安装在插件的 **设置 → 服务升级与卸载** 生成专属卸载命令。它核对安装身份、目录和 Compose 资源标签，仅删除该安装所属的容器、数据卷、专属网络和安装目录；这套服务中所有用户的记忆都会删除，无法恢复。共享的 AstrBot 网络、镜像、Docker、AstrBot 本身及外部已有 Hindsight 服务均独立管理。
 
-手工 Compose 由部署者维护，在自己的部署目录运行 `docker compose stop` 可停止服务并保留数据。决定删除该手工部署的记忆数据前先完成备份，再核实 Compose 项目、卷名和归属；不要使用全局 Docker 清理命令。
+手工 Compose 由部署者管理，在自己的部署目录运行 `docker compose stop` 可停止服务并保留数据。决定删除该手工部署的记忆数据前先完成备份，再核实 Compose 项目、卷名和归属；不要使用全局 Docker 清理命令。

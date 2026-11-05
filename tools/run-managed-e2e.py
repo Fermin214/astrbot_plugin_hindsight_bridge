@@ -25,6 +25,7 @@ class Managed(live.Environment):
         self.driver = "managed_e2e.py"
         self.install_root = self.output / "managed-installations"
         self.settings.update(listen_host="0.0.0.0", chat_tokens=8192, control_plane_port=live.free_port())
+        self.settings["upgrade_from_1_1"] = args.upgrade_from_1_1
 
     def prepare_network(self):
         self.docker("network", "create", "--label", "hindsight-bridge.test=" + self.owner, self.network, stdout=subprocess.DEVNULL)
@@ -38,6 +39,10 @@ class Managed(live.Environment):
 
     def start(self):
         live.run(sys.executable, str(live.ROOT / "tools/build-test-package.py"), "--output", str(self.output))
+        if self.settings["upgrade_from_1_1"]:
+            with (self.output / "baseline-install.zip").open("wb") as file:
+                live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
+                         "c2dec0e25ae8292e3dd01ecb6e326a87965d41ef", cwd=live.ROOT, stdout=file)
         image = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6"
         if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             self.docker("tag", "hindsight-bridge-delivery-postgres:17", image)
@@ -54,12 +59,12 @@ class Managed(live.Environment):
         mounts = ["-v", str(live.ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
                   "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", "/tmp/hindsight-bridge-token-cache:/token-cache:ro"]
-        self.docker("run", "--rm", "--network", "none", *mounts, "soulter/astrbot:v4.29.1", "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
+        self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
         name = self.owner + "-astrbot"
         self.containers.append(name)
         self.docker("run", "-d", "--name", name, "--hostname", name, "--label", "hindsight-bridge.test=" + self.owner,
                     "--network", self.network, "--memory", "1536m", "-p", f'127.0.0.1:{self.settings["dashboard_port"]}:{self.settings["dashboard_port"]}',
-                    "-p", f'127.0.0.1:{self.settings["onebot_port"]}:{self.settings["onebot_port"]}', *mounts, "soulter/astrbot:v4.29.1", stdout=subprocess.DEVNULL)
+                    "-p", f'127.0.0.1:{self.settings["onebot_port"]}:{self.settings["onebot_port"]}', *mounts, self.astrbot_image, stdout=subprocess.DEVNULL)
         self.wait(lambda: self.ready_http(f'http://127.0.0.1:{self.settings["dashboard_port"]}/api/v1/auth/setup-status'))
         print("Owned custom-bridge AstrBot ready", flush=True)
 
@@ -97,6 +102,16 @@ class Managed(live.Environment):
                                             "--filter", "label=com.docker.compose.service=memory-api"], text=True).strip()
             address = subprocess.check_output(["docker", "inspect", "--format", '{{(index .NetworkSettings.Networks "' + self.network + '").IPAddress}}', name], text=True).strip()
             self.settings.update(hindsight_url="http://" + address + ":8888", memory_key=state["api_key"], managed_project=project)
+            actual = subprocess.check_output([
+                "docker", "exec", name, "python", "-c", "from hindsight_api import __version__; print(__version__)",
+            ], text=True).strip()
+            expected = "1.1.0" if self.settings["upgrade_from_1_1"] and action == "managed_install" else "1.2.0"
+            if actual != expected:
+                raise RuntimeError("Managed Hindsight version differs from the test target")
+            self.settings["hindsight_version"] = actual
+            self.settings["hindsight_image_id"] = subprocess.check_output([
+                "docker", "inspect", "--format", "{{.Image}}", name,
+            ], text=True).strip()
             live.private_json(self.output / "live-settings.json", self.settings)
         else:
             for kind, flags in (("ps", ["-aq"]), ("volume", ["ls", "-q"]), ("network", ["ls", "-q"])):
@@ -117,7 +132,7 @@ class Managed(live.Environment):
                     raise RuntimeError("Unexpected managed project resource")
                 result = subprocess.run(["docker", "logs", name], capture_output=True)
                 (self.output / ("managed-" + service + ".log")).write_bytes(result.stdout + result.stderr)
-                self.docker("stop", "-t", "50", name, stdout=subprocess.DEVNULL)
+                self.docker("stop", "-t", "90", name, stdout=subprocess.DEVNULL)
                 self.docker("rm", name, stdout=subprocess.DEVNULL)
             for kind, names in (("network", {self.project + "_memory_database", self.project + "-clients"}),
                                 ("volume", {self.project + "_memory_postgres", self.project + "_memory_settings"})):
@@ -140,6 +155,9 @@ def main():
     parser.add_argument("--model-environment", type=Path, default=Path("/tmp/hindsight-bridge-qwen-acceptance/model-environment.json"))
     parser.add_argument("--magpie-url", default="http://127.0.0.1:3425/v1")
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
+    parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
+    parser.add_argument("--upgrade-from-1.1", dest="upgrade_from_1_1", action="store_true",
+                        help="install the previous native plugin/service, then use the current browser upgrade flow")
     args = parser.parse_args()
     state = Managed(args)
     state.model_environment = args.model_environment
