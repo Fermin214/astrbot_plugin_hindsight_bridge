@@ -70,6 +70,37 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.client.request.side_effect = HindsightError("http_503")
         self.assertIsNone((await self.panel.service_status())["version"])
 
+    async def ignore(self, **extra):
+        self.panel.body = AsyncMock(return_value={
+            "config_revision": self.panel.config_revision(), "target": "1.2.0",
+            "connection_revision": self.panel.connection_revision(), **extra,
+        })
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin"))}):
+            return await self.panel.ignore_upgrade()
+
+    async def test_ignored_notice_survives_reload_and_is_bound_to_connection_and_target(self):
+        revision = self.panel.config_revision()
+        result = await self.ignore()
+        self.assertNotEqual(result["config_revision"], revision)
+        self.panel = self.reload_panel()
+        self.assertTrue((await self.panel.service_status())["ignored"])
+        self.plugin.config["api_key"] = "rotated-key"
+        self.assertFalse((await self.panel.service_status())["ignored"])
+        self.plugin.config["api_key"] = self.client.api_key
+        self.assertTrue((await self.panel.service_status())["ignored"])
+        with patch("plugins.astrbot_plugin_hindsight_bridge.core.panel.HINDSIGHT_VERSION", "1.3.0"):
+            self.assertFalse((await self.panel.service_status())["ignored"])
+
+    async def test_ignore_rejects_changed_scope_target_revision_and_unfinished_upgrade(self):
+        for extra in ({"connection_revision": "stale"}, {"target": "1.3.0"}, {"config_revision": "stale"}):
+            with self.subTest(extra=extra), self.assertRaises(PanelError):
+                await self.ignore(**extra)
+        self.assertNotIn("ignored_upgrades", self.panel.state())
+        await self.action("begin")
+        with self.assertRaises(PanelError):
+            await self.ignore()
+        self.assertNotIn("ignored_upgrades", self.panel.state())
+
     async def test_prepare_requires_backups_all_banks_and_retains_pending_data(self):
         with self.assertRaises(PanelError):
             await self.action("prepare")

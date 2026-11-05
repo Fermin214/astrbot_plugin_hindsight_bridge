@@ -3,344 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>记忆服务管理</title>
+  <title>Hindsight Bridge</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <main class="shell">
     <header class="page-header">
-      <div>
-        <h1>记忆服务管理</h1>
-      </div>
+      <h1><span class="brand-mark" aria-hidden="true">H</span>Hindsight Bridge</h1>
+      <div class="connection-status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="status-label">正在连接 AstrBot…</span></div>
     </header>
-    <div id="update-error" class="notice error" role="status" hidden><span id="update-error-message"></span> <button id="refresh" type="button" disabled>重新获取</button></div>
     <div id="startup" class="notice" role="status">正在连接 AstrBot…</div>
-    <div id="settings-conflict" class="notice error" role="status" hidden>
-      <p>设置已变化。重新加载设置会替换尚未保存的连接、模型及使用者更改。已复制的命令不会撤销。</p>
-      <button id="reload-settings" type="button">重新加载设置</button>
-    </div>
-    <nav class="tabs" role="tablist" aria-label="记忆服务管理">
-      <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">记忆与保存</button>
-      <button id="tab-setup" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1" type="button">设置 <span id="setup-update" class="badge" hidden>可升级</span></button>
+    <div id="update-error" class="notice error" role="status" hidden><span id="update-error-message"></span><button id="refresh" type="button" disabled>重新获取</button></div>
+    <div id="settings-conflict" class="notice error" role="status" hidden><p>设置已变化。重新加载会替换尚未保存的连接和模型选择。</p><button id="reload-settings" type="button">重新加载设置</button></div>
+    <section id="upgrade-notice" class="upgrade-notice" role="status" hidden>
+      <strong id="upgrade-notice-title"></strong>
+      <div class="notice-actions"><button id="ignore-upgrade" type="button" class="text-button">忽略</button><button id="view-upgrade" type="button" class="primary">查看升级</button></div>
+    </section>
+    <div id="paused-banks-notice" class="notice" role="status" hidden><span>有记忆库暂停读写</span><button id="show-paused-banks" type="button">查看暂停状态</button></div>
+    <nav class="tabs" role="tablist" aria-label="插件页面">
+      <button id="tab-memories" role="tab" aria-selected="true" aria-controls="panel-memories" type="button">用户与记忆</button>
+      <button id="tab-setup" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1" type="button">插件设置</button>
     </nav>
 
-    <section id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
-      <div id="setup-intro" class="notice" hidden>先安装或连接记忆服务，再选择模型、添加使用者并保存。</div>
-      <fieldset id="setup-fields" disabled>
-        <legend class="sr-only">记忆服务设置</legend>
-        <div class="section-heading">
-          <h2>记忆服务</h2>
-        </div>
-        <div class="connection-status">
-          <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-          <span id="status-label">状态未知</span>
-          <span id="service-version" hidden><span id="service-version-text"></span></span>
-          <button id="service-version-check" class="text-button" type="button">重新检查版本</button>
-          <button id="go-upgrade" class="text-button" type="button" hidden>查看升级步骤</button>
-        </div>
-        <p id="status-description" class="hint" hidden></p>
-        <details id="external-upgrade" class="installation">
-          <summary>外部服务升级与备份</summary>
-          <p>由服务管理员暂停写入、备份并升级 Hindsight。操作步骤及故障恢复见<a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md#升级-hindsight-服务" target="_blank" rel="noopener noreferrer">备份与恢复指南</a>。</p>
-        </details>
-        <fieldset class="connection-options">
-          <legend class="sr-only">安装方式</legend>
-          <label class="choice">
-            <input type="radio" name="connection-mode" value="managed" checked>
-            <span><strong>安装配套记忆服务</strong><small>在运行 AstrBot 的 Linux 主机安装。</small></span>
-          </label>
-          <label class="choice">
-            <input type="radio" name="connection-mode" value="existing">
-            <span><strong>连接已有 Hindsight</strong><small>填写已有服务的 API 地址和连接密钥。</small></span>
-          </label>
-        </fieldset>
-        <div id="managed-settings" class="surface">
-
-          <p>运行 AstrBot 的 Linux 主机需要安装 Docker 和 Compose。</p>
-          <div class="actions">
-            <button id="prepare" class="primary" type="button">生成安装命令</button>
-          </div>
-          <details id="installation" class="installation" hidden>
-            <summary>安装命令</summary>
-            <p>在运行 AstrBot 的 Linux 主机终端执行，完成后在下方选择模型并保存。</p>
-            <textarea id="install-command" aria-label="安装命令" rows="5" readonly spellcheck="false" autocomplete="off" aria-describedby="command-warning"></textarea>
-            <div class="actions">
-              <button id="copy-command" type="button">复制命令</button>
-              <span id="command-warning" class="hint">命令含服务连接凭据，请勿公开分享。</span>
-            </div>
-          </details>
-        </div>
-        <form id="settings-form">
-          <div class="surface connection-form">
-            <h3 id="connection-heading">安装完成后连接</h3>
-            <div class="form-grid">
-              <label>API 地址<input id="api-url" type="url" inputmode="url" placeholder="http://hindsight:8888" required autocomplete="off"></label>
-              <label id="api-key-field">连接密钥<input id="api-key" type="password" placeholder="填写记忆服务的 API Key" autocomplete="new-password"></label>
-            </div>
-            <div class="control-plane-setting">
-              <div class="with-help">
-                <label for="control-plane-url">官方管理地址（Control Plane）</label>
-                <details class="help" name="page-help">
-                  <summary aria-label="官方管理地址怎么填" title="官方管理地址怎么填">?</summary>
-                  <div class="help-content">
-                    <p>填写你在浏览器中打开 Hindsight Control Plane 的地址。这是官方记忆管理面板，与插件的 API 地址分别配置。</p>
-                    <p>有域名：先配置反向代理，再填对应的 HTTPS 地址。</p>
-                    <p>没有域名：先建立 SSH 隧道，再填本机隧道地址。浏览器中的 127.0.0.1 指你自己的电脑，建立隧道后才能用它访问服务器。</p>
-                    <p>隧道命令和反向代理示例见安装文档。</p>
-                  </div>
-                </details>
-              </div>
-              <input id="control-plane-url" type="url" inputmode="url" placeholder="https://memory.example.com 或 http://127.0.0.1:9999" autocomplete="off">
-            </div>
-            <p id="key-help" class="hint">填写记忆服务的连接密钥。</p>
-            <button id="check-connection" type="button">测试服务连接</button>
-            <p id="connection-result" role="status" class="hint" hidden></p>
-          </div>
-          <div id="models-settings" class="settings-section">
-            <div class="section-heading with-help">
-              <h2>模型配置</h2>
-              <details class="help" name="page-help">
-                <summary aria-label="这几种模型分别有什么用" title="模型分别有什么用">?</summary>
-                <div class="help-content">
-                  <p>大语言模型（LLM）：用于 Hindsight 的记忆提取（Retain）、整合（Consolidation）和反思（Reflect），包括知识页生成与更新；不负责机器人的日常回复。</p>
-                  <p>嵌入模型（Embeddings）：将文字转换成向量，供记忆召回（Recall）按含义查找。请从 AstrBot「模型供应商 → 嵌入」中选择。</p>
-                  <p>重排模型（Reranker）：对检索结果再次排序，可选。</p>
-                  <p>这些模型供 Hindsight 使用，从 AstrBot 已有供应商中选择。AstrBot 的日常聊天模型在宿主设置中管理。</p>
-                  <p>验证、整理、检索和知识页更新可能产生模型调用费用，请确认供应商计费。</p>
-                </div>
-              </details>
-            </div>
-            <div class="surface">
-              <div class="form-grid">
-                <label>大语言模型（LLM） <span class="required">必选</span><select id="chat-provider"></select></label>
-                <label>嵌入模型（Embeddings） <span class="required">必选</span><select id="embedding-provider"></select></label>
-                <label>重排模型（Reranker） <span class="optional">可选</span><select id="rerank-provider"></select></label>
-              </div>
-              <p id="provider-help" class="hint"></p>
-              <div class="actions"><button id="save-models" type="button">验证并保存模型</button></div>
-              <p id="model-progress" class="hint" role="status" hidden></p>
-            </div>
-          </div>
-          <div class="section-heading">
-            <div class="with-help">
-              <h2>使用者</h2>
-              <details class="help" name="page-help">
-                <summary aria-label="怎样添加使用者和确认授权" title="使用者与授权">?</summary>
-                <div class="help-content">
-                  <p>名单决定谁可以保存和查看记忆；不同用户的记忆分开保存。</p>
-                  <p>让使用者在目标机器人的私聊发送 /sid。OneBot 填用户 QQ 号；QQ 官方机器人填回复中的 UID（OpenID）。</p>
-                  <p>先保存使用者名单，再点击「确认账号授权」，把该用户与当前登录的机器人关联。授权完成后开始记录新消息。</p>
-                  <p>移除用户并保存后，撤销该用户的记忆访问权限，已有记忆保留。重新添加或换机器人账号后，请再次确认授权。</p>
-                </div>
-              </details>
-            </div>
-          </div>
-          <div class="surface">
-            <div id="accounts" class="accounts"></div>
-            <button id="add-account" type="button" class="text-button">＋ 添加用户</button>
-            <p id="platform-help" class="hint"></p>
-          </div>
-          <div class="settings-footer">
-            <button id="save-settings" type="submit" class="primary">保存连接和使用者名单</button>
-          </div>
-        </form>
-      </fieldset>
-      <section id="maintenance" class="settings-section" hidden>
-        <div class="section-heading"><h2>服务升级与卸载</h2></div>
-        <div class="surface">
-          <details class="installation">
-            <summary>服务备份与故障恢复</summary>
-            <p>备份插件数据、控制数据和服务数据库，操作步骤见<a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md" target="_blank" rel="noopener noreferrer">备份与恢复指南</a>。</p>
-          </details>
-          <section id="service-upgrade" hidden>
-            <h3>升级 Hindsight 到 1.2.0</h3>
-            <p class="hint"><a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md#升级-hindsight-服务" target="_blank" rel="noopener noreferrer">备份与恢复指南</a></p>
-            <p class="hint">1.1.0 仍受支持，可以继续使用。升级保留原记忆、身份和模型设置。</p>
-            <p class="hint">1. 暂停所有用户的记忆保存和查询，等待已有记录处理完成。普通聊天继续，但暂停期间的新聊天不会保存。其他客户端和官方面板也须停止写入。</p>
-            <button id="upgrade-begin" type="button">暂停所有用户的保存和查询</button>
-            <p class="hint">2. 备份插件业务数据、最新控制数据及插件配置。下方命令另会备份服务配置、模型设置和数据库，保存在原安装目录旁的备份目录。</p>
-            <label class="check-label"><input id="upgrade-backup-confirmed" type="checkbox">已备份插件数据及最新控制数据，并停止其他客户端和官方面板写入</label>
-            <button id="upgrade-prepare" type="button">检查保存进度并生成升级命令</button>
-            <details id="upgrade-installation" class="installation" hidden>
-              <summary>升级命令</summary>
-              <p class="hint">在原服务器、原安装路径执行，不要先卸载。使用自定义 HINDSIGHT_INSTALL_ROOT 时保持原值。失败时不要恢复保存和查询，保留备份并按备份与恢复指南处理，不直接改回旧镜像。</p>
-              <textarea id="upgrade-command" aria-label="升级命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea>
-              <button id="copy-upgrade" type="button">复制升级命令</button>
-            </details>
-            <p class="hint">3. 执行成功后点击「核对升级结果」。确认旧记忆可用，再点击「解除升级造成的暂停」，一次恢复受影响用户；原记忆模式及升级前已有的暂停保留。</p>
-            <div class="actions"><button id="upgrade-verify" type="button">核对升级结果</button><button id="upgrade-resume" type="button" hidden>解除升级造成的暂停</button></div>
-            <details id="upgrade-abandon" class="installation" hidden>
-              <summary>暂不升级</summary>
-              <p>仅适用于服务仍为 1.1.0：解除这次升级新增的暂停，保留原有暂停及记忆模式。已复制的升级命令不会撤销，放弃后请勿再执行。</p>
-              <button id="upgrade-cancel" type="button">暂不升级，解除升级造成的暂停</button>
-            </details>
-            <p id="upgrade-result" class="hint" role="status" hidden></p>
-          </section>
-          <h3>修复配套服务</h3><p class="hint">重新部署 1.2.0 服务，保留记忆、模型和凭据；不用于从 1.1.0 升级。</p>
-          <button id="reinstall" type="button">生成同版本修复命令</button>
-          <h3 class="maintenance-heading">卸载配套服务</h3>
-          <p class="hint">删除这套服务及全部记忆数据。插件本体需在 AstrBot 插件面板单独卸载。</p>
-          <label class="check-label"><input id="delete-memory-data" type="checkbox">我确认删除这套配套服务及全部记忆数据</label>
-          <button id="prepare-uninstall" type="button" class="danger">生成完整卸载命令</button>
-          <details id="uninstallation" class="installation" hidden>
-            <summary>卸载命令</summary>
-            <textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea>
-            <div class="actions"><button id="copy-uninstall" type="button">复制命令</button></div>
-          </details>
-        </div>
-      </section>
-    </section>
-
-    <section id="panel-memories" role="tabpanel" aria-labelledby="tab-memories">
-      <div id="service-alert" class="notice" role="status" hidden>
-        <span id="service-alert-message"></span>
-        <button id="service-alert-setup" type="button">打开设置</button>
-      </div>
-      <div class="section-heading"><h2>用户记忆</h2></div>
+    <section id="panel-memories" class="page-content" role="tabpanel" aria-labelledby="tab-memories">
+      <div id="service-alert" class="notice" role="status" hidden><span id="service-alert-message"></span><button id="service-alert-setup" type="button">打开设置</button></div>
+      <div class="user-toolbar"><label>选择用户<select id="scope-picker"></select></label><button id="add-account" type="button">添加用户</button></div>
       <fieldset id="memory-fields" disabled>
-        <legend class="sr-only">账号记忆与保存</legend>
-        <div id="user-controls" class="surface">
-        <div class="memory-toolbar">
-          <label class="scope-picker">选择用户<select id="scope-picker"></select></label>
-          <label id="scope-mode-field">记忆模式<select id="scope-mode">
-            <option value="active">保存并自动使用记忆</option>
-            <option value="readonly">只自动使用已有记忆</option>
-            <option value="paused">暂停保存和自动使用</option>
-          </select></label>
-          <button id="save-mode" type="button">保存记忆模式</button>
-          <p id="historical-mode" class="hint full-width" hidden></p>
-        </div>
-        <div class="user-progress">
-          <div class="with-help">
-            <h3>此用户的保存与查询</h3>
-            <details class="help" name="page-help">
-              <summary aria-label="修改记忆前怎样暂停和恢复" title="修改记忆前怎样暂停和恢复">?</summary>
-              <div class="help-content">
-                <h4>保存进度怎么看？</h4>
-                <p>这里显示聊天记录交给 Hindsight 的保存进度。「已保存」表示保存任务已完成；出现失败时，先按错误提示处理，再点击「重试失败记录」。</p>
-                <p>检索与保存分开执行。检索超时只表示该次没有读取到记忆，不表示新聊天保存失败；是否保存，以这里的任务结果为准。</p>
-                <h4>什么时候暂停保存和查询？</h4>
-                <p>去官方面板更正、删除记忆或导入备份前，先暂停这个用户的记忆保存和查询，包括手动查看。普通聊天继续，但暂停期间的新聊天不会保存。Hindsight 已接收的记录继续处理。</p>
-                <p>1. 先等要保留的聊天记录保存完成。失败记录修复后重试。</p>
-                <p>2. 点击「暂停保存和查询」，页面会自动检查进度，等到显示「可以修改记忆」。</p>
-                <p>3. 打开下方「官方管理地址」，按记忆库 ID 选择 Bank，完成更正、删除或导入。</p>
-                <p>4. 回到这里点击「恢复原记忆模式」。原模式为「暂停保存和自动使用」或「只自动使用已有记忆」时，仍按原模式运行，不会自动开启保存。</p>
-                <h4>还有待保存记录怎么办？</h4>
-                <p>想保留这些记录，请在暂停前等它们保存完成。决定放弃时，展开「放弃记录」，勾选确认后点击「放弃记录并保持暂停」。已接收的任务会继续处理，放弃的记录无法恢复。</p>
-                <p>历史机器人范围仅解除所选 Bank 的暂停，不改变机器人关联或记忆访问权限。</p>
-                <h4>什么时候清空全部记忆？</h4>
-                <p>想让这个用户的长期记忆从头开始时，使用「清空此用户的记忆」。确认后删除其全部长期记忆、知识页及来源材料，AstrBot 聊天记录保留。</p>
-              </div>
-            </details>
+        <legend class="sr-only">用户与记忆</legend>
+        <header class="profile"><h2 id="user-name"></h2><div class="identity"><span id="user-platform"></span><span id="user-bot"></span><span id="user-availability"></span></div></header>
+        <div id="pending-account" class="notice" hidden><p id="pending-account-message"></p><button id="authorize-account" type="button">确认机器人身份</button></div>
+        <section class="content-section">
+          <h3>记忆模式</h3>
+          <div id="mode-control" class="mode-group" role="group" aria-label="记忆模式">
+            <button type="button" data-mode="active" aria-pressed="false">读写记忆</button>
+            <button type="button" data-mode="readonly" aria-pressed="false">只读记忆</button>
+            <button type="button" data-mode="paused" aria-pressed="false">停用记忆</button>
           </div>
-          <p id="queue-summary" class="hint"></p>
-          <p id="scope-recall-status" class="hint"></p>
-          <p id="maintenance-state" class="hint" role="status"></p>
-          <p id="pause-impact" class="hint">暂停后普通聊天继续，新聊天不保存。</p>
-          <div class="actions">
-            <button id="maintenance-begin" type="button">暂停保存和查询</button>
-            <button id="maintenance-retry" type="button" hidden>重试检查</button>
-            <button id="maintenance-resume" type="button" hidden>恢复原记忆模式</button>
-            <button id="retry" type="button" hidden>重试失败记录</button>
-          </div>
-          <details id="discard-records" class="installation" hidden>
-            <summary>放弃记录</summary>
-            <p>放弃尚未发送或保存失败的记录，无法恢复；已接收的任务会继续处理。此操作同时暂停保存和查询。</p>
-            <label class="check-label"><input id="discard-pending" type="checkbox">确认放弃这些记录</label>
-            <button id="maintenance-discard" class="danger-quiet" type="button" disabled>放弃记录并保持暂停</button>
-          </details>
-        </div>
-        </div>
-        <div id="scope-error" class="notice error" role="status" hidden></div>
-        <div class="surface settings-section">
-          <div class="with-help">
-            <h3>查看和管理记忆</h3>
-            <details class="help" name="page-help">
-              <summary aria-label="怎样访问记忆面板和获取登录密钥" title="访问方式与登录密钥">?</summary>
-              <div class="help-content">
-                <p>记忆库在首次保存聊天时创建。登录后按下方编号选择对应的记忆库。</p>
-                <p>官方面板中的 Bank 就是记忆库。Memories（记忆）包含 World Facts（世界事实）、Experience（经历）和 Observations（观察）；知识页在 Knowledge（知识）中查看。插件页面负责连接、选页、模式和保存进度。</p>
-                <p>服务装在远程服务器上时，先配置域名反向代理或 SSH 隧道。127.0.0.1 指你自己的电脑，建立隧道后才能用它访问服务器。</p>
-                <h4>登录密钥</h4>
-                <p id="control-plane-key-help">连接已有 Hindsight 时，请向服务管理员获取网页登录密钥。</p>
-                <textarea id="control-plane-key-command" aria-label="读取面板登录密钥的命令" rows="3" readonly spellcheck="false" hidden></textarea>
-              </div>
-            </details>
-          </div>
-          <div class="form-grid">
-            <label>官方管理地址<input id="control-plane-address" readonly spellcheck="false" aria-describedby="control-plane-help"></label>
-            <label>记忆库 ID（Bank ID）<input id="scope-bank" readonly spellcheck="false"></label>
-          </div>
-          <p id="control-plane-help" class="hint">复制地址到浏览器打开，按 Bank ID 选择记忆库；访问说明和登录密钥见问号。</p>
-          <p id="control-plane-missing" class="hint" hidden>请在「设置」中填写官方管理地址。</p>
-        </div>
-        <div class="surface settings-section">
-          <div class="with-help">
-            <h3>知识页（Knowledge Page）</h3>
-            <details class="help" name="page-help">
-              <summary aria-label="怎样准备和使用知识页" title="怎样使用知识页">?</summary>
-              <div class="help-content">
-                <h4>它与普通记忆检索有什么区别？</h4>
-                <p>记忆召回（Recall）按问题查找相关记忆。知识页（Knowledge Page）是 Hindsight 从记忆中按主题生成的文档；插件可把所选短页提供给聊天模型参考。例如：从聊过的内容中整理「项目目标及约束」，供新会话参考。</p>
-                <h4>怎样准备？</h4>
-                <p>打开上方官方管理地址，按「记忆库 ID」选择 Bank。进入 Knowledge（知识）→ Pages（知识页），在 Knowledge Base（知识库）点击 New page（新建知识页），填写名称和 Source query（源查询，即希望此页回答的问题），创建后等待正文生成。</p>
-                <p>需要缩短正文时，打开该知识页的 Mental model options（心智模型选项），点击 Edit（编辑），在 General（概览）调低 Max Tokens（最大令牌数）并保存。重新打开「心智模型选项」，在操作菜单点击「立即完整刷新」，再确认「执行完整刷新」，等待生成并核对正文长度；普通手动刷新可能保留原正文。</p>
-                <p>已有记忆没有标签时，创建页的标签留空。生成和刷新可能产生模型费用。</p>
-                <p>回到这里点击「获取知识页列表」，选择一份知识页，勾选「聊天时使用所选知识页」，再点击「保存知识页选择」。使用者发送 /hindsight background 核对正文；创建和更新仍在官方面板操作。</p>
-                <h4>关闭、更新和超限</h4>
-                <p>点击「停止聊天时使用知识页」后，不再向聊天模型提供知识页，已选知识页和手动查看保留。「暂停保存和自动使用」模式停止自动使用；点击「暂停保存和查询」后，手动查看也会暂停。</p>
-                <p>内容是否过期显示「未知」时，请在官方面板核对内容是否已更新。修改或删除前先暂停保存和查询。</p>
-                <p>整页太长或读取超时时，该次聊天不使用知识页，记忆检索仍按所选记忆模式执行。超长内容请在官方面板调整为短页后再试。</p>
-              </div>
-            </details>
-          </div>
-          <div class="form-grid">
-            <label>选择已有知识页<select id="background-page"><option value="">尚未选择</option></select></label>
-            <label class="check-label"><input id="background-enabled" type="checkbox">聊天时使用所选知识页</label>
-          </div>
-          <div class="actions">
-            <button id="background-load" type="button">获取知识页列表</button>
-            <button id="background-save" type="button">保存知识页选择</button>
-            <button id="background-close" type="button">停止聊天时使用知识页</button>
-          </div>
-          <p id="background-status" class="hint" role="status"></p>
-          <p id="background-feedback" class="hint" role="status" hidden></p>
-        </div>
-        <div class="surface settings-section">
-          <h3>清空此用户的记忆</h3>
-          <p class="hint">删除所选用户在 Hindsight 中的全部记忆、知识页及来源材料，无法撤销。AstrBot 聊天记录保留。</p>
-          <button id="forget" class="danger-quiet" type="button">清空此用户的记忆</button>
-        </div>
+          <p id="historical-mode" hidden></p>
+        </section>
+        <section class="content-section">
+          <h3>记忆内容</h3>
+          <label id="bank-range-field" hidden>记忆库<select id="bank-picker"></select></label>
+          <div class="bank-row"><span>Bank ID</span><input id="scope-bank" readonly spellcheck="false" aria-label="Bank ID"><button id="copy-bank" type="button">复制 ID</button></div>
+          <p id="bank-state" class="operation-status" hidden></p>
+          <div class="knowledge-row"><label for="background-page">聊天知识页</label><select id="background-page"><option value="">不使用知识页</option></select></div>
+          <p id="background-status" class="operation-status" role="status" hidden></p>
+          <p id="background-feedback" class="operation-status" role="status" hidden></p>
+        </section>
+        <section class="content-section">
+          <h3>记忆状态</h3>
+          <div class="stats"><div><span>待保存</span><strong id="pending-count">0</strong></div><div><span>保存失败</span><strong id="failed-count">0</strong></div></div>
+          <p id="queue-summary" class="operation-status" hidden></p>
+          <div id="scope-error" class="notice error" role="status" hidden></div>
+          <button id="retry" type="button" hidden>重试保存</button>
+          <div class="recall-row"><span>最近记忆检索</span><span id="scope-recall-status">尚未检索</span></div>
+          <p id="maintenance-state" class="operation-status" role="status" hidden></p>
+          <button id="maintenance-view" type="button" hidden>查看暂停状态</button>
+        </section>
+        <footer class="user-actions"><button id="remove-account" type="button" class="danger-quiet">移除用户</button><button id="forget" type="button" class="danger-quiet">清空记忆</button></footer>
       </fieldset>
-      <div id="no-scopes" class="empty" hidden><h3>还没有添加使用者</h3><p>在「设置」中添加使用者并保存。</p><button id="go-setup" type="button">前往设置</button></div>
+      <div id="no-scopes" class="empty" hidden><h2>还没有用户</h2></div>
     </section>
-    <div id="feedback" class="feedback" role="status" aria-live="polite" hidden>
-      <span id="feedback-message"></span>
-      <button id="dismiss-feedback" type="button" aria-label="关闭提示">关闭</button>
-    </div>
+
+    <section id="panel-setup" class="page-content" role="tabpanel" aria-labelledby="tab-setup" hidden>
+      <fieldset id="setup-fields" disabled>
+        <legend class="sr-only">插件设置</legend>
+        <section id="setup-intro" class="surface" hidden>
+          <h2>连接 Hindsight</h2>
+          <fieldset class="connection-options"><legend class="sr-only">连接方式</legend>
+            <label class="choice"><input type="radio" name="connection-mode" value="managed" checked>安装配套服务</label>
+            <label class="choice"><input type="radio" name="connection-mode" value="existing">连接已有服务</label>
+          </fieldset>
+          <div id="managed-settings"><button id="prepare" type="button" class="primary">生成安装命令</button></div>
+        </section>
+        <section id="models-settings" class="surface">
+          <h2>模型配置</h2>
+          <div class="form-grid"><label>记忆处理模型<select id="chat-provider"></select></label><label>向量模型<select id="embedding-provider"></select></label><label class="full-width">重排模型<select id="rerank-provider"></select></label></div>
+          <p id="provider-help" class="operation-status" role="status" hidden></p>
+          <div class="actions"><button id="save-models" type="button" class="primary">保存模型</button></div>
+          <p id="model-progress" class="operation-status" role="status" hidden></p>
+        </section>
+        <form id="settings-form" class="surface">
+          <h2 id="connection-heading">连接与访问</h2>
+          <div class="service-meta"><span id="service-version"><span id="service-version-text"></span></span><button id="service-version-check" type="button" class="text-button">检查版本</button></div>
+          <div class="form-grid"><label class="full-width">API 地址<input id="api-url" type="url" required autocomplete="off"></label><label id="api-key-field" class="full-width">API 密钥<input id="api-key" type="password" placeholder="留空沿用已保存的密钥" autocomplete="new-password"></label><label class="full-width">Hindsight 管理地址<input id="control-plane-url" type="url" placeholder="https://memory.example.com" autocomplete="off"></label></div>
+          <p id="status-description" class="operation-status" role="status" hidden></p>
+          <div class="actions"><button id="save-settings" type="submit" class="primary">保存连接</button><button id="check-connection" type="button">测试服务连接</button></div>
+          <p id="connection-result" class="operation-status" role="status" hidden></p>
+        </form>
+        <section id="maintenance" class="surface" hidden><h2>服务管理</h2><div class="service-ops"><button id="backup-guide" type="button">备份指南</button><button id="go-upgrade" type="button" hidden>升级服务</button><button id="reinstall" type="button">重新部署</button><button id="prepare-uninstall" type="button" class="danger-quiet">卸载服务</button></div></section>
+      </fieldset>
+    </section>
+    <div id="feedback" class="feedback" role="status" aria-live="polite" hidden><span id="feedback-message"></span><button id="dismiss-feedback" type="button" aria-label="关闭提示">关闭</button></div>
   </main>
 
-  <dialog id="authorization-dialog" aria-labelledby="authorization-heading">
-    <div class="dialog-header"><h2 id="authorization-heading">确认当前机器人身份并授权</h2></div>
-    <p id="authorization-description"></p>
-    <div class="actions dialog-actions"><button type="button" id="cancel-authorization" autofocus>取消</button><button type="button" id="confirm-authorization" class="primary">确认授权</button></div>
-  </dialog>
-  <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading" aria-describedby="remove-account-description">
-    <div class="dialog-header"><h2 id="remove-account-heading">移除此使用者？</h2></div>
-    <p id="remove-account-user" class="account-removal-user"></p>
-    <p id="remove-account-description">确认后从使用者名单移除。保存设置后，撤销该用户的记忆访问权限，已有记忆保留。</p>
-    <div class="actions dialog-actions"><button type="button" id="cancel-remove-account" autofocus>取消</button><button type="button" id="confirm-remove-account" class="danger">确认移除</button></div>
-  </dialog>
-  <dialog id="forget-dialog" aria-labelledby="forget-heading" aria-describedby="forget-description">
-    <div class="dialog-header"><h2 id="forget-heading">清空此用户的全部记忆？</h2></div>
-    <p id="forget-description">删除这个用户在 Hindsight 中的全部记忆、知识页及其历史、用于生成记忆的聊天内容，以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。</p>
-    <p id="forget-user" class="forget-user"></p>
-    <p id="forget-message" class="hint"></p>
-    <label class="check-label"><input id="forget-agree" type="checkbox">我确认删除这个用户的全部记忆</label>
-    <div class="actions dialog-actions"><button type="button" id="cancel-forget" autofocus>取消</button><button type="button" id="confirm-forget" class="danger" disabled>确认清空记忆</button></div>
-    <p id="forget-feedback" class="hint" role="status"></p>
-  </dialog>
+  <dialog id="account-dialog" aria-labelledby="account-heading"><form id="account-form"><div class="dialog-header"><h2 id="account-heading">添加用户</h2><button type="button" data-close="account-dialog" aria-label="关闭">×</button></div><div class="dialog-fields"><label>平台实例<select id="account-platform" required></select></label><label><span id="account-user-label">用户 ID</span><input id="account-user" required autocomplete="off"></label></div><p id="platform-help" class="operation-status" hidden></p><p id="account-feedback" class="operation-status" role="status" hidden></p><div class="dialog-actions"><button id="save-account" class="primary" type="submit">添加用户</button></div></form></dialog>
+  <dialog id="authorization-dialog" aria-labelledby="authorization-heading"><div class="dialog-header"><h2 id="authorization-heading">确认机器人身份</h2></div><p id="authorization-description"></p><div class="dialog-actions"><button id="cancel-authorization" type="button">取消</button><button id="confirm-authorization" type="button" class="primary">确认开通</button></div></dialog>
+  <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading"><div class="dialog-header"><h2 id="remove-account-heading">移除用户</h2></div><p id="remove-account-user"></p><p>撤销这个用户的记忆访问权限，已有记忆保留。</p><div class="dialog-actions"><button id="cancel-remove-account" type="button">取消</button><button id="confirm-remove-account" type="button" class="danger">确认移除</button></div><p id="remove-account-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="forget-dialog" aria-labelledby="forget-heading"><div class="dialog-header"><h2 id="forget-heading">清空记忆</h2></div><p>删除所选记忆库的全部记忆、知识页、来源材料和待保存记录，无法撤销。AstrBot 聊天记录保留。</p><p id="forget-user" class="forget-user"></p><p id="forget-message" class="operation-status"></p><label class="check-label"><input id="forget-agree" type="checkbox">确认删除以上记忆</label><div class="dialog-actions"><button id="cancel-forget" type="button">取消</button><button id="confirm-forget" type="button" class="danger" disabled>确认清空</button></div><p id="forget-feedback" class="operation-status" role="status"></p></dialog>
+
+  <dialog id="deployment-dialog" aria-labelledby="deployment-heading"><div class="dialog-header"><h2 id="deployment-heading">重新部署</h2><button type="button" data-close="deployment-dialog" aria-label="关闭">×</button></div><p id="deployment-description"></p><div id="installation" class="command-output" hidden><textarea id="install-command" aria-label="部署命令" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-command" type="button">复制命令</button></div></div><div class="dialog-actions"><button id="generate-deployment" type="button" class="primary">生成部署命令</button><button id="check-deployment" type="button" hidden>检查服务连接</button></div><p id="deployment-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>删除这套配套服务的专属容器、全部记忆和专属数据卷，无法撤销。</p><label class="check-label"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="backup-dialog" aria-labelledby="backup-heading"><div class="dialog-header"><h2 id="backup-heading">备份与恢复</h2><button type="button" data-close="backup-dialog" aria-label="关闭">×</button></div><p>备份用于故障恢复和升级前保留数据副本。完整备份包括：</p><ul><li>插件配置、业务数据和最新控制数据。</li><li>配套服务配置、模型设置和 Hindsight 数据库。</li></ul><p>一致性备份需暂停相关写入并处理在途任务，恢复时保持身份与记忆库对应。</p><p><a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md" target="_blank" rel="noopener noreferrer">打开备份与恢复指南 ↗</a></p><div class="dialog-actions"><button type="button" data-close="backup-dialog">关闭</button></div></dialog>
+  <dialog id="upgrade-dialog" aria-labelledby="upgrade-heading"><div class="dialog-header"><h2 id="upgrade-heading">升级 Hindsight</h2><button type="button" data-close="upgrade-dialog" aria-label="关闭">×</button></div><section id="service-upgrade"><ol class="upgrade-steps"><li><h3>暂停插件读写</h3><p>暂停期间的新聊天不会保存，普通聊天继续。</p><button id="upgrade-begin" type="button">暂停插件读写</button></li><li><h3>备份并执行升级</h3><p>先备份插件配置、业务数据和最新控制数据。升级命令另会备份服务配置、模型设置和数据库。</p><p><a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md#升级-hindsight-服务" target="_blank" rel="noopener noreferrer">打开备份与恢复指南 ↗</a></p><label class="check-label"><input id="upgrade-backup-confirmed" type="checkbox">已完成插件备份，并停止其他客户端和官方面板写入</label><button id="upgrade-prepare" type="button">生成升级命令</button><div id="upgrade-installation" class="command-output" hidden><p>在原服务器、原安装目录执行。升级失败时保持暂停，按备份与恢复指南处理。</p><textarea id="upgrade-command" aria-label="升级命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><button id="copy-upgrade" type="button">复制升级命令</button></div></li><li><h3>核对并结束升级</h3><div class="actions"><button id="upgrade-verify" type="button">核对升级结果</button><button id="upgrade-resume" type="button" hidden>解除升级暂停</button></div></li></ol><div id="upgrade-abandon" class="actions" hidden><button id="upgrade-cancel" type="button">暂不升级</button></div><p id="upgrade-result" class="operation-status" role="status" hidden></p></section></dialog>
+  <dialog id="external-upgrade" aria-labelledby="external-upgrade-heading"><div class="dialog-header"><h2 id="external-upgrade-heading">外部服务升级</h2><button type="button" data-close="external-upgrade" aria-label="关闭">×</button></div><p>由服务管理员完成停写、备份和版本升级。</p><p><a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md#升级-hindsight-服务" target="_blank" rel="noopener noreferrer">打开服务升级指南 ↗</a></p></dialog>
+  <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label>记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>放弃尚未发送或保存失败的记录，无法恢复。已接收的任务继续处理；所选记忆库保持读写暂停。</p><label class="check-label"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

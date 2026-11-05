@@ -248,6 +248,30 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         }])
         self.assertEqual(pairs(self.config["allowed_accounts"]), frozenset({("qq", "123")}))
 
+    async def test_connection_only_save_preserves_existing_users(self):
+        self.panel.body = AsyncMock(return_value={
+            "api_url": self.config["api_url"], "api_key": "",
+            "control_plane_url": "https://memory.example.com",
+            "config_revision": self.panel.config_revision(),
+        })
+        result = await self.panel.save()
+        self.assertTrue(result["saved"])
+        self.assertEqual(pairs(self.config["allowed_accounts"]), frozenset({("qq", "123")}))
+        self.assertEqual(self.config["control_plane_url"], "https://memory.example.com")
+
+    async def test_users_only_save_preserves_connection_and_management_address(self):
+        self.config["control_plane_url"] = "https://memory.example.com/"
+        self.panel.body = AsyncMock(return_value={
+            "allowed_accounts": [], "config_revision": self.panel.config_revision(),
+        })
+        result = await self.panel.save()
+        self.assertTrue(result["saved"])
+        self.assertEqual(self.config["allowed_accounts"], [])
+        self.assertEqual(self.config["api_url"], "http://old-service:8888")
+        self.assertEqual(self.config["api_key"], "old-secret")
+        self.assertEqual(self.config["control_plane_url"], "https://memory.example.com/")
+        self.assertEqual(self.auth_calls, [])
+
     async def test_saved_users_are_visible_without_a_running_service(self):
         snapshot = await self.panel.bootstrap()
         self.assertEqual(len(snapshot["scopes"]), 1)
@@ -491,7 +515,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.panel.store_state(state)
         self.panel.managed_request = AsyncMock(return_value={"configured": False, "ready": False})
         before = copy.deepcopy(self.config)
-        with self.assertRaisesRegex(module.PanelError, "验证并保存模型"):
+        with self.assertRaisesRegex(module.PanelError, "保存模型"):
             await self.save(api_url=state["api_url"])
         self.assertEqual(self.config, before)
         self.profile.save_config.assert_not_called()
@@ -633,7 +657,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         _, queue, maintenance = self.management_resources()
         for summary in ({"maintenance": {"phase": "ready"}}, {"bank_missing": True}):
             queue.summary.return_value = summary
-            with self.subTest(summary=summary), self.assertRaisesRegex(module.PanelError, "恢复原记忆模式"):
+            with self.subTest(summary=summary), self.assertRaisesRegex(module.PanelError, "解除读写暂停"):
                 await self.action("mode", mode="active")
         queue.set_mode.assert_not_called()
         maintenance.check.assert_not_awaited()
@@ -646,9 +670,39 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await self.action("mode", mode="active")
         queue.set_mode.assert_called_once_with("scope-1", "active")
 
+    async def test_bank_check_requires_actual_original_bank_and_preserves_modes(self):
+        scope, queue, _ = self.management_resources()
+        scope["allowed"] = False
+        queue.control.set_bank_state = Mock()
+        queue.apply_control = Mock()
+        self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), bank_exists=AsyncMock(return_value=False))
+        with self.assertRaisesRegex(module.PanelError, "原记忆库仍不存在"):
+            await self.action("bank_check")
+        queue.control.set_bank_state.assert_not_called()
+        self.plugin.client.bank_exists.return_value = True
+        await self.action("bank_check")
+        queue.control.set_bank_state.assert_called_once_with("connection-1", "bank-1", "established")
+        queue.set_mode.assert_not_called()
+        queue.apply_control.assert_called_once_with()
+
+    async def test_bank_check_rejects_bank_rotation_during_remote_read(self):
+        scope, queue, _ = self.management_resources()
+        queue.scope_owner.side_effect = lambda identifier: dict(scope)
+        queue.control.set_bank_state = Mock()
+        queue.apply_control = Mock()
+        async def rotate(bank):
+            scope["bank"] = "new-bank"
+            queue.control.owner.return_value["bank"] = "new-bank"
+            return True
+        self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), bank_exists=AsyncMock(side_effect=rotate))
+        with self.assertRaisesRegex(module.PanelError, "记忆范围已变化"):
+            await self.action("bank_check")
+        queue.control.set_bank_state.assert_not_called()
+        queue.apply_control.assert_not_called()
+
     async def test_get_actions_are_read_only_and_content_actions_are_removed(self):
         _, _, maintenance = self.management_resources()
-        for action in ("maintenance_begin", "maintenance_resume", "mode", "retry"):
+        for action in ("maintenance_begin", "maintenance_resume", "bank_check", "mode", "retry"):
             with self.subTest(action=action), self.assertRaises(module.PanelError):
                 await self.action(action, method="GET")
         for action in ("correct",):

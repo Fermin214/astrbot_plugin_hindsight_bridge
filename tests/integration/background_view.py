@@ -14,14 +14,14 @@ VIEW = Path("/candidate-source/views/memory")
 SDK = """
 window.fixtureCalls = [];
 window.fixtureScope = {
-  scope_id: 'one', bank: 'abm-v1-fixture-g0', platform_instance_id: 'qq', user_id: '123',
+  scope_id: 'one', bank: 'abm-v1-fixture-g0', platform_instance_id: 'qq', user_id: 'ExampleUserIdentifier0123456789AB',
   mode: 'active', summary: {counts: {}},
   background: {revision: 0, scope_revision: 1, enabled: false, page_id: ''}
 };
 const fixtureData = () => ({
   config_revision: 'fixture-config',
   config: {configured: true, managed: false, api_url: 'http://fixture.test', has_api_key: true,
-           allowed_accounts: [], control_plane_url: 'http://fixture.test'},
+           allowed_accounts: [{platform_instance_id: 'qq', user_id: 'ExampleUserIdentifier0123456789AB'}], control_plane_url: 'http://fixture.test'},
   status: {connected: true}, providers: {},
   platforms: [{id: 'qq', name: 'Fixture', supported: true, user_label: 'User ID'}],
   scopes: [window.fixtureScope]
@@ -54,33 +54,45 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if "sandbox=1" in self.path:
+            self.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-downloads")
+        super().end_headers()
+
 
 async def main(port):
     checks = []
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         try:
-            for name, size in (("desktop", {"width": 1280, "height": 900}), ("phone", {"width": 390, "height": 844})):
+            for name, size, sandboxed in (
+                ("desktop", {"width": 1280, "height": 900}, False),
+                ("phone", {"width": 390, "height": 844}, False),
+                ("desktop-sandbox", {"width": 1280, "height": 900}, True),
+                ("phone-sandbox", {"width": 390, "height": 844}, True),
+            ):
                 page = await browser.new_page(viewport=size)
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 await page.add_init_script(SDK)
-                await page.goto(f"http://127.0.0.1:{port}/index.html")
-                await page.locator("#background-load").wait_for(state="visible")
-                await page.locator("#background-load").click()
+                await page.goto(f"http://127.0.0.1:{port}/index.html" + ("?sandbox=1" if sandboxed else ""))
+                await page.locator('#background-page option[value="kp-fixture"]').wait_for(state="attached")
                 await page.locator("#background-page").select_option("kp-fixture")
-                await page.locator("#background-enabled").check()
-                await page.locator("#background-save").click()
                 await page.wait_for_function("window.fixtureScope.background.enabled === true")
-                await page.locator("#background-close").click()
+                await page.locator("#background-page").wait_for(state="visible")
+                await page.wait_for_function("!document.getElementById('background-page').disabled")
+                await page.locator("#background-page").select_option("")
                 await page.wait_for_function("window.fixtureScope.background.enabled === false")
                 calls = await page.evaluate("window.fixtureCalls")
                 assert len(calls) == 2 and all(call["route"] == "scopes/one/background" for call in calls)
                 assert calls[-1]["payload"]["page_id"] == "kp-fixture"
+                assert await page.evaluate("window.fixtureScope.mode") == "active"
+                assert await page.evaluate("window.fixtureCalls.length") == 2
                 assert not errors, errors
                 assert await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), name
                 await page.screenshot(path=str(OUTPUT / ("background-" + name + ".png")), full_page=True)
-                checks.append(name + "_load_select_save_close_without_js_errors_or_horizontal_overflow")
+                checks.append(name + "_knowledge_selection_without_mode_change_or_overflow")
                 await page.close()
         finally:
             await browser.close()

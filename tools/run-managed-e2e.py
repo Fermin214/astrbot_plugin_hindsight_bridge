@@ -26,7 +26,7 @@ class Managed(live.Environment):
         self.install_root = self.output / "managed-installations"
         self.settings.update(listen_host="0.0.0.0", chat_tokens=8192, control_plane_port=live.free_port())
         self.settings["upgrade_from_1_1"] = args.upgrade_from_1_1
-        self.settings["panel_baseline_ref"] = args.panel_baseline_ref
+        self.settings["verify_panel"] = args.verify_panel
 
     def prepare_network(self):
         self.docker("network", "create", "--label", "hindsight-bridge.test=" + self.owner, self.network, stdout=subprocess.DEVNULL)
@@ -44,10 +44,6 @@ class Managed(live.Environment):
             with (self.output / "baseline-install.zip").open("wb") as file:
                 live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
                          "c2dec0e25ae8292e3dd01ecb6e326a87965d41ef", cwd=live.ROOT, stdout=file)
-        if self.settings["panel_baseline_ref"]:
-            with (self.output / "panel-baseline.zip").open("wb") as file:
-                live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
-                         self.settings["panel_baseline_ref"], cwd=live.ROOT, stdout=file)
         image = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6"
         if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             self.docker("tag", "hindsight-bridge-delivery-postgres:17", image)
@@ -172,8 +168,8 @@ def main():
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
     parser.add_argument("--upgrade-from-1.1", dest="upgrade_from_1_1", action="store_true",
                         help="install the previous native plugin/service, then use the current browser upgrade flow")
-    parser.add_argument("--panel-baseline-ref", default="",
-                        help="compare a committed panel baseline with the candidate in the owned browser environment")
+    parser.add_argument("--verify-panel", action="store_true",
+                        help="verify panel layout, user lifecycle and pause recovery in the owned browser environment")
     args = parser.parse_args()
     state = Managed(args)
     state.model_environment = args.model_environment

@@ -1,10 +1,11 @@
 const $ = (id) => document.getElementById(id);
 let bridge = window.AstrBotPluginView;
-const modeLabels = { active: "保存并自动使用记忆", readonly: "只自动使用已有记忆", paused: "暂停保存和自动使用" };
+const modeLabels = { active: "读写记忆", readonly: "只读记忆", paused: "停用记忆" };
 let data = null;
 let settingsRevision = "";
 let scopeId = "";
-let modeDirty = false;
+let selectedAccount = "";
+let maintenanceScopeId = "";
 let forgetState = null;
 let authorizationState = null;
 let accountRemovalState = null;
@@ -95,13 +96,12 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
       button.textContent = label;
       button.disabled = false;
     }
-    if (group === "setup") updateProviderHelp();
+    if (group === "setup") renderServiceVersion();
     if (group === "memory") renderScope();
   }
 }
 
 function activateTab(name, focus = false) {
-  document.querySelectorAll(".help[open]").forEach((help) => { help.open = false; });
   if (name !== "setup") {
     clearCommands();
   }
@@ -152,65 +152,56 @@ function providerSelect(kind, selected) {
 function updateProviderHelp() {
   if (!data) return;
   const missing = [];
-  for (const [kind, name] of [["chat", "聊天"], ["embedding", "嵌入"]]) {
+  for (const [kind, name] of [["chat", "记忆处理"], ["embedding", "向量"]]) {
     if (!(data.providers?.[kind] || []).some((provider) => provider.supported !== false)) missing.push(name);
   }
-  $("provider-help").textContent = missing.length
-    ? `缺少可用的${missing.join("、")}模型。请到 AstrBot「模型供应商」添加对应模型，模型列表会自动更新。`
-    : "供 Hindsight 使用：大语言模型（LLM）提取和整合记忆、生成知识页；嵌入模型（Embeddings）将文字转为向量；重排模型（Reranker）重新排序检索结果（可选）。";
-  $("save-models").disabled = missing.length > 0 || locks.has("setup");
+  $("provider-help").textContent = missing.length ? `缺少可用的${missing.join("、")}模型，请到 AstrBot「模型供应商」添加。` : "";
+  $("provider-help").hidden = !missing.length;
+  $("save-models").disabled = missing.length > 0 || locks.has("setup") || !!data.backend?.pending || !!data.backend?.upgrade_paused;
 }
 
 function clearUninstall() {
   $("uninstallation").hidden = true;
-  $("uninstallation").open = false;
   $("uninstall-command").value = "";
 }
 
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
+  $("setup-intro").hidden = data?.config.configured === true;
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;
-  $("api-key-field").hidden = managed;
-  $("api-url").readOnly = managed;
-  $("connection-heading").textContent = managed ? "配套服务连接" : "连接已有 Hindsight";
-  $("key-help").hidden = managed;
-  $("check-connection").hidden = managed;
-  $("key-help").textContent = data?.config.has_api_key ? "已保存连接密钥。留空沿用，填写新值则替换。" : "填写已有 Hindsight 的服务 API Key，与模型供应商密钥不同。";
+  $("api-key-field").hidden = managed && !data?.config.configured;
+  $("api-url").readOnly = managed && !data?.config.configured;
+  $("check-connection").hidden = managed && !data?.config.configured;
 }
 
 function renderServiceVersion() {
-  const backend = data?.backend;
+  const backend = data?.backend || {};
   $("service-version").hidden = !data?.config.configured;
-  $("service-version-text").textContent = backend?.version
-    ? `Hindsight ${backend.version}${backend.upgrade_available ? " · 可升级到 1.2.0，当前版本仍受支持。" : backend.supported === false ? " · 此版本未经兼容验证。" : ""}`
-    : "Hindsight 版本尚未确认，请恢复服务连接后重新检查。";
-  const managed = data?.config.managed && backend?.managed;
-  $("external-upgrade").hidden = !!data?.config.managed;
-  const upgrading = backend?.pending || backend?.upgrade_paused;
-  $("setup-update").hidden = !backend?.upgrade_available && !upgrading;
-  $("setup-update").textContent = upgrading ? "升级待完成" : "可升级";
-  $("go-upgrade").hidden = !backend?.upgrade_available && !upgrading;
-  $("go-upgrade").textContent = managed ? "查看升级步骤" : "查看服务升级指引";
-  $("service-upgrade").hidden = !managed || (!backend?.upgrade_available && !upgrading);
-  $("reinstall").disabled = !!backend?.pending || (!!backend?.managed && !!backend?.upgrade_available);
-  $("reinstall").textContent = "生成同版本修复命令（仅 1.2.0）";
-  $("upgrade-begin").disabled = !backend?.upgrade_available || !!upgrading;
-  $("upgrade-prepare").disabled = !backend?.upgrade_available;
-  $("upgrade-abandon").hidden = backend?.version !== "1.1.0" || !upgrading;
-  $("upgrade-cancel").disabled = backend?.version !== "1.1.0" || !upgrading;
-  $("upgrade-verify").disabled = !backend?.pending;
-  $("upgrade-resume").hidden = !backend?.resume_available;
-  $("upgrade-resume").disabled = backend?.version !== "1.2.0" || !backend?.resume_available;
-  if (upgrading) {
-    $("save-settings").disabled = true;
-    $("save-models").disabled = true;
-    $("add-account").disabled = true;
-  } else {
-    $("save-settings").disabled = false;
-    $("add-account").disabled = false;
-  }
+  $("service-version-text").textContent = backend.version ? `Hindsight ${backend.version}` : "版本尚未确认";
+  const managed = data?.config.managed && backend.managed;
+  const upgrading = !!backend.pending || !!backend.upgrade_paused;
+  const available = backend.upgrade_available === true;
+  $("upgrade-notice").hidden = !upgrading && (!available || backend.ignored === true);
+  $("upgrade-notice-title").textContent = upgrading
+    ? backend.resume_available ? "Hindsight 已升级，读写仍暂停" : "Hindsight 升级待完成"
+    : `Hindsight 可升级：${backend.version} → ${backend.target}`;
+  $("ignore-upgrade").hidden = upgrading;
+  $("view-upgrade").textContent = upgrading ? "查看升级进度" : managed ? "查看升级" : "查看升级指引";
+  $("go-upgrade").hidden = !managed || (!available && !upgrading);
+  $("go-upgrade").textContent = upgrading ? "查看升级进度" : "升级服务";
+  $("service-upgrade").hidden = !managed || (!available && !upgrading);
+  $("reinstall").disabled = locks.has("setup") || upgrading || !!(managed && available);
+  $("upgrade-begin").disabled = locks.has("setup") || !available || upgrading;
+  $("upgrade-prepare").disabled = locks.has("setup") || !available || !upgrading;
+  $("upgrade-abandon").hidden = backend.version !== "1.1.0" || !upgrading;
+  $("upgrade-cancel").disabled = locks.has("setup") || backend.version !== "1.1.0" || !upgrading;
+  $("upgrade-verify").disabled = locks.has("setup") || !backend.pending;
+  $("upgrade-resume").hidden = !backend.resume_available;
+  $("upgrade-resume").disabled = locks.has("setup") || backend.version !== backend.target || !backend.resume_available;
+  for (const id of ["save-settings", "add-account", "save-account", "remove-account", "prepare-uninstall"]) $(id).disabled = upgrading || locks.has("setup");
+  updateProviderHelp();
 }
 
 async function upgradeAction(action, button) {
@@ -223,7 +214,6 @@ async function upgradeAction(action, button) {
     if (response.command) {
       $("upgrade-command").value = response.command;
       $("upgrade-installation").hidden = false;
-      $("upgrade-installation").open = true;
     }
     if (["cancel", "verify", "resume"].includes(action)) {
       $("upgrade-command").value = "";
@@ -237,104 +227,31 @@ async function upgradeAction(action, button) {
   renderServiceVersion();
 }
 
-function addAccount(account = {}) {
-  const row = el("div", "account-row");
-  const platformLabel = el("label", "", "平台实例");
-  const select = el("select");
-  select.className = "account-platform";
-  select.required = true;
-  select.append(option("", "请选择平台实例"));
-  (data.platforms || []).forEach((platform) => select.append(option(
-    platform.id, platform.name || platform.id, platform.supported === false || platform.enabled === false,
-  )));
-  if (account.platform_instance_id && !(data.platforms || []).some((item) => item.id === account.platform_instance_id)) {
-    select.append(option(account.platform_instance_id, `${account.platform_instance_id}（实例不可用）`));
-  }
-  select.value = account.platform_instance_id || "";
-  platformLabel.append(select);
-  const userLabel = el("label");
-  const caption = el("span");
-  const input = el("input");
-  input.type = "text";
-  input.required = true;
-  input.autocomplete = "off";
-  input.className = "account-user";
-  input.value = account.user_id || "";
-  userLabel.append(caption, input);
-  function updateHint() {
-    const platform = (data.platforms || []).find((item) => item.id === select.value);
-    caption.textContent = platform?.user_label || "用户 ID";
-    input.inputMode = platform?.numeric_user_id ? "numeric" : "text";
-    if (platform?.numeric_user_id) {
-      input.pattern = "[0-9]+";
-      input.maxLength = 20;
-    } else {
-      input.removeAttribute("pattern");
-      input.removeAttribute("maxlength");
-    }
-    input.placeholder = platform?.user_hint || "填写 /sid 中的用户 UID";
-  }
-  select.addEventListener("change", updateHint);
-  updateHint();
-  const authorize = el("button", "", "确认账号授权");
-  authorize.type = "button";
-  authorize.addEventListener("click", () => void prepareAuthorization(
-    authorize, select.value, input.value.trim(),
-  ));
-  const remove = el("button", "danger-quiet", "移除");
-  remove.type = "button";
-  remove.setAttribute("aria-label", account.user_id ? `移除用户 ${account.user_id}` : "移除此用户");
-  remove.addEventListener("click", () => requestAccountRemoval(row, remove));
-  row.append(platformLabel, userLabel, authorize, remove);
-  $("accounts").append(row);
-  return select;
-}
-
-function requestAccountRemoval(row, button) {
-  if (locks.has("setup") || $("remove-account-dialog").open) return;
-  const platform = row.querySelector(".account-platform").value;
-  const user = row.querySelector(".account-user").value.trim();
-  const name = (data.platforms || []).find((item) => item.id === platform)?.name || platform || "未选择平台";
-  accountRemovalState = { row, button, platform, user };
-  $("remove-account-user").textContent = `${name} · ${user || "未填写用户 ID"}`;
-  $("remove-account-dialog").showModal();
-}
-
-$("cancel-remove-account").addEventListener("click", () => $("remove-account-dialog").close());
-$("remove-account-dialog").addEventListener("close", () => {
-  const button = accountRemovalState?.button;
-  accountRemovalState = null;
-  (button?.isConnected ? button : $("add-account")).focus();
-});
-$("confirm-remove-account").addEventListener("click", () => {
-  const pending = accountRemovalState;
-  if (!pending) return;
-  if (
-    locks.has("setup") || !$("accounts").contains(pending.row)
-    || pending.row.querySelector(".account-platform").value !== pending.platform
-    || pending.row.querySelector(".account-user").value.trim() !== pending.user
-  ) {
-    $("remove-account-dialog").close();
-    notify("使用者信息已变化，请重新选择要移除的用户。", true);
-    return;
-  }
-  pending.row.remove();
-  $("remove-account-dialog").close();
-  notify("已从使用者名单移除，请保存设置使更改生效。");
-});
-
 function refreshAccountPlatforms() {
-  $("accounts").querySelectorAll(".account-platform").forEach((select) => {
-    const selected = select.value;
-    select.replaceChildren(option("", "请选择平台实例"));
-    (data.platforms || []).forEach((platform) => select.append(option(
-      platform.id, platform.name || platform.id, platform.supported === false || platform.enabled === false,
-    )));
-    if (selected && !(data.platforms || []).some((platform) => platform.id === selected)) {
-      select.append(option(selected, `${selected}（实例不可用）`));
-    }
-    select.value = selected;
-  });
+  const select = $("account-platform");
+  const previous = select.value;
+  select.replaceChildren(option("", "请选择平台实例"));
+  (data.platforms || []).forEach((platform) => select.append(option(platform.id, platform.name || platform.id,
+    platform.supported === false || platform.enabled === false)));
+  if ((data.platforms || []).some((platform) => platform.id === previous)) select.value = previous;
+  updateAccountHint();
+}
+
+function updateAccountHint() {
+  const platform = data?.platforms?.find((item) => item.id === $("account-platform").value);
+  const input = $("account-user");
+  $("account-user-label").textContent = platform?.user_label || "用户 ID";
+  input.inputMode = platform?.numeric_user_id ? "numeric" : "text";
+  if (platform?.numeric_user_id) { input.pattern = "[0-9]+"; input.maxLength = 20; }
+  else { input.removeAttribute("pattern"); input.removeAttribute("maxlength"); }
+  input.placeholder = platform?.user_hint || "填写用户 ID";
+}
+
+function addAccount() {
+  $("account-form").reset();
+  refreshAccountPlatforms();
+  $("account-feedback").hidden = true;
+  $("account-dialog").showModal();
 }
 
 function hydrateConfig() {
@@ -344,22 +261,52 @@ function hydrateConfig() {
   $("api-key").value = "";
   $("control-plane-url").value = config.control_plane_url || "";
   $("connection-result").hidden = true;
-  $("api-key").placeholder = config.has_api_key ? "已保存，留空继续使用" : "填写记忆服务的 API Key";
-  $("key-help").textContent = config.has_api_key ? "已保存 API Key。留空保留，填写新值则替换。" : "填写记忆服务的连接密钥。";
-  $("setup-intro").hidden = config.configured === true;
-  $("save-settings").textContent = "保存连接和使用者名单";
+  $("api-key").placeholder = config.has_api_key ? "留空沿用已保存的密钥" : "填写服务 API 密钥";
   document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
   updateConnectionMode();
   for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, config[`${kind}_provider_id`]);
-  $("accounts").replaceChildren();
-  (config.allowed_accounts || []).forEach(addAccount);
-  if (!config.allowed_accounts?.length) addAccount();
+  refreshAccountPlatforms();
   updateProviderHelp();
 }
 
+function accountKey(account) {
+  return JSON.stringify([account.platform_instance_id, account.user_id]);
+}
+
+function accountScopes(key = selectedAccount) {
+  const account = (data?.config.allowed_accounts || []).find((item) => accountKey(item) === key);
+  if (!account) return [];
+  const scopes = data.scopes.filter((item) => accountKey(item) === key);
+  const primary = scopes.find((item) => !item.pending && !item.historical) || scopes.find((item) => item.pending);
+  return [primary, ...scopes.filter((item) => item !== primary
+    && ["historical", "disconnected", "confirmation"].includes(item.availability))].filter(Boolean);
+}
+
+function updateUserChoices() {
+  const accounts = data.config.allowed_accounts || [];
+  if (!accounts.some((item) => accountKey(item) === selectedAccount)) selectedAccount = accounts[0] ? accountKey(accounts[0]) : "";
+  const choices = accounts.map((account) => {
+    const platform = data.platforms?.find((item) => item.id === account.platform_instance_id);
+    return [accountKey(account), `${account.user_id} · ${platform?.name || account.platform_instance_id}`];
+  });
+  $("scope-picker").replaceChildren(...(choices.length ? choices : [["", "还没有用户"]]).map(([id, name]) => option(id, name)));
+  $("scope-picker").value = selectedAccount;
+  $("scope-picker").disabled = !accounts.length;
+  const scopes = accountScopes();
+  if (!scopes.some((item) => item.scope_id === scopeId)) scopeId = scopes[0]?.scope_id || "";
+  $("bank-picker").replaceChildren(...scopes.map((item) => option(item.scope_id,
+    item.pending ? item.pending_reason === "platform" ? "等待连接" : "等待开通"
+      : `${item.availability === "historical" ? "旧记忆库 · " : ""}机器人 ${item.bot_id}${item.availability === "disconnected" ? "（未连接）" : item.availability === "confirmation" ? "（身份待确认）" : ""}`)));
+  $("bank-picker").value = scopeId;
+  $("bank-range-field").hidden = scopes.length < 2;
+  $("memory-fields").hidden = !accounts.length;
+  $("no-scopes").hidden = !!accounts.length;
+}
+
 function scopeName(scope) {
-  const platform = (data?.platforms || []).find((item) => item.id === scope.platform_instance_id);
-  return `${scope.user_id} · ${platform?.name || scope.platform_instance_id}${scope.historical ? ` · 历史机器人 ${scope.bot_id}` : ""}`;
+  if (!scope) return "记忆库";
+  const platform = data?.platforms?.find((item) => item.id === scope.platform_instance_id);
+  return `${scope.user_id} · ${platform?.name || scope.platform_instance_id}${scope.bot_id ? ` · 机器人 ${scope.bot_id}` : ""}`;
 }
 
 function countDescription(counts) {
@@ -381,37 +328,23 @@ function countDescription(counts) {
 function renderStatus() {
   const status = data.status || {};
   const connected = status.connected;
-  $("status-label").textContent = status.recovering ? "正在核对记忆数据"
-    : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
+  $("status-label").textContent = status.recovering ? "正在核对记忆数据" : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
-  $("status-description").textContent = status.recovering ? "正在核对记忆库归属、保存任务和清空记录，完成后按原记忆模式运行。"
-    : connected === false ? (status.message || (data.config.managed
-      ? "请检查配套服务是否运行；服务恢复后会自动连接。"
-      : "请检查服务地址、密钥与服务状态，可点击「测试服务连接」查看原因。"))
-    : "";
-  if (data.config.managed && data.managed_service?.installed && !status.recovering) {
-    if (!data.managed_service.ready) {
-      $("status-label").textContent = "服务已安装，请选择模型并保存";
-      $("status-description").textContent = "";
-    } else if (!data.config.configured) {
-      $("status-label").textContent = "模型已保存，请添加使用者并保存连接和名单";
-    }
-  }
-  $("status-description").hidden = !$("status-description").textContent;
+  let description = status.recovering ? "正在核对记忆库与保存任务。" : connected === false ? status.message || "请检查服务地址、密钥和服务运行状态。" : "";
+  if (data.config.managed && data.managed_service?.installed && !status.recovering && !data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
+  $("status-description").textContent = description;
+  $("status-description").hidden = !description;
   const attention = !!status.recovering || !data.config.configured || connected !== true;
   $("service-alert").hidden = !attention;
-  $("service-alert-message").textContent = attention
-    ? [$("status-label").textContent, $("status-description").textContent].filter(Boolean).join("：")
-    : "";
+  $("service-alert-message").textContent = attention ? description || $("status-label").textContent : "";
 }
 
 function recallDescription(recall) {
-  if (!recall) return "最近记忆检索：尚未检索";
+  if (!recall) return "尚未检索";
   const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过" };
-  const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome];
-  let result = `最近记忆检索：${label} · ${new Date(recall.last_at * 1000).toLocaleTimeString()} · ${(recall.elapsed_ms / 1000).toFixed(2)} 秒`;
-  if (recall.consecutive_failures) result += ` · 连续失败 ${recall.consecutive_failures} 次`;
-  if (recall.error_message) result += `。${recall.error_message}`;
+  const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome] || "结果未知";
+  let result = `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}`;
+  if (recall.error_message) result += `：${recall.error_message}`;
   return result;
 }
 
@@ -423,69 +356,43 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
     if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   } catch (error) {
     if (revision !== bootstrapReadRevision) return;
-    if (maintenanceIdentity) {
-      maintenanceReadRevision++;
-      maintenanceState = { ready: false, error: errorMessage(error) };
-      renderScope();
-    }
+    if (maintenanceIdentity) { maintenanceReadRevision++; maintenanceState = { ready: false, error: errorMessage(error) }; renderMaintenance(); }
     throw error;
   }
   if (revision !== bootstrapReadRevision) return;
-  if (settingsRevision && next.config_revision !== settingsRevision) clearUpgrade();
+  if (settingsRevision && next.config_revision !== settingsRevision) clearCommands();
   data = next;
-  renderServiceVersion();
   if (hydrate) hydrateConfig();
-  else if (!automatic) {
-    for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, $(`${kind}-provider`).value);
-    refreshAccountPlatforms();
-    updateProviderHelp();
+  else if (!automatic || document.activeElement?.tagName !== "SELECT") {
+    for (const kind of ["chat", "embedding", "rerank"]) {
+      const select = $(`${kind}-provider`);
+      const version = JSON.stringify(next.providers?.[kind] || []);
+      if (!automatic || select.dataset.providers !== version) { providerSelect(kind, select.value); select.dataset.providers = version; }
+    }
+    if (!$("account-dialog").open) refreshAccountPlatforms();
     updateConnectionMode();
   }
-  if (automatic && document.activeElement?.tagName !== "SELECT") {
-    for (const kind of ["chat", "embedding", "rerank"]) {
-      const providers = next.providers?.[kind] || [];
-      const select = $(`${kind}-provider`);
-      const version = JSON.stringify(providers);
-      if (select.dataset.providers !== version) {
-        providerSelect(kind, select.value);
-        select.dataset.providers = version;
-      }
-    }
-    refreshAccountPlatforms();
-    updateProviderHelp();
-  }
-  $("platform-help").textContent = data.platforms?.some((platform) => platform.supported !== false)
-    ? "" : "未找到可用的平台实例。请先在 AstrBot 中添加受支持的机器人。";
-  $("platform-help").hidden = !$("platform-help").textContent;
-  const nextStatusSignature = JSON.stringify([data.config.configured, data.status, data.managed_service, data.scopes]);
-  if (!automatic || nextStatusSignature !== statusSignature) {
-    renderStatus();
-    statusSignature = nextStatusSignature;
-  }
+  const nextStatusSignature = JSON.stringify([data.config.configured, data.status, data.managed_service]);
+  if (!automatic || nextStatusSignature !== statusSignature) { renderStatus(); statusSignature = nextStatusSignature; }
   const previous = scopeId;
-  const scopes = data.scopes || [];
-  scopeId = scopes.some((scope) => scope.scope_id === previous) ? previous : (scopes[0]?.scope_id || "");
-  const choices = scopes.map((scope) => [scope.scope_id, scopeName(scope)]);
-  if (!scopes.length) choices.push(["", "暂无用户"]);
-  if (JSON.stringify([...$("scope-picker").options].map((item) => [item.value, item.textContent])) !== JSON.stringify(choices)) {
-    $("scope-picker").replaceChildren(...choices.map(([id, name]) => option(id, name)));
-  }
-  $("scope-picker").value = scopeId;
+  updateUserChoices();
   $("memory-fields").disabled = !scopeId || locks.has("memory");
-  $("memory-fields").hidden = !scopes.length;
   $("setup-fields").disabled = locks.has("setup");
-  $("no-scopes").hidden = scopes.length > 0;
-  if (previous !== scopeId) modeDirty = false;
+  if (previous !== scopeId) backgroundDraft = null;
   if (!locks.has("memory")) renderScope();
+  const configured = new Set((data.config.allowed_accounts || []).map(accountKey));
+  $("paused-banks-notice").hidden = !data.scopes.some((item) => !configured.has(accountKey(item))
+    && (item.summary?.maintenance || item.summary?.bank_missing));
   if (pollMaintenance) await readMaintenanceStatus();
   renderServiceVersion();
   $("settings-conflict").hidden = !settingsRevision || data.config_revision === settingsRevision;
   $("startup").hidden = true;
+  $("update-error").hidden = true;
   if (data.model_job?.status === "running" && !modelWatch) void watchModels();
 }
 
 function maintenanceDescription(summary = {}, state = null) {
-  if (summary.bank_missing || state?.bank_missing) return "找不到这个用户的记忆库，记忆功能已暂停。请恢复原记忆库，或通过「清空此用户的记忆」重新开始。";
+  if (summary.bank_missing || state?.bank_missing) return "找不到原记忆库，读写已暂停。恢复原库后点击「核对记忆库」，或通过「清空记忆」重新开始。";
   if (!summary.maintenance) return "";
   if (state?.error) return `无法确认保存进度：${state.error} 请检查服务后点击「重试检查」。`;
   if (state?.phase === "inactive") return "暂停已解除，正在更新用户状态。";
@@ -508,7 +415,7 @@ function maintenanceSnapshot(scope, snapshot = data) {
 }
 
 function syncMaintenanceState() {
-  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const scope = maintenanceScope();
   const identity = maintenanceSnapshot(scope);
   if (identity !== maintenanceIdentity) {
     maintenanceReadRevision++;
@@ -516,7 +423,6 @@ function syncMaintenanceState() {
     maintenanceState = null;
     maintenanceCheckedAt = 0;
     $("discard-pending").checked = false;
-    $("discard-records").open = false;
   } else if (maintenanceState?.ready && Date.now() - maintenanceCheckedAt > 30000) {
     maintenanceState = { ready: false, error: "暂停检查结果已过期。" };
   }
@@ -535,6 +441,7 @@ function scheduleMaintenanceExpiry() {
   maintenanceExpiryTimer = setTimeout(() => {
     if (identity !== maintenanceIdentity || result !== maintenanceState || checkedAt !== maintenanceCheckedAt) return;
     maintenanceState = { ready: false, error: "暂停检查结果已过期。" };
+    renderMaintenance();
     renderScope();
   }, Math.max(0, 30000 - (Date.now() - checkedAt)));
 }
@@ -543,8 +450,8 @@ async function readMaintenanceStatus() {
   syncMaintenanceState();
   const revision = ++maintenanceReadRevision;
   const identity = maintenanceIdentity;
-  const id = scopeId;
-  if (!identity) return;
+  const id = maintenanceScope()?.scope_id;
+  if (!identity) { renderMaintenance(); return; }
   let state;
   try {
     const response = await withTimeout(
@@ -562,58 +469,55 @@ async function readMaintenanceStatus() {
   } catch (error) {
     state = { phase: "draining", ready: false, error: errorMessage(error) };
   }
-  if (revision !== maintenanceReadRevision || identity !== maintenanceIdentity || id !== scopeId) return;
+  if (revision !== maintenanceReadRevision || identity !== maintenanceIdentity || id !== maintenanceScope()?.scope_id) return;
   maintenanceState = state;
   maintenanceCheckedAt = Date.now();
+  renderMaintenance();
   renderScope();
   scheduleMaintenanceExpiry();
 }
 
 function renderScope() {
-  syncMaintenanceState();
+  renderMaintenance();
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const summary = scope?.summary || {};
-  if (!modeDirty) $("scope-mode").value = scope?.mode || "";
-  $("scope-mode-field").hidden = !!scope?.historical;
-  $("save-mode").hidden = !!scope?.historical;
+  const account = (data?.config.allowed_accounts || []).find((item) => accountKey(item) === selectedAccount);
+  const platform = data?.platforms?.find((item) => item.id === scope?.platform_instance_id);
+  $("user-name").textContent = account?.user_id || scope?.user_id || "";
+  $("user-platform").textContent = platform?.name || scope?.platform_instance_id || "";
+  $("user-bot").textContent = scope?.bot_id ? `机器人 ${scope.bot_id}` : "";
+  $("user-availability").textContent = { historical: "旧记忆库", disconnected: "机器人未连接", confirmation: "身份待确认" }[scope?.availability] || "";
+  $("pending-account").hidden = !scope?.pending;
+  $("pending-account-message").textContent = scope?.pending ? pendingScopeHelp(scope) : "";
+  $("authorize-account").hidden = scope?.pending_reason !== "authorization";
+  const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering;
+  $("mode-control").hidden = !!scope?.historical;
   $("historical-mode").hidden = !scope?.historical;
-  $("historical-mode").textContent = scope?.historical ? `机器人 ${scope.bot_id} · 原记忆模式：${modeLabels[scope.mode] || scope.mode}` : "";
-  for (const id of ["scope-mode", "save-mode", "retry", "maintenance-begin", "maintenance-retry", "maintenance-resume", "discard-pending", "maintenance-discard", "forget"]) $(id).disabled = !scope || scope.pending === true;
-  for (const id of ["scope-mode", "save-mode", "retry"]) $(id).disabled ||= scope?.historical === true;
-  const maintenanceActive = !!summary.maintenance;
-  $("scope-mode").querySelector('[value="active"]').disabled = maintenanceActive || !!summary.bank_missing;
-  $("scope-mode").querySelector('[value="readonly"]').disabled = maintenanceActive || !!summary.bank_missing;
-  $("maintenance-begin").hidden = maintenanceActive;
-  $("maintenance-resume").hidden = !maintenanceActive;
-  $("maintenance-retry").hidden = !maintenanceActive || !maintenanceState?.error;
-  $("maintenance-resume").disabled ||= !maintenanceActive || !!summary.bank_missing || !!maintenanceState?.bank_missing || data?.status?.connected === false || maintenanceState?.ready !== true || maintenanceState.phase !== "ready";
-  $("retry").disabled ||= maintenanceActive || !!summary.bank_missing;
-  $("retry").hidden = $("retry").disabled || !(summary.counts?.failed || summary.counts?.dead);
-  const discardable = summary.can_discard === true;
-  $("discard-records").hidden = !discardable;
-  if (!discardable) {
-    $("discard-pending").checked = false;
-    $("discard-records").open = false;
+  $("historical-mode").textContent = scope?.historical ? `原记忆模式：${modeLabels[scope.mode] || scope.mode}` : "";
+  for (const mode of ["active", "readonly", "paused"]) {
+    const button = document.querySelector(`[data-mode="${mode}"]`);
+    button.setAttribute("aria-pressed", String(scope?.mode === mode));
+    button.disabled = !!unavailable || locks.has("memory") || (mode !== "paused" && !!(summary.maintenance || summary.bank_missing));
   }
-  $("maintenance-discard").disabled ||= !$("discard-pending").checked;
-  $("pause-impact").hidden = !scope || !!scope.pending;
-  $("scope-error").hidden = !summary.error_message;
-  $("scope-error").textContent = text(summary.error_message);
-  $("control-plane-address").value = data?.config.control_plane_url || "";
-  $("control-plane-missing").hidden = !!data?.config.control_plane_url;
-  const keyCommand = data?.config.managed ? data.control_plane_key_command || "" : "";
-  $("control-plane-key-command").hidden = !keyCommand;
-  $("control-plane-key-command").value = keyCommand;
-  $("control-plane-key-help").textContent = keyCommand
-    ? "用安装服务时的账号登录服务器，在终端执行下方命令。输出的内容就是面板登录密钥；自定义过安装目录时，请替换命令中的路径。"
-    : "连接已有 Hindsight 时，请向服务管理员获取网页登录密钥。";
+  $("forget").disabled = !scope || !!scope.pending || !!data?.status?.recovering || locks.has("memory");
+  $("remove-account").disabled = !account || locks.has("setup") || !!data?.backend?.pending || !!data?.backend?.upgrade_paused;
   $("scope-bank").value = scope?.bank || "";
-  $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : Object.keys(summary.counts || {}).length ? countDescription(summary.counts) : "";
+  $("copy-bank").disabled = !scope?.bank;
+  $("bank-state").textContent = scope?.bank_state === "new" ? "记忆库将在首次保存聊天时创建。" : "";
+  $("bank-state").hidden = !$("bank-state").textContent;
+  const counts = summary.counts || {};
+  $("pending-count").textContent = ["ready", "submitting", "unknown", "tracking", "deferred", "reconcile_required", "held", "cancel_requested"].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
+  $("failed-count").textContent = (Number(counts.failed) || 0) + (Number(counts.dead) || 0);
+  $("queue-summary").textContent = counts.reconcile_required ? `有 ${counts.reconcile_required} 条记录需要确认保存结果。` : "";
   $("queue-summary").hidden = !$("queue-summary").textContent;
-  $("scope-recall-status").textContent = scope?.pending || !summary.recall ? "" : recallDescription(summary.recall);
-  $("scope-recall-status").hidden = !$("scope-recall-status").textContent;
-  $("maintenance-state").textContent = maintenanceDescription(summary, maintenanceState);
+  $("scope-error").hidden = !summary.error_message;
+  $("scope-error").textContent = summary.error_message || "";
+  $("retry").disabled = !!unavailable || !!summary.maintenance || !!summary.bank_missing || locks.has("memory");
+  $("retry").hidden = $("retry").disabled || !(counts.failed || counts.dead);
+  $("scope-recall-status").textContent = recallDescription(summary.recall);
+  $("maintenance-state").textContent = summary.bank_missing ? "找不到原记忆库，读写已暂停。请恢复原库，或清空旧记忆后重新开始。" : summary.maintenance ? "这个记忆库的插件读写已暂停。" : "";
   $("maintenance-state").hidden = !$("maintenance-state").textContent;
+  $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
   renderBackground();
 }
 
@@ -631,89 +535,72 @@ function renderBackground() {
   const snapshot = backgroundSnapshot(scope);
   if (!backgroundDraft || backgroundDraft.snapshot !== snapshot) {
     backgroundReadRevision++;
-    backgroundDraft = {
-      snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
-      revision: saved.revision, scope_revision: saved.scope_revision,
-      config_revision: data?.config_revision, pages: [], loaded: false,
-    };
+    backgroundDraft = { snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
+      revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
+      pages: [], loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
-    $("background-feedback").textContent = "";
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
-  const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing;
-  for (const id of ["background-page", "background-enabled", "background-load", "background-save"]) $(id).disabled = !!blocked || locks.has("memory");
-  $("background-load").disabled ||= backgroundDraft.loading === true;
-  $("background-close").disabled = !!unavailable || !saved.enabled || locks.has("memory");
+  const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
   const select = $("background-page");
-  const options = [option("", "不选择知识页（检索按记忆模式运行）")];
-  backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path)));
-  if (backgroundDraft.page_id && !backgroundDraft.pages.some((page) => page.page_id === backgroundDraft.page_id)) {
-    options.push(option(backgroundDraft.page_id, `${backgroundDraft.page_id}（已选；请获取列表确认）`));
-  }
+  select.disabled = !!unavailable || locks.has("memory") || (blocked && !saved.enabled);
+  const options = [option("", "不使用知识页")];
+  backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path, !!blocked)));
+  if (saved.page_id && !backgroundDraft.pages.some((page) => page.page_id === saved.page_id)) options.push(option(saved.page_id, saved.page_id, !!blocked));
   select.replaceChildren(...options);
-  select.value = backgroundDraft.page_id;
-  $("background-enabled").checked = backgroundDraft.enabled;
-  let status = !saved.page_id ? "" : saved.enabled ? "聊天时使用所选知识页已开启。" : "聊天时使用已关闭。";
-  if (unavailable) status = saved.error || "请连接当前机器人并确认授权后选择知识页。";
-  else if (blocked) status = "保存和查询暂停或数据恢复检查期间不读取知识页；可以停止聊天时使用知识页。";
-  else if (scope.mode === "paused" && saved.enabled) status = "已设置聊天时使用知识页，但「暂停保存和自动使用」模式生效，聊天时不提供知识页参考。";
-  else if (saved.status?.message) status += ` ${saved.status.message}`;
-  else if (saved.status?.used) status += " 最近一次聊天已提供所选知识页参考。内容是否过期尚未确认，请在官方面板核对。";
-  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "此记忆库还没有知识页；请按问号中的步骤创建，再获取列表。";
+  select.value = saved.enabled ? saved.page_id : "";
+  let status = saved.error || "";
+  if (!unavailable && scope.summary?.maintenance) status = "插件读写已暂停，知识页不会传入聊天。";
+  else if (!unavailable && scope.mode === "paused" && saved.enabled) status = "停用记忆模式下，知识页不会传入聊天。";
+  else if (saved.status?.message) status = saved.status.message;
+  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "这个记忆库还没有知识页，可在记忆面板中创建。";
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
+  if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
 
 async function loadBackground() {
   const draft = backgroundDraft;
-  if (!draft || $("background-load").disabled) return;
+  if (!draft || draft.loading) return;
   const revision = ++backgroundReadRevision;
   draft.loading = true;
-  $("background-load").disabled = true;
+  draft.attempted = true;
   try {
-    const response = await withTimeout(
-      bridge.apiGet(endpoint("background", draft.id)), 8500, "获取知识页列表超时，请检查服务后重试。",
-    );
+    const response = await withTimeout(bridge.apiGet(endpoint("background", draft.id)), 8500, "获取知识页列表超时，请刷新页面重试。");
     if (revision !== backgroundReadRevision || backgroundDraft !== draft || scopeId !== draft.id) return;
-    if (!Array.isArray(response.pages)) throw new Error("知识页列表无法读取，请检查服务后重试。");
-    if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision) {
-      throw new Error("知识页选择或使用开关已变化，请重新获取插件状态后再选择。");
-    }
+    if (!Array.isArray(response.pages) || !response.selection) throw new Error("知识页列表无法读取，请刷新页面重试。");
+    if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
     draft.loaded = true;
-    draft.config_revision = response.config_revision;
     renderBackground();
   } catch (error) {
-    if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) {
-      notify(errorMessage(error), true, "background-feedback");
-    }
+    if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) notify(errorMessage(error), true, "background-feedback");
   } finally {
     draft.loading = false;
+    if (revision !== backgroundReadRevision) draft.attempted = false;
     if (backgroundDraft === draft && scopeId === draft.id) renderBackground();
   }
 }
 
-async function saveBackground(close = false) {
+async function saveBackground() {
   const draft = backgroundDraft;
   if (!draft) return;
   const saved = data.scopes.find((scope) => scope.scope_id === draft.id)?.background;
-  const payload = {
-    page_id: close ? saved?.page_id || "" : draft.page_id,
-    enabled: close ? false : draft.enabled,
-    revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision,
-  };
-  await perform($(close ? "background-close" : "background-save"), "memory", async () => {
+  const selected = $("background-page").value;
+  const payload = { page_id: selected || saved?.page_id || "", enabled: !!selected,
+    revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision };
+  await perform(null, "memory", async () => {
     const response = await bridge.apiPost(endpoint("background", draft.id), payload);
     if (backgroundDraft !== draft || scopeId !== draft.id) return;
     await refreshBootstrap();
-    notify(response.message || "知识页选择和聊天使用开关已保存。", false, "background-feedback");
+    notify(response.message || "知识页选择已保存。", false, "background-feedback");
   }, "background-feedback");
 }
 
 function pendingScopeHelp(scope) {
-  if (scope.pending_reason === "service") return "请先在「设置」中完成服务配置。";
-  if (scope.pending_reason === "recovering") return "正在核对记忆库归属、保存任务和清空记录，请等待检查完成。";
-  if (scope.pending_reason === "authorization") return "请到「设置」点击「确认账号授权」，核对当前机器人身份。";
+  if (scope.pending_reason === "service") return "请先在插件设置中完成服务连接。";
+  if (scope.pending_reason === "recovering") return "正在核对记忆库和保存任务，请等待检查完成。";
+  if (scope.pending_reason === "authorization") return "请确认机器人身份，完成用户开通。";
   return "机器人尚未连接，请先在 AstrBot 中连接。";
 }
 
@@ -723,10 +610,8 @@ function selectScope(id) {
   backgroundReadRevision++;
   backgroundDraft = null;
   scopeId = id;
-  $("scope-picker").value = id;
-  modeDirty = false;
-  maintenanceState = null;
-  maintenanceIdentity = "";
+  $("bank-picker").value = id;
+  if (!$("maintenance-dialog").open) { maintenanceScopeId = ""; maintenanceState = null; maintenanceIdentity = ""; }
   $("discard-pending").checked = false;
   renderScope();
   void readMaintenanceStatus();
@@ -748,71 +633,56 @@ function controlPlaneUrl(value) {
   return value;
 }
 
+async function copyValue(field, message, target = "feedback") {
+  if (!$(field).value) throw new Error("没有可复制的内容。");
+  $(field).focus();
+  $(field).select();
+  try { await navigator.clipboard.writeText($(field).value); }
+  catch { if (!document.execCommand("copy")) throw new Error("内容已选中，请按 Ctrl+C 或长按复制。"); }
+  notify(message, false, target);
+}
+
 function connectionPayload() {
   const apiUrl = $("api-url").value.trim();
   let parsed;
   try { parsed = new URL(apiUrl); } catch { throw new Error("请填写完整的 API 地址，例如 http://hindsight:8888。"); }
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("API 地址应使用 http 或 https，密钥请填写在 API Key 中。");
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("API 地址应使用 http 或 https，密钥请填写在 API 密钥中。");
   return { api_url: apiUrl, api_key: $("api-key").value.trim() };
 }
 
 function settingsPayload() {
-  const payload = {
-    ...connectionPayload(),
-    control_plane_url: controlPlaneUrl($("control-plane-url").value),
-    allowed_accounts: [], config_revision: settingsRevision,
-  };
-  const seen = new Set();
-  for (const row of $("accounts").children) {
-    const platform = row.querySelector(".account-platform");
-    const user = row.querySelector(".account-user");
-    const userId = user.value.trim();
-    const contract = (data.platforms || []).find((item) => item.id === platform.value);
-    const previous = (data.config.allowed_accounts || []).some((item) => item.platform_instance_id === platform.value && item.user_id === userId);
-    if (!platform.value || (platform.selectedOptions[0]?.disabled && !previous)) throw new Error("请为每个用户选择可用的平台实例。");
-    if (!userId || /[:\x00-\x1f\x7f]/.test(userId)) throw new Error("请填写有效的用户 ID。");
-    if (contract?.numeric_user_id && !/^[0-9]{1,20}$/.test(userId)) throw new Error(`${contract.user_label}只能填写数字。`);
-    const identity = JSON.stringify([platform.value, userId]);
-    if (seen.has(identity)) throw new Error(`用户 ${userId} 已经添加，请移除重复行。`);
-    seen.add(identity);
-    payload.allowed_accounts.push({ platform_instance_id: platform.value, user_id: userId });
-  }
-  return payload;
+  return { ...connectionPayload(), control_plane_url: controlPlaneUrl($("control-plane-url").value), config_revision: settingsRevision };
+}
+
+async function requestAuthorization(platform, user) {
+  const payload = { action: "prepare", platform_instance_id: platform, user_id: user, config_revision: settingsRevision };
+  const response = await bridge.apiPost("accounts/authorize", payload);
+  authorizationState = { ...payload, action: "confirm", confirmation: response.confirmation };
+  $("authorization-description").textContent = `为用户 ${user} 开通机器人 ${response.bot_id} 的记忆访问。从确认之后的新消息开始记录。`;
+  $("authorization-dialog").showModal();
 }
 
 async function prepareAuthorization(button, platform, user) {
-  await perform(button, "setup", async () => {
-    const payload = { action: "prepare", platform_instance_id: platform, user_id: user, config_revision: settingsRevision };
-    const response = await bridge.apiPost("accounts/authorize", payload);
-    authorizationState = { ...payload, action: "confirm", confirmation: response.confirmation };
-    $("authorization-description").textContent = `${response.message} 授权后仅接收新消息。原记忆模式和保存、查询的暂停状态保持不变。`;
-    $("authorization-dialog").showModal();
-  });
+  await perform(button, "setup", () => requestAuthorization(platform, user));
 }
 
-$("cancel-authorization").addEventListener("click", () => $("authorization-dialog").close());
-$("authorization-dialog").addEventListener("close", () => { authorizationState = null; });
 async function confirmAuthorization() {
   if (!authorizationState) return;
   const pending = authorizationState;
   authorizationState = null;
   await perform($("confirm-authorization"), "authorization", async () => {
     let response;
-    try {
-      response = await bridge.apiPost("accounts/authorize", pending);
-    } finally {
-      $("authorization-dialog").close();
-    }
+    try { response = await bridge.apiPost("accounts/authorize", pending); }
+    finally { $("authorization-dialog").close(); }
     await refreshBootstrap({ automatic: true });
     notify(response.message);
   });
 }
-$("confirm-authorization").addEventListener("click", () => void confirmAuthorization().catch(() => {}));
 
-async function checkConnection(payload) {
+async function checkConnection(payload, target = "connection-result") {
   const response = await bridge.apiPost("connection/check", payload);
-  if (response.ok !== true) throw new Error(response.message || "连接未成功，请检查 API 地址和 Key。");
-  notify(response.message || "记忆服务连接成功。", false, "connection-result");
+  if (response.ok !== true) throw new Error(response.message || "连接未成功，请检查 API 地址和密钥。");
+  notify(response.message || "服务连接成功。", false, target);
   return response;
 }
 
@@ -830,12 +700,12 @@ function watchModels(requestId = "") {
       try {
         job = await bridge.apiGet("models/status");
       } catch {
-        $("model-progress").textContent = "暂时无法获取进度，正在重新连接。请勿重复提交模型配置。";
+        $("model-progress").textContent = "暂时无法获取进度，正在重新获取进度，请勿重复提交。";
         await delay(5000);
         continue;
       }
       if (requestId && job.request_id !== requestId) {
-        $("model-progress").textContent = "模型保存请求未确认，请点击「验证并保存模型」重试。";
+        $("model-progress").textContent = "模型保存请求未确认，请点击「保存模型」重试。";
         if (job.status === "running") {
           requestId = job.request_id;
           continue;
@@ -867,7 +737,7 @@ function watchModels(requestId = "") {
     modelRequestId = "";
     locks.delete("setup");
     $("setup-fields").disabled = !data;
-    updateProviderHelp();
+    renderServiceVersion();
   });
   return modelWatch;
 }
@@ -898,270 +768,206 @@ async function autoRefresh() {
   }
 }
 
+
+function maintenanceScope() {
+  return data?.scopes.find((item) => item.scope_id === (maintenanceScopeId || scopeId));
+}
+
+function renderMaintenance() {
+  syncMaintenanceState();
+  const scope = maintenanceScope();
+  const scopes = (data?.scopes || []).filter((item) => item.summary?.maintenance || item.summary?.bank_missing || item.scope_id === maintenanceScopeId);
+  $("maintenance-scope").replaceChildren(...scopes.map((item) => option(item.scope_id, scopeName(item))));
+  $("maintenance-scope").value = scope?.scope_id || "";
+  $("maintenance-detail").textContent = scope?.summary?.maintenance || scope?.summary?.bank_missing
+    ? maintenanceDescription(scope.summary, maintenanceState) : "这个记忆库未暂停读写。";
+  $("maintenance-bank-check").hidden = !scope?.summary?.bank_missing;
+  $("maintenance-bank-check").disabled = locks.has("memory") || !!data?.status?.recovering || data?.status?.connected === false;
+  $("maintenance-retry").hidden = !scope?.summary?.maintenance || !maintenanceState?.error;
+  $("maintenance-resume").hidden = !scope?.summary?.maintenance;
+  $("maintenance-resume").disabled = !scope || !!scope.summary?.bank_missing || !!maintenanceState?.bank_missing || data?.status?.connected === false || maintenanceState?.ready !== true || maintenanceState.phase !== "ready" || locks.has("memory");
+  const discardable = scope?.summary?.can_discard === true;
+  $("discard-records").hidden = !discardable;
+  if (!discardable) $("discard-pending").checked = false;
+  $("maintenance-discard").disabled = !discardable || !$("discard-pending").checked || locks.has("memory");
+  const configured = (data?.config.allowed_accounts || []).some((account) => accountKey(account) === accountKey(scope || {}));
+  $("maintenance-forget").hidden = configured || !scope;
+  $("maintenance-forget").disabled = locks.has("memory") || !!data?.status?.recovering || !!data?.backend?.pending || !!data?.backend?.upgrade_paused;
+}
+
+function openMaintenance(id) {
+  maintenanceScopeId = id || data?.scopes.find((item) => item.summary?.maintenance || item.summary?.bank_missing)?.scope_id || "";
+  renderMaintenance();
+  $("maintenance-feedback").hidden = true;
+  $("maintenance-dialog").showModal();
+  void readMaintenanceStatus();
+}
+
 async function saveSettings() {
-  // Validate before disabling fields; browser constraint validation ignores disabled controls.
   if (!$("settings-form").reportValidity()) return;
   const payload = settingsPayload();
   await perform($("save-settings"), "setup", async () => {
     const response = await bridge.apiPost("settings/save", payload);
-    if (response.saved !== true) throw new Error(response.message || "设置未保存，请重试。");
+    if (response.saved !== true) throw new Error(response.message || "连接未保存，请重试。");
+    settingsRevision = response.config_revision;
     $("api-key").value = "";
-    $("installation").open = false;
+    clearCommands();
     await refreshBootstrap({ hydrate: true });
-    activateTab("memories", true);
-    notify(response.message || "设置已保存，正常聊天即可。");
+    notify("连接与管理地址已保存。");
   });
 }
 
-$("settings-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  void saveSettings().catch((error) => notify(errorMessage(error), true));
-});
-$("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
-  await checkConnection(connectionPayload());
-  await refreshBootstrap();
-}));
-$("api-url").addEventListener("input", () => {
-  const changed = data.config.api_url
-    && $("api-url").value.trim().replace(/\/+$/, "") !== data.config.api_url.replace(/\/+$/, "");
-  notify(changed
-    ? "连接其他服务会使用独立记忆。旧记忆保存在原服务；同一服务搬迁请按备份与恢复指南操作。"
-    : "保存设置时会检查连接。", false, "connection-result");
-});
-$("api-key").addEventListener("input", () => notify("保存设置时会检查新密钥。", false, "connection-result"));
-$("add-account").addEventListener("click", () => addAccount().focus());
-document.querySelectorAll('[name="connection-mode"]').forEach((radio) => radio.addEventListener("change", () => {
-  $("installation").open = false;
-  $("uninstallation").open = false;
-  $("api-key").value = "";
-  $("connection-result").hidden = true;
-  $("api-url").value = radio.value === "managed" ? data.installation_api_url || "" : data.config.api_url || "";
-  updateConnectionMode();
-}));
-async function prepareInstallation(button) {
+async function saveAccounts(accounts, revision) {
+  const response = await bridge.apiPost("settings/save", { allowed_accounts: accounts, config_revision: revision });
+  if (response.saved !== true) throw new Error(response.message || "用户设置未保存，请重试。");
+  settingsRevision = response.config_revision;
+  data.config_revision = response.config_revision;
+  const previous = new Set((data.config.allowed_accounts || []).map(accountKey));
+  data.config.allowed_accounts = accounts.map((account) => ({ ...account }));
+  const confirmed = new Set(accounts.map(accountKey));
+  for (const scope of data.scopes) {
+    const key = accountKey(scope);
+    if (previous.has(key) !== confirmed.has(key)) {
+      scope.historical = true;
+      scope.availability = confirmed.has(key) ? "confirmation" : "removed";
+    }
+  }
+  clearCommands();
+  updateUserChoices();
+  $("memory-fields").disabled = !scopeId || locks.has("memory");
+  renderScope();
+  try { await refreshBootstrap({ automatic: true }); }
+  catch {
+    $("update-error").hidden = false;
+    $("update-error-message").textContent = "用户设置已保存，暂时无法获取最新状态，正在自动重试。";
+    scheduleRefresh();
+  }
+}
+
+async function submitAccount() {
+  if (!$("account-form").reportValidity()) return;
+  const platform = $("account-platform").value;
+  const user = $("account-user").value.trim();
+  if (!platform || !user || /[:\x00-\x1f\x7f]/.test(user)) throw new Error("请选择平台并填写有效的用户 ID。");
+  const accounts = data.config.allowed_accounts || [];
+  if (accounts.some((item) => item.platform_instance_id === platform && item.user_id === user)) throw new Error("这个用户已经添加，请在用户页确认机器人身份。");
+  const revision = settingsRevision;
+  await perform($("save-account"), "setup", async () => {
+    selectedAccount = accountKey({ platform_instance_id: platform, user_id: user });
+    await saveAccounts([...accounts, { platform_instance_id: platform, user_id: user }], revision);
+    $("account-dialog").close();
+    try { await requestAuthorization(platform, user); }
+    catch (error) { throw new Error(`用户已添加，身份确认尚未完成：${errorMessage(error)} 请在用户页点击「确认机器人身份」。`); }
+  }, "account-feedback");
+}
+
+function requestAccountRemoval() {
+  const account = (data.config.allowed_accounts || []).find((item) => accountKey(item) === selectedAccount);
+  if (!account) return;
+  accountRemovalState = { account, accounts: data.config.allowed_accounts.map((item) => ({ ...item })), revision: settingsRevision };
+  $("remove-account-user").textContent = `${account.user_id} · ${data.platforms?.find((item) => item.id === account.platform_instance_id)?.name || account.platform_instance_id}`;
+  $("remove-account-feedback").hidden = true;
+  $("remove-account-dialog").showModal();
+}
+
+async function confirmAccountRemoval() {
+  const pending = accountRemovalState;
+  if (!pending) return;
+  await perform($("confirm-remove-account"), "setup", async () => {
+    await saveAccounts(pending.accounts.filter((item) => accountKey(item) !== accountKey(pending.account)), pending.revision);
+    accountRemovalState = null;
+    $("remove-account-dialog").close();
+    notify("用户已移除，已有记忆保留。");
+  }, "remove-account-feedback");
+}
+
+async function prepareInstallation(button, redeploy = false) {
   await perform(button, "setup", async () => {
     const response = await bridge.apiPost("install/prepare", {
-      config_revision: settingsRevision,
-      repair: button === $("reinstall") && !data?.backend?.version,
+      config_revision: settingsRevision, repair: redeploy && !data?.backend?.version,
       control_plane_url: controlPlaneUrl($("control-plane-url").value),
     });
-    if (!response.command) throw new Error("未生成安装命令，请稍后重试。");
+    if (!response.command) throw new Error("未生成部署命令，请稍后重试。");
     if (response.config_revision) settingsRevision = response.config_revision;
     $("install-command").value = response.command;
     $("installation").hidden = false;
-    $("installation").open = true;
-    $("managed-settings").hidden = false;
     data.has_installation = true;
     data.installation_api_url = response.api_url;
-    updateConnectionMode();
     if (response.api_url) $("api-url").value = response.api_url;
     if (response.control_plane_url && !$("control-plane-url").value.trim()) $("control-plane-url").value = controlPlaneUrl(response.control_plane_url);
-    $("install-command").focus();
-    notify(button === $("reinstall")
-      ? "同版本修复命令已生成。请在原服务器、原安装路径执行，保留原模型和记忆数据。"
-      : "安装命令已生成。执行后在下方选择模型并保存。");
-  });
+    updateConnectionMode();
+    $("generate-deployment").hidden = !redeploy;
+    $("check-deployment").hidden = !redeploy;
+    $("deployment-heading").textContent = redeploy ? "重新部署" : "安装配套服务";
+    $("deployment-description").textContent = redeploy
+      ? "在原服务器、原安装目录执行。已有记忆、模型和凭据继续使用；卸载已删除的数据不会因重装而恢复。"
+      : "在运行 AstrBot 的 Linux 主机执行命令，完成后配置模型并保存连接。";
+    $("deployment-feedback").hidden = true;
+    if (!$("deployment-dialog").open) $("deployment-dialog").showModal();
+  }, "deployment-feedback");
 }
-$("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
-$("reinstall").addEventListener("click", () => void prepareInstallation($("reinstall")));
-$("go-upgrade").addEventListener("click", () => {
-  activateTab("setup", true);
-  if (!data?.config.managed) $("external-upgrade").open = true;
-  $(data?.config.managed ? "service-upgrade" : "external-upgrade").scrollIntoView({ behavior: "smooth", block: "start" });
-});
-$("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", async () => {
-  const revision = bootstrapReadRevision;
-  const backend = await bridge.apiGet("service/status");
-  if (revision !== bootstrapReadRevision) return;
-  data.backend = backend;
-  renderServiceVersion();
-}));
-for (const action of ["begin", "prepare", "verify", "resume", "cancel"]) {
-  $("upgrade-" + action).addEventListener("click", () => void upgradeAction(action, $("upgrade-" + action)));
+
+async function copyCommand(field, container, message) {
+  if (!$(field).value) throw new Error("请先生成命令。");
+  $(field).focus();
+  $(field).select();
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText($(field).value);
+  } catch {
+    if (!document.execCommand("copy")) throw new Error("浏览器限制了自动复制。命令已选中，请按 Ctrl+C 或长按复制。");
+  }
+  $(field).value = "";
+  $(container).hidden = true;
+  notify(message);
 }
-$("copy-upgrade").addEventListener("click", () => void perform($("copy-upgrade"), "copy", async () => {
-  const field = $("upgrade-command");
-  if (!field.value) throw new Error("请先生成升级命令。");
-  field.focus();
-  field.select();
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(field.value);
-  } catch {
-    if (!document.execCommand("copy")) throw new Error("浏览器限制了自动复制。命令已选中，请按 Ctrl+C，或长按选择复制。");
-  }
-  notify("升级命令已复制，请在原服务器终端执行。");
-}));
-$("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
-  modelRequestId ||= globalThis.crypto?.randomUUID?.() || `model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const selection = { config_revision: settingsRevision, background: true, request_id: modelRequestId };
-  for (const kind of ["chat", "embedding", "rerank"]) {
-    const select = $(`${kind}-provider`);
-    if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的聊天和嵌入模型，重排可以留空。");
-    selection[`${kind}_provider_id`] = select.value;
-  }
-  $("model-progress").hidden = false;
-  $("model-progress").textContent = "正在提交模型配置…";
-  let response;
-  try {
-    response = await bridge.apiPost("models/save", selection);
-  } catch (error) {
-    // A lost HTTP response does not prove the background operation failed.
-    const status = await bridge.apiGet("models/status").catch(() => null);
-    if (!status) {
-      $("model-progress").textContent = "请求结果暂未确认，正在重新获取处理进度。";
-      await watchModels(modelRequestId);
-      return;
-    }
-    if (status.request_id !== modelRequestId && status.status !== "running") {
-      modelRequestId = "";
-      $("model-progress").textContent = `${errorMessage(error)} 请点击「验证并保存模型」重试。`;
-      throw error;
-    }
-    response = status;
-  }
-  $("installation").open = false;
-  await watchModels(response.request_id);
-}));
-$("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", async () => {
-  const command = $("install-command");
-  if (!command.value) throw new Error("请先生成安装命令。");
-  command.focus();
-  command.select();
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(command.value);
-  } catch {
-    if (!document.execCommand("copy")) throw new Error("浏览器限制了自动复制。命令已选中，请按 Ctrl+C，或长按选择复制。");
-  }
-  $("installation").open = false;
-  notify("安装命令已复制。请在运行 AstrBot 的 Linux 主机终端执行，再选择模型并保存。");
-}));
-$("prepare-uninstall").addEventListener("click", () => void perform($("prepare-uninstall"), "setup", async () => {
-  if (!$("delete-memory-data").checked) throw new Error("请先确认删除配套服务及全部记忆数据。");
-  const response = await bridge.apiPost("uninstall/prepare", { config_revision: settingsRevision, delete_memory_data: true });
-  $("uninstall-command").value = response.command;
-  $("uninstallation").hidden = false;
-  $("uninstallation").open = true;
-}));
-$("delete-memory-data").addEventListener("change", clearUninstall);
-$("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", async () => {
-  const field = $("uninstall-command");
-  if (!field.value) throw new Error("请先生成卸载命令。");
-  field.focus();
-  field.select();
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(field.value);
-  } catch {
-    if (!document.execCommand("copy")) throw new Error("请按 Ctrl+C 复制选中的命令。");
-  }
-  $("uninstallation").open = false;
-  notify("卸载命令已复制。请在运行 AstrBot 的 Linux 主机终端执行。");
-}));
+
 async function refreshView() {
-  if (!viewReady) {
-    window.location.reload();
-    return;
-  }
+  if (!viewReady) { window.location.reload(); return; }
   await refreshBootstrap();
-  notify("状态已刷新。");
   $("update-error").hidden = true;
+  notify("状态已刷新。");
   scheduleRefresh();
 }
-$("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", refreshView));
+
 async function reloadSettings() {
   clearCommands();
   await refreshBootstrap({ hydrate: true, pollMaintenance: false });
-  notify("设置已重新加载，未保存的更改已替换。请重新生成需要的命令。");
+  notify("设置已重新加载。");
 }
-$("reload-settings").addEventListener("click", () => void perform($("reload-settings"), "setup", reloadSettings));
-$("go-setup").addEventListener("click", () => activateTab("setup", true));
-$("service-alert-setup").addEventListener("click", () => activateTab("setup", true));
-$("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = true; clearTimeout(feedbackTimer); });
-$("scope-picker").addEventListener("change", () => selectScope($("scope-picker").value));
-$("scope-mode").addEventListener("change", () => { modeDirty = true; });
-$("save-mode").addEventListener("click", () => void perform($("save-mode"), "memory", async () => {
-  const mode = $("scope-mode").value;
-  if (!modeLabels[mode]) throw new Error("请选择记忆模式。");
-  const response = await bridge.apiPost(endpoint("action"), { action: "mode", mode });
-  modeDirty = false;
-  await refreshBootstrap();
-  notify(response.message || `已切换为${modeLabels[mode]}。`);
-}));
-$("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
-  const response = await bridge.apiPost(endpoint("action"), { action: "retry" });
-  await refreshBootstrap();
-  notify(response.message || "已提交重试，处理结果会自动更新。");
-}));
-async function maintenanceAction(button, action, extra = {}) {
-  if (action === "maintenance_status") {
-    await readMaintenanceStatus();
-    return;
-  }
+
+async function setMode(button, mode) {
+  const id = scopeId;
+  if (!modeLabels[mode]) return;
   await perform(button, "memory", async () => {
-    const id = scopeId;
+    const response = await bridge.apiPost(endpoint("action", id), { action: "mode", mode });
+    await refreshBootstrap();
+    notify(response.message || "记忆模式已更新。");
+  });
+}
+
+async function maintenanceAction(button, action, extra = {}) {
+  if (action === "maintenance_status") { await readMaintenanceStatus(); return; }
+  await perform(button, "memory", async () => {
+    const id = maintenanceScope()?.scope_id;
+    if (!id) throw new Error("请选择记忆库。");
     maintenanceState = null;
     maintenanceCheckedAt = 0;
-    renderScope();
+    renderMaintenance();
     let response;
     try {
-      response = await bridge.apiPost(endpoint("action", id), {
-          action, ...extra, ...(action === "maintenance_begin" ? { config_revision: settingsRevision } : {}),
-        });
+      response = await bridge.apiPost(endpoint("action", id), { action, ...extra,
+        ...(["maintenance_begin", "bank_check"].includes(action) ? { config_revision: settingsRevision } : {}) });
     } catch (error) {
-      if (action === "maintenance_begin") {
-        await refreshBootstrap({ automatic: true, pollMaintenance: false }).catch(() => {});
-      }
+      if (action === "maintenance_begin") await refreshBootstrap({ automatic: true, pollMaintenance: false }).catch(() => {});
       throw error;
     }
-    if (response.config_revision && response.config_revision !== settingsRevision) {
-      clearUpgrade();
-      settingsRevision = response.config_revision;
-    }
+    if (response.config_revision) settingsRevision = response.config_revision;
     await refreshBootstrap();
     if (action === "maintenance_begin") $("discard-pending").checked = false;
-    notify(action === "maintenance_begin" ? "已暂停保存和查询。" : response.message || "已恢复原记忆模式。");
-  });
-}
-$("maintenance-begin").addEventListener("click", () => void maintenanceAction($("maintenance-begin"), "maintenance_begin", { discard_pending: false }));
-$("maintenance-retry").addEventListener("click", () => void readMaintenanceStatus());
-$("discard-pending").addEventListener("change", () => { $("maintenance-discard").disabled = !$("discard-pending").checked; });
-$("maintenance-discard").addEventListener("click", () => void maintenanceAction($("maintenance-discard"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
-$("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
-$("background-load").addEventListener("click", () => void loadBackground());
-$("background-save").addEventListener("click", () => void saveBackground());
-$("background-close").addEventListener("click", () => void saveBackground(true));
-$("background-page").addEventListener("change", () => { if (backgroundDraft) backgroundDraft.page_id = $("background-page").value; });
-$("background-enabled").addEventListener("change", () => { if (backgroundDraft) backgroundDraft.enabled = $("background-enabled").checked; });
-
-for (const id of ["control-plane-address", "scope-bank", "control-plane-key-command"]) $(id).addEventListener("focus", () => $(id).select());
-for (const [details, field] of [["installation", "install-command"], ["uninstallation", "uninstall-command"]]) {
-  $(details).addEventListener("toggle", () => { if (!$(details).open) $(field).value = ""; });
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) clearCommands();
-});
-window.addEventListener("pagehide", clearCommands);
-window.addEventListener("pagehide", () => { backgroundReadRevision++; backgroundDraft = null; });
-document.addEventListener("click", (event) => {
-  document.querySelectorAll(".help[open]").forEach((help) => {
-    if (!help.contains(event.target)) help.open = false;
-  });
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  document.querySelectorAll(".help[open]").forEach((help) => {
-    help.open = false;
-    help.querySelector("summary").focus();
-  });
-});
-function clearCommands() {
-  $("installation").open = false;
-  $("uninstallation").open = false;
-  $("install-command").value = "";
-  $("uninstall-command").value = "";
-  clearUpgrade();
+    notify(response.message || "读写暂停已解除。", false, "maintenance-feedback");
+  }, "maintenance-feedback");
+  renderMaintenance();
 }
 
 function clearUpgrade() {
@@ -1170,19 +976,156 @@ function clearUpgrade() {
   $("upgrade-backup-confirmed").checked = false;
 }
 
-$("forget").addEventListener("click", () => void perform($("forget"), "memory", async () => {
-  const id = scopeId;
-  const response = await bridge.apiPost(endpoint("action", id), { action: "forget_prepare" });
-  if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
-  forgetState = { id, confirmation: response.confirmation };
-  $("forget-user").textContent = scopeName(data.scopes.find((scope) => scope.scope_id === id));
-  $("forget-message").textContent = response.message || "";
-  $("forget-feedback").textContent = "";
-  $("forget-agree").checked = false;
-  $("forget-agree").disabled = false;
-  $("confirm-forget").disabled = true;
-  $("forget-dialog").showModal();
+function clearCommands() {
+  $("install-command").value = "";
+  $("installation").hidden = true;
+  clearUninstall();
+  clearUpgrade();
+}
+
+function openUpgrade() {
+  activateTab("setup");
+  const id = data?.config.managed && data?.backend?.managed ? "upgrade-dialog" : "external-upgrade";
+  if (!$(id).open) $(id).showModal();
+}
+
+async function prepareForget(button, id) {
+  await perform(button, "memory", async () => {
+    const response = await bridge.apiPost(endpoint("action", id), { action: "forget_prepare" });
+    if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
+    forgetState = { id, confirmation: response.confirmation };
+    $("forget-user").textContent = scopeName(data.scopes.find((item) => item.scope_id === id));
+    $("forget-message").textContent = response.message || "";
+    $("forget-feedback").textContent = "";
+    $("forget-agree").checked = false;
+    $("forget-agree").disabled = false;
+    $("confirm-forget").disabled = true;
+    $("forget-dialog").showModal();
+  }, button === $("maintenance-forget") ? "maintenance-feedback" : "feedback");
+}
+
+$("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void saveSettings().catch((error) => notify(errorMessage(error), true)); });
+$("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
+  await checkConnection(connectionPayload());
+  await refreshBootstrap();
 }));
+$("add-account").addEventListener("click", addAccount);
+$("account-platform").addEventListener("change", updateAccountHint);
+$("account-form").addEventListener("submit", (event) => { event.preventDefault(); void submitAccount().catch((error) => notify(errorMessage(error), true, "account-feedback")); });
+$("authorize-account").addEventListener("click", () => {
+  const scope = data.scopes.find((item) => item.scope_id === scopeId);
+  if (scope) void prepareAuthorization($("authorize-account"), scope.platform_instance_id, scope.user_id);
+});
+$("confirm-authorization").addEventListener("click", () => void confirmAuthorization());
+$("cancel-authorization").addEventListener("click", () => $("authorization-dialog").close());
+$("authorization-dialog").addEventListener("close", () => { authorizationState = null; });
+$("remove-account").addEventListener("click", requestAccountRemoval);
+$("cancel-remove-account").addEventListener("click", () => $("remove-account-dialog").close());
+$("confirm-remove-account").addEventListener("click", () => void confirmAccountRemoval());
+$("remove-account-dialog").addEventListener("close", () => { accountRemovalState = null; });
+for (const radio of document.querySelectorAll('[name="connection-mode"]')) radio.addEventListener("change", () => {
+  clearCommands();
+  $("api-key").value = "";
+  $("connection-result").hidden = true;
+  $("api-url").value = radio.value === "managed" ? data.installation_api_url || "" : data.config.api_url || "";
+  updateConnectionMode();
+});
+$("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
+$("reinstall").addEventListener("click", () => {
+  clearCommands();
+  $("deployment-heading").textContent = "重新部署";
+  $("deployment-description").textContent = "重新应用配套部署文件，已有数据、模型和凭据继续使用。卸载已删除的数据不会因重装而恢复。";
+  $("generate-deployment").hidden = false;
+  $("check-deployment").hidden = true;
+  $("deployment-feedback").hidden = true;
+  $("deployment-dialog").showModal();
+});
+$("generate-deployment").addEventListener("click", () => void prepareInstallation($("generate-deployment"), true));
+$("check-deployment").addEventListener("click", () => void perform($("check-deployment"), "setup", () => checkConnection({}, "deployment-feedback"), "deployment-feedback"));
+$("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", async () => {
+  const revision = bootstrapReadRevision;
+  const backend = await bridge.apiGet("service/status");
+  if (revision !== bootstrapReadRevision) return;
+  data.backend = backend;
+  renderServiceVersion();
+}));
+$("view-upgrade").addEventListener("click", openUpgrade);
+$("go-upgrade").addEventListener("click", openUpgrade);
+$("ignore-upgrade").addEventListener("click", () => void perform($("ignore-upgrade"), "setup", async () => {
+  const response = await bridge.apiPost("service/upgrade/ignore", {
+    config_revision: settingsRevision, connection_revision: data.config.connection_revision, target: data.backend.target,
+  });
+  settingsRevision = response.config_revision;
+  await refreshBootstrap({ automatic: true, pollMaintenance: false });
+  notify(response.message);
+}));
+for (const action of ["begin", "prepare", "verify", "resume", "cancel"]) $("upgrade-" + action).addEventListener("click", () => void upgradeAction(action, $("upgrade-" + action)));
+$("copy-upgrade").addEventListener("click", () => void perform($("copy-upgrade"), "copy", () => copyCommand("upgrade-command", "upgrade-installation", "升级命令已复制，请在原服务器执行。")));
+$("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", () => copyCommand("install-command", "installation", "部署命令已复制，请在运行 AstrBot 的服务器执行。")));
+$("backup-guide").addEventListener("click", () => $("backup-dialog").showModal());
+$("prepare-uninstall").addEventListener("click", () => {
+  clearUninstall();
+  $("delete-memory-data").checked = false;
+  $("uninstall-feedback").hidden = true;
+  $("uninstall-dialog").showModal();
+});
+$("generate-uninstall").addEventListener("click", () => void perform($("generate-uninstall"), "setup", async () => {
+  if (!$("delete-memory-data").checked) throw new Error("请先确认删除范围。");
+  const response = await bridge.apiPost("uninstall/prepare", { config_revision: settingsRevision, delete_memory_data: true });
+  if (!response.command) throw new Error("未生成卸载命令，请重试。");
+  $("uninstall-command").value = response.command;
+  $("uninstallation").hidden = false;
+}, "uninstall-feedback"));
+$("delete-memory-data").addEventListener("change", clearUninstall);
+$("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", () => copyCommand("uninstall-command", "uninstallation", "卸载命令已复制，请在服务器执行。")));
+$("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
+  modelRequestId ||= globalThis.crypto?.randomUUID?.() || `model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const selection = { config_revision: settingsRevision, background: true, request_id: modelRequestId };
+  for (const kind of ["chat", "embedding", "rerank"]) {
+    const select = $(`${kind}-provider`);
+    if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的记忆处理模型和向量模型。");
+    selection[`${kind}_provider_id`] = select.value;
+  }
+  $("model-progress").hidden = false;
+  $("model-progress").textContent = "正在提交模型配置…";
+  let response;
+  try { response = await bridge.apiPost("models/save", selection); }
+  catch (error) {
+    const status = await bridge.apiGet("models/status").catch(() => null);
+    if (!status) { $("model-progress").textContent = "正在确认处理结果…"; await watchModels(modelRequestId); return; }
+    if (status.request_id !== modelRequestId && status.status !== "running") { modelRequestId = ""; throw error; }
+    response = status;
+  }
+  await watchModels(response.request_id);
+}));
+$("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", refreshView));
+$("reload-settings").addEventListener("click", () => void perform($("reload-settings"), "setup", reloadSettings));
+$("service-alert-setup").addEventListener("click", () => activateTab("setup", true));
+$("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = true; clearTimeout(feedbackTimer); });
+$("scope-picker").addEventListener("change", () => { selectedAccount = $("scope-picker").value; scopeId = ""; updateUserChoices(); selectScope(scopeId); });
+$("bank-picker").addEventListener("change", () => selectScope($("bank-picker").value));
+for (const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void setMode(button, button.dataset.mode));
+$("background-page").addEventListener("change", () => void saveBackground());
+$("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
+  () => copyValue("scope-bank", "Bank ID 已复制。")));
+$("scope-bank").addEventListener("focus", () => $("scope-bank").select());
+$("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
+  const response = await bridge.apiPost(endpoint("action"), { action: "retry" });
+  await refreshBootstrap();
+  notify(response.message || "已安排重试。");
+}));
+$("maintenance-view").addEventListener("click", () => openMaintenance(scopeId));
+$("show-paused-banks").addEventListener("click", () => openMaintenance(data.scopes.find((item) => (item.summary?.maintenance || item.summary?.bank_missing)
+  && !(data.config.allowed_accounts || []).some((account) => accountKey(account) === accountKey(item)))?.scope_id));
+$("maintenance-scope").addEventListener("change", () => { maintenanceScopeId = $("maintenance-scope").value; renderMaintenance(); void readMaintenanceStatus(); });
+$("maintenance-retry").addEventListener("click", () => void readMaintenanceStatus());
+$("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
+$("maintenance-bank-check").addEventListener("click", () => void maintenanceAction($("maintenance-bank-check"), "bank_check"));
+$("maintenance-forget").addEventListener("click", () => void prepareForget($("maintenance-forget"), maintenanceScope()?.scope_id));
+$("discard-pending").addEventListener("change", renderMaintenance);
+$("maintenance-discard").addEventListener("click", () => void maintenanceAction($("maintenance-discard"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
+$("maintenance-dialog").addEventListener("close", () => { maintenanceScopeId = ""; maintenanceIdentity = ""; maintenanceState = null; });
+$("forget").addEventListener("click", () => void prepareForget($("forget"), scopeId));
 $("forget-agree").addEventListener("change", () => { $("confirm-forget").disabled = !$("forget-agree").checked; });
 $("cancel-forget").addEventListener("click", () => { if (!locks.has("forget")) $("forget-dialog").close(); });
 $("forget-dialog").addEventListener("cancel", (event) => { if (locks.has("forget")) event.preventDefault(); });
@@ -1199,20 +1142,25 @@ $("confirm-forget").addEventListener("click", () => {
       forgetState = null;
       $("forget-dialog").close();
       await refreshBootstrap();
-      notify(response.message || "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「保存并自动使用记忆」重新开始。");
+      notify(response.message || "正在清空旧记忆。");
     } finally {
       $("forget-agree").disabled = false;
       $("cancel-forget").disabled = false;
-      // A failed confirmation may be expired. Require a fresh prepare instead of reusing it.
       if ($("forget-dialog").open) {
         forgetState = null;
         $("forget-agree").checked = false;
         $("forget-agree").disabled = true;
-        $("forget-message").textContent = "操作未完成。请关闭此窗口，重新点击「清空此用户的记忆」。";
+        $("forget-message").textContent = "操作未完成，请关闭窗口后重新发起清空。";
       }
     }
   }, "forget-feedback").finally(() => { $("confirm-forget").disabled = true; });
 });
+for (const button of document.querySelectorAll("[data-close]")) button.addEventListener("click", () => $(button.dataset.close).close());
+$("deployment-dialog").addEventListener("close", () => { $("install-command").value = ""; $("installation").hidden = true; });
+$("uninstall-dialog").addEventListener("close", clearUninstall);
+$("upgrade-dialog").addEventListener("close", clearUpgrade);
+document.addEventListener("visibilitychange", () => { if (document.hidden) clearCommands(); });
+window.addEventListener("pagehide", () => { clearCommands(); backgroundReadRevision++; backgroundDraft = null; });
 
 async function start() {
   if (startRunning) return;
@@ -1226,32 +1174,29 @@ async function start() {
     if (!bridge) throw new Error("请从 AstrBot 的插件详情页打开「记忆管理」。");
     const context = await withTimeout(bridge.ready(), 10000, "连接 AstrBot 超时，请重新加载插件页面。");
     const theme = (value) => { document.documentElement.dataset.theme = (value || bridge.getContext?.())?.isDark ? "dark" : "light"; };
-    theme(context);
-    offContext?.();
-    offContext = bridge.onContext?.(theme);
+    theme(context); offContext?.(); offContext = bridge.onContext?.(theme);
     await refreshBootstrap({ hydrate: true, pollMaintenance: false });
     $("refresh").disabled = false;
     $("refresh").textContent = "重新获取";
     $("update-error").hidden = true;
     activateTab(data.config.configured ? "memories" : "setup");
     viewReady = true;
+    renderScope();
     scheduleRefresh();
     void readMaintenanceStatus().catch((error) => notify(errorMessage(error), true));
   } catch (error) {
     $("startup").textContent = errorMessage(error);
-    $("startup").classList.add("error");
-    $("startup").setAttribute("role", "alert");
+    $("startup").classList.add("error"); $("startup").setAttribute("role", "alert");
     $("refresh").disabled = false;
     $("refresh").textContent = viewReady ? "重新获取" : "重新加载页面";
-    $("update-error").hidden = false;
-    $("update-error-message").textContent = "页面加载失败，请重试。";
-  } finally {
-    startRunning = false;
-  }
+    $("update-error").hidden = false; $("update-error-message").textContent = "页面加载失败，请重试。";
+  } finally { startRunning = false; }
 }
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
   if (!document.hidden) {
+    backgroundReadRevision++;
+    backgroundDraft = null;
     if (data) renderScope();
     scheduleRefresh(0);
   }

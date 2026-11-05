@@ -50,6 +50,7 @@ class MemoryPanel:
             ("install/prepare", "POST", self.prepare),
             ("service/status", "GET", self.service_status),
             ("service/upgrade", "POST", self.upgrade),
+            ("service/upgrade/ignore", "POST", self.ignore_upgrade),
             ("models/save", "POST", self.save_models),
             ("models/status", "GET", self.model_status),
             ("uninstall/prepare", "POST", self.prepare_uninstall),
@@ -105,7 +106,7 @@ class MemoryPanel:
 
     def error_message(self, code):
         messages = {
-            "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试失败记录」。",
+            "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试保存」。",
             "remote_cancelled": "这条记录的保存已取消。",
             "cancellation_registered": "正在取消这条记录的保存。",
             "retry_state_changed": "任务状态已变化，请刷新状态。",
@@ -188,6 +189,13 @@ class MemoryPanel:
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
 
+    def connection_revision(self):
+        return sha256(json.dumps([
+            self.plugin.config.get(key, "") for key in (
+                "api_url", "api_key", "service_id", "service_address_revision",
+            )
+        ]))
+
     def check_revision(self, payload):
         self.ensure_open()
         if "config_revision" in payload and payload["config_revision"] != self.config_revision():
@@ -255,7 +263,11 @@ class MemoryPanel:
     async def service_status(self, *, force=True):
         plugin, state = self.plugin, self.state()
         client = plugin.client
-        result = {"version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False}
+        ignored = state.get("ignored_upgrades", {})
+        result = {
+            "version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False,
+            "ignored": isinstance(ignored, dict) and ignored.get(self.connection_revision()) == HINDSIGHT_VERSION,
+        }
         if (not client or not plugin.outbox or plugin.stopping
                 or not isinstance(getattr(client, "api_key", None), str)
                 or not callable(getattr(client, "request", None))):
@@ -283,6 +295,28 @@ class MemoryPanel:
         result["resume_available"] = bool(result["upgrade_paused"] and state.get("upgrade_check", {}).get("verified"))
         self.version_cache = (identity, time.monotonic() + 30, result)
         return result
+
+    async def ignore_upgrade(self):
+        from astrbot.api.web import request
+
+        payload = await self.body()
+        async with self.lock:
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            self.check_revision(payload)
+            self.ensure_no_upgrade()
+            if (
+                payload.get("target") != HINDSIGHT_VERSION
+                or payload.get("connection_revision") != self.connection_revision()
+            ):
+                raise PanelError("服务连接或目标版本已变化，请重新获取升级提示。")
+            state = self.state()
+            if not isinstance(state.get("ignored_upgrades"), dict):
+                state["ignored_upgrades"] = {}
+            state.setdefault("ignored_upgrades", {})[self.connection_revision()] = HINDSIGHT_VERSION
+            self.store_state(state)
+            self.version_cache = None
+            return {"config_revision": self.config_revision(), "message": "已忽略这个版本的升级提示。"}
 
     async def upgrade(self):
         from astrbot.api.web import request
@@ -323,7 +357,7 @@ class MemoryPanel:
                 for row in unique.values():
                     checked = await maintenance.status(row["scope_id"], management=queue.management(row["scope_id"]))
                     if (not checked["ready"] and not (allow_running and checked["phase"] == "inactive")) or checked.get("bank_missing"):
-                        raise PanelError("仍有记录未完成保存或记忆库缺失；请在「记忆与保存」处理待保存或失败记录，并检查暂停进度。")
+                        raise PanelError("仍有记录未完成保存或记忆库缺失；请在「用户与记忆」处理待保存或失败记录，并检查暂停进度。")
                     exists = await plugin.client.bank_exists(row["bank"])
                     uncreated = (
                         not exists and queue.control.bank_state(queue.connection_id, row["bank"]) == "new"
@@ -401,9 +435,9 @@ class MemoryPanel:
                 state["upgrade_check"]["verified"] = True
                 self.store_state(state)
                 self.version_cache = None
-                message = ("版本与原记忆库核对通过。确认旧记忆可用后，点击「解除升级造成的暂停」。"
+                message = ("版本与原记忆库核对通过。确认旧记忆可用后，点击「解除升级暂停」。"
                            if state.get("upgrade_pauses") else
-                           "版本与原记忆库核对通过。旧版安装记录未区分暂停来源，请在用户记忆中逐用户恢复原记忆模式。")
+                           "版本与原记忆库核对通过。旧版安装记录未区分暂停来源，请在用户与记忆中逐个查看暂停状态并解除读写暂停。")
                 return {"message": message,
                         "config_revision": self.config_revision(), "verified": True}
             if status["version"] != "1.1.0":
@@ -468,10 +502,18 @@ class MemoryPanel:
         known = set()
         for scope in scopes:
             source = Scope(*json.loads(scope["identity_json"]))
+            account = (source.platform_instance_id, source.user_id)
+            bot = bot_ids.get(source.platform_instance_id)
             current = bool(
-                scope["allowed"] and bot_ids.get(source.platform_instance_id) == source.bot_id
+                scope["allowed"] and bot == source.bot_id
             )
             scope["historical"] = not current
+            scope["availability"] = (
+                "removed" if account not in accounts else
+                "disconnected" if not bot else
+                "historical" if bot != source.bot_id else
+                "confirmation" if not scope["allowed"] else "ready"
+            )
             if current:
                 known.add((source.platform_instance_id, source.user_id))
         for platform, user in sorted(accounts - known):
@@ -515,7 +557,10 @@ class MemoryPanel:
                 "pending": scope.get("pending", False),
                 "pending_reason": scope.get("pending_reason", ""),
                 "historical": scope.get("historical", False),
+                "availability": scope.get("availability", scope.get("pending_reason", "")),
                 "bot_id": Scope(*json.loads(scope["identity_json"])).bot_id if scope.get("identity_json") else "",
+                "bank_state": queue.control.bank_state(queue.connection_id, scope["bank"])
+                if queue and not scope.get("pending") else "",
                 **{key: scope.get(key) for key in ("owner_id", "generation", "revision")},
                 "summary": summary,
             })
@@ -568,7 +613,7 @@ class MemoryPanel:
             plugin, queue = self.plugin, self.plugin.outbox
             platform, user = payload.get("platform_instance_id"), payload.get("user_id")
             if (platform, user) not in pairs(plugin.config.get("allowed_accounts", [])):
-                raise PanelError("请先保存这个用户的设置，再确认授权。")
+                raise PanelError("请先添加用户，再确认机器人身份。")
             plugin.refresh_permissions()
             contract = next((row for row in self.platforms() if row["id"] == platform), None)
             if not contract or not contract["supported"] or not contract["enabled"] or queue.recovering:
@@ -663,11 +708,7 @@ class MemoryPanel:
                     or (state.get("control_plane_url", "") if not configured else "")
                 ),
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
-                "connection_revision": sha256(json.dumps([
-                    config.get(key, "") for key in (
-                        "api_url", "api_key", "service_id", "service_address_revision",
-                    )
-                ])),
+                "connection_revision": self.connection_revision(),
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": bool(state.get("id")) and (
                     not config.get("api_url")
@@ -769,7 +810,7 @@ class MemoryPanel:
             if status.get("managed") and status.get("upgrade_available"):
                 raise PanelError("当前服务为 1.1.0，请使用「升级 Hindsight」暂停保存和查询、备份并升级。")
             if status.get("managed") and status.get("version") is None and payload.get("repair") is not True:
-                raise PanelError("无法确认已有服务版本。请恢复连接；若选择修复，命令也只会替换实际确认的 1.2.0 服务，不会升级未知版本。")
+                raise PanelError("无法确认已有服务版本。请恢复连接；重新部署命令只会替换实际确认的 1.2.0 服务，不会升级未知版本。")
             state = self.state(create=True)
             if "control_plane_url" in payload:
                 state["control_plane_url"] = self.control_plane_url(payload["control_plane_url"])
@@ -921,7 +962,7 @@ class MemoryPanel:
             payload.get("control_plane_url", plugin.config.get("control_plane_url", "")),
             api_key=payload.get("api_key", ""),
         )
-        accounts = payload.get("allowed_accounts", [])
+        accounts = payload.get("allowed_accounts", plugin.config.get("allowed_accounts", []))
         selected = pairs(accounts)
         valid_platforms = {row["id"]: row for row in self.platforms()}
         previous_accounts = pairs(plugin.config.get("allowed_accounts", []))
@@ -967,7 +1008,7 @@ class MemoryPanel:
                 if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):
                     status = await self.managed_request(state)
                     if not status["configured"] or not status["ready"]:
-                        raise PanelError("请先选择模型并点击「验证并保存模型」，服务启动成功后再保存连接和使用者名单。")
+                        raise PanelError("请先选择模型并点击「保存模型」，服务启动成功后再保存连接。")
                 async with asyncio.timeout(10):
                     await client.ensure_auth(force=True)
         except (HindsightError, TimeoutError):
@@ -1038,9 +1079,9 @@ class MemoryPanel:
     def scope(self, scope_id):
         plugin = self.plugin
         if not plugin.outbox or plugin.stopping:
-            raise PanelError("请先在设置中完成记忆服务配置。")
+            raise PanelError("请先在插件设置中完成记忆服务连接。")
         if scope_id.startswith("pending-"):
-            raise PanelError("请先连接所选机器人，并在设置中确认账号授权。")
+            raise PanelError("请先连接所选机器人，再在用户与记忆中确认机器人身份。")
         plugin.refresh_permissions()
         scope = plugin.outbox.scope_owner(scope_id)
         if not scope or plugin.outbox.recovering:
@@ -1063,7 +1104,7 @@ class MemoryPanel:
             scope = self.scope(scope_id)
             source = Scope(*json.loads(scope["identity_json"]))
             if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
-                raise PanelError("请连接当前机器人并确认账号授权；历史范围不能选择或读取知识页。")
+                raise PanelError("请连接机器人并在用户与记忆中确认身份；旧记忆库不能选择或读取知识页。")
             scope = self.scope(scope_id)
             guard = ReadGuard.freeze(plugin, scope, manual=True)
             revision = self.config_revision()
@@ -1123,7 +1164,7 @@ class MemoryPanel:
                     guard.queue, scope, revision=payload["revision"], page_id=page_id,
                     model_id=model_id, enabled=payload["enabled"],
                 )
-                return {"selection": selection, "message": "知识页选择和聊天使用开关已保存。"}
+                return {"selection": selection, "message": "知识页选择已保存。"}
             return {
                 "pages": [{k: page[k] for k in ("page_id", "path", "index_stale")} for page in pages],
                 "selection": guard.selection, "scope_revision": scope["revision"],
@@ -1148,16 +1189,34 @@ class MemoryPanel:
             maintenance = plugin.worker.maintenance
             if (action == "maintenance_resume" and (check := self.state().get("upgrade_check"))
                     and check.get("connection_id") == queue.connection_id and not check.get("verified")):
-                raise PanelError("请先在设置中核对升级结果，确认原记忆库仍在，再恢复原记忆模式。")
+                raise PanelError("请先在插件设置中核对升级结果，确认原记忆库仍在，再解除读写暂停。")
             management = queue.management(scope_id)
+            if action == "bank_check":
+                self.check_revision(payload)
+                client = plugin.client
+                async with asyncio.timeout(10):
+                    await client.ensure_auth()
+                    exists = await client.bank_exists(scope["bank"])
+                latest = self.scope(scope_id)
+                if plugin.client is not client or plugin.outbox is not queue or any(
+                    latest[key] != scope[key] for key in ("bank", "owner_id", "generation", "revision")
+                ):
+                    raise PanelError("记忆范围已变化，请重新获取用户状态。")
+                self.check_revision(payload)
+                if not exists:
+                    raise PanelError("原记忆库仍不存在。请从匹配的备份恢复原库，或清空旧记忆后重新开始。")
+                queue.control.set_bank_state(queue.connection_id, scope["bank"], "established")
+                queue.apply_control()
+                plugin.worker.wake.set()
+                return {"message": "原记忆库已找到。"}
             if action in {"mode", "retry"}:
                 await plugin.prepare_sources()
                 scope = self.scope(scope_id)
                 if not scope["allowed"]:
-                    raise PanelError("历史范围只能暂停保存和查询或清空；请在设置中确认当前机器人身份后使用记忆。")
+                    raise PanelError("旧记忆库不能调整模式或重试保存；请在用户与记忆中确认机器人身份后使用记忆。")
                 source = Scope(*json.loads(scope["identity_json"]))
                 if await self.bot_id(source.platform_instance_id) != source.bot_id:
-                    raise PanelError("无法确认当前机器人身份，请连接机器人并在设置中确认授权。")
+                    raise PanelError("无法确认机器人身份，请连接机器人后在用户与记忆中确认身份。")
                 latest = self.scope(scope_id)
                 if not latest["allowed"] or latest["revision"] != scope["revision"]:
                     raise PanelError("记忆范围已变化，请刷新后重试。")
@@ -1187,15 +1246,15 @@ class MemoryPanel:
                 await maintenance.resume(scope_id, management=management)
                 plugin.worker.wake.set()
                 state = await maintenance.status(scope_id, management=queue.management(scope_id))
-                return {"maintenance": state, "message": "已恢复原记忆模式。原模式为暂停或只读时，不会自动开启保存。"}
+                return {"maintenance": state, "message": "读写暂停已解除，记忆模式保持原值。"}
             if action == "mode":
                 mode = payload.get("mode")
                 if mode not in {"active", "readonly", "paused"}:
-                    raise PanelError("请选择「保存并自动使用记忆」「只自动使用已有记忆」或「暂停保存和自动使用」。")
+                    raise PanelError("请选择「读写记忆」「只读记忆」或「停用记忆」。")
                 if mode == "active":
                     summary = queue.summary(scope_id)
                     if summary.get("maintenance") or summary.get("bank_missing"):
-                        raise PanelError("请先恢复原记忆模式；如果记忆库已被删除，请恢复原记忆库或清空旧记忆后重新开始。")
+                        raise PanelError("请先查看暂停状态并解除读写暂停；如果记忆库已被删除，请恢复原库或清空旧记忆后重新开始。")
                     if not await maintenance.check(force=True, owner_id=scope["owner_id"]):
                         raise PanelError("旧记忆仍在清理，请等清理完成后再开启记忆。")
                     latest = self.scope(scope_id)
@@ -1205,7 +1264,7 @@ class MemoryPanel:
                         raise PanelError("机器人身份或授权已变化，请刷新后重试。")
                     summary = queue.summary(scope_id)
                     if summary.get("maintenance") or summary.get("bank_missing"):
-                        raise PanelError("请先恢复原记忆模式；如果记忆库已被删除，请恢复原记忆库或清空旧记忆后重新开始。")
+                        raise PanelError("请先查看暂停状态并解除读写暂停；如果记忆库已被删除，请恢复原库或清空旧记忆后重新开始。")
                 queue.set_mode(scope_id, mode)
                 message = "记忆模式已更新。"
             elif action == "retry":
@@ -1223,7 +1282,7 @@ class MemoryPanel:
                 }
                 return {
                     "confirmation": token,
-                    "message": "清空后记忆功能保持暂停。等清理完成，再切换为「保存并自动使用记忆」；"
+                    "message": "清空后记忆功能保持暂停。等清理完成，再切换为「读写记忆」；"
                     "下次保存聊天时会自动创建新的记忆库。",
                 }
             elif action == "forget_confirm":
@@ -1237,9 +1296,9 @@ class MemoryPanel:
                     or old["generation"] != scope["generation"] or old["connection"] != queue.connection_id
                     or not secrets.compare_digest(old["token"], confirmation)
                 ):
-                    raise PanelError("确认已失效，请重新点击「清空此用户的记忆」。")
+                    raise PanelError("确认已失效，请重新点击「清空记忆」。")
                 queue.forget(scope_id, management=management)
-                message = "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「保存并自动使用记忆」重新开始。"
+                message = "正在清空旧记忆，记忆功能已暂停。清理完成后，可切换为「读写记忆」重新开始。"
             else:
                 raise PanelError("操作无效。")
             plugin.worker.wake.set()

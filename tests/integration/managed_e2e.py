@@ -64,8 +64,7 @@ class Managed(Acceptance):
                 await self.bot.connect()
                 core = ROOT / "verification/data/cmd_config.json"
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
-                await self.install("panel-baseline.zip" if self.settings.get("panel_baseline_ref") else
-                                   "baseline-install.zip" if self.settings.get("upgrade_from_1_1") else "candidate-install.zip")
+                await self.install("baseline-install.zip" if self.settings.get("upgrade_from_1_1") else "candidate-install.zip")
                 directory = self.runtime.parent
                 directory.mkdir(parents=True, exist_ok=True)
                 # Use a free CP host port, leaving all installer code/materials unmodified.
@@ -87,6 +86,8 @@ class Managed(Acceptance):
                 self.settings = json.loads((ROOT / "live-settings.json").read_text())
                 self.report.update(hindsight=self.settings["hindsight_version"], hindsight_image_id=self.settings["hindsight_image_id"])
                 self.passed("actual_browser_generated_unmodified_installer_starts_owned_compose_resources")
+                if not self.settings.get("upgrade_from_1_1"):
+                    await frame.locator('[data-close="deployment-dialog"]').click()
                 await frame.locator("#chat-provider").select_option("delivery-chat")
                 await frame.locator("#embedding-provider").select_option("delivery-embedding")
                 await frame.locator("#rerank-provider").select_option("delivery-rerank")
@@ -107,22 +108,31 @@ class Managed(Acceptance):
                         await until(lambda: frame.locator("#save-models").is_enabled(), timeout=30)
                         await asyncio.sleep(3)
                 await until(lambda: frame.locator("#save-models").is_enabled(), timeout=20)
-                if not await frame.locator(".account-user").count():
+                if self.settings.get("upgrade_from_1_1"):
+                    if not await frame.locator(".account-user").count():
+                        await frame.locator("#add-account").click()
+                    await frame.locator(".account-platform").last.select_option("delivery-onebot")
+                    await frame.locator(".account-user").last.fill(str(ALICE))
+                    await frame.locator("#save-settings").click()
+                    async def account_saved():
+                        return any(row["platform_instance_id"] == "delivery-onebot" and row["user_id"] == str(ALICE)
+                                   for row in (await self.config())["allowed_accounts"])
+                    await until(account_saved, timeout=30)
+                    await frame.locator('#tab-memories[aria-selected="true"]').wait_for()
+                    await frame.locator("#tab-setup").click()
+                    await frame.get_by_role("button", name="确认账号授权", exact=True).click()
+                    await frame.locator("#authorization-dialog").wait_for(state="visible")
+                    await frame.locator("#confirm-authorization").click()
+                else:
+                    await frame.locator("#save-settings").click()
+                    await until(lambda: frame.locator("#save-settings").is_enabled(), timeout=30)
+                    await frame.locator("#tab-memories").click()
                     await frame.locator("#add-account").click()
-                await frame.locator(".account-platform").last.select_option("delivery-onebot")
-                await frame.locator(".account-user").last.fill(str(ALICE))
-                await frame.locator("#save-settings").click()
-                async def account_saved():
-                    configuration = await self.config()
-                    return any(account["platform_instance_id"] == "delivery-onebot"
-                               and account["user_id"] == str(ALICE)
-                               for account in configuration["allowed_accounts"])
-                await until(account_saved, timeout=30)
-                await frame.locator('#tab-memories[aria-selected="true"]').wait_for()
-                await frame.locator("#tab-setup").click()
-                await frame.get_by_role("button", name="确认账号授权", exact=True).click()
-                await frame.locator("#authorization-dialog").wait_for(state="visible")
-                await frame.locator("#confirm-authorization").click()
+                    await frame.locator("#account-platform").select_option("delivery-onebot")
+                    await frame.locator("#account-user").fill(str(ALICE))
+                    await frame.locator("#save-account").click()
+                    await frame.locator("#authorization-dialog").wait_for(state="visible", timeout=30000)
+                    await frame.locator("#confirm-authorization").click()
                 await self.usable()
                 await self.backend_ready()
                 configuration = await self.config()
@@ -143,7 +153,7 @@ class Managed(Acceptance):
                 )
                 await self.drained()
                 self.passed("managed_service_real_embedding_rerank_retain_new_conversation_recall_and_reply")
-                if self.settings.get("panel_baseline_ref"):
+                if self.settings.get("verify_panel") and not self.settings.get("upgrade_from_1_1"):
                     from panel_e2e import verify_panel
                     await verify_panel(self, page, context, frame, scope)
                 if self.settings.get("upgrade_from_1_1"):
@@ -186,8 +196,9 @@ class Managed(Acceptance):
                     await frame.locator("#upgrade-begin").click()
                     await until(lambda: frame.locator("#upgrade-cancel").is_enabled(), timeout=30)
                     await until(maintenance_ready, timeout=180)
+                    await frame.locator('[data-close="upgrade-dialog"]').click()
                     await frame.locator("#tab-memories").click()
-                    await frame.locator("#scope-picker").select_option(carol["scope_id"])
+                    await frame.locator("#scope-picker").select_option(json.dumps([carol["platform_instance_id"], carol["user_id"]], separators=(",", ":")))
                     stale_revision = (await self.bootstrap())["config_revision"]
                     control_path = Path(configuration.get("control_state_dir") or str(directory.parent / (NAME + "_control"))) / "control.sqlite3"
                     with sqlite3.connect(control_path) as control:
@@ -199,7 +210,7 @@ class Managed(Acceptance):
                         except RuntimeError:
                             pass
                         await frame.locator("#settings-conflict").wait_for(state="visible", timeout=30000)
-                        await until(lambda: frame.locator("#maintenance-begin").is_enabled(), timeout=30)
+                        await until(lambda: frame.locator("#maintenance-view").is_visible(), timeout=30)
                     finally:
                         with sqlite3.connect(control_path) as control:
                             control.execute("DROP TRIGGER e2e_pause_failure")
@@ -220,9 +231,9 @@ class Managed(Acceptance):
                             row["bank"] for row in json.loads((directory / "setup.json").read_text())["upgrade_pauses"]["banks"]
                         }
                     await until(personal_pause, timeout=30)
-                    await until(lambda: frame.locator("#maintenance-begin").is_enabled(), timeout=30)
+                    await until(lambda: frame.locator("#maintenance-view").is_visible(), timeout=30)
                     await frame.locator("#tab-setup").click()
-                    await frame.locator("#upgrade-abandon summary").click()
+                    await frame.locator("#view-upgrade").click()
                     await frame.locator("#upgrade-cancel").click()
                     async def abandoned():
                         rows = (await self.bootstrap())["scopes"]
@@ -285,10 +296,11 @@ class Managed(Acceptance):
                                 and next(row for row in rows if row["user_id"] == carol_id)["summary"]["maintenance"])
                     await until(resumed, timeout=30)
                     self.passed("browser_bulk_resume_preserves_preexisting_pause_and_original_modes")
+                    await frame.locator('[data-close="upgrade-dialog"]').click()
                     await frame.locator("#tab-memories").click()
-                    await frame.locator("#scope-picker").select_option(scope["scope_id"])
-                    assert await frame.locator("#user-controls #scope-picker").count() == 1
-                    assert await frame.locator("#user-controls #maintenance-resume").count() == 1
+                    await frame.locator("#scope-picker").select_option(json.dumps([scope["platform_instance_id"], scope["user_id"]], separators=(",", ":")))
+                    assert await frame.locator("#scope-picker").count() == 1
+                    assert await frame.locator("#maintenance-dialog #maintenance-resume").count() == 1
                     assert await frame.locator("#scope-statuses").count() == 0
                     assert await frame.get_by_role("button", name="管理此用户", exact=True).count() == 0
                     await self.usable()
@@ -300,6 +312,7 @@ class Managed(Acceptance):
                 await page.screenshot(path=str(ROOT / "managed-wizard.png"), full_page=True)
                 await frame.locator("#tab-setup").click()
                 await frame.locator("#reinstall").click()
+                await frame.locator("#generate-deployment").click()
                 await until(lambda: frame.locator("#install-command").input_value(), timeout=20)
                 private_command("managed_reinstall", await frame.locator("#install-command").input_value())
                 await self.control("managed_reinstall")
@@ -309,6 +322,7 @@ class Managed(Acceptance):
                 assert "Hazel-63" in json.dumps(await self.memories(scope["bank"]))
                 assert configuration == await self.config()
                 self.passed("unmodified_redeployment_preserves_model_settings_bank_credentials_and_memories")
+                await frame.locator('[data-close="deployment-dialog"]').click()
 
                 cp = await context.new_page()
                 cp_url = f'http://127.0.0.1:{self.settings["control_plane_port"]}'
@@ -327,8 +341,9 @@ class Managed(Acceptance):
                 await cp.screenshot(path=str(ROOT / "official-control-plane.png"), full_page=True)
                 self.passed("managed_official_control_plane_authentication_bank_listing_and_real_browser_page")
                 await cp.close()
-                await frame.locator("#delete-memory-data").check()
                 await frame.locator("#prepare-uninstall").click()
+                await frame.locator("#delete-memory-data").check()
+                await frame.locator("#generate-uninstall").click()
                 await until(lambda: frame.locator("#uninstall-command").input_value(), timeout=20)
                 private_command("managed_uninstall", await frame.locator("#uninstall-command").input_value())
                 await self.control("managed_uninstall")

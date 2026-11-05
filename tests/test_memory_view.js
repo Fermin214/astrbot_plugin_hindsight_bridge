@@ -23,9 +23,12 @@ function harness() {
       querySelector() { return node(); }, closest() { return null; },
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
-      addEventListener(name, handler) { this.listeners[name] = handler; }, setAttribute() {},
+      attributes: {},
+      addEventListener(name, handler) { this.listeners[name] = handler; },
+      setAttribute(name, value) { this.attributes[name] = value; },
       removeAttribute(name) { delete this[name === "maxlength" ? "maxLength" : name]; },
       showModal() { this.open = true; }, close() { this.open = false; },
+      focus() {}, select() {}, reset() {}, reportValidity() { return true; },
     };
   }
   const context = vm.createContext({
@@ -41,29 +44,31 @@ function harness() {
     $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     el: (tag, kind, content) => Object.assign(node(), { textContent: content, className: kind || "" }),
     window: { AstrBotPluginView: null, location: { reload() { context.reloads++; } } },
-    document: { documentElement: { dataset: {} }, querySelector: () => ({ value: "existing" }) },
+    document: { documentElement: { dataset: {} }, querySelector: (selector) => selector.startsWith("[data-mode=")
+      ? context.$("mode-" + selector.match(/"([^"]+)"/)[1]) : ({ value: "existing" }) },
     data: null, bridge: null, startRunning: false, viewReady: false, offContext: undefined, reloads: 0,
-    locks: new Set(), scopeId: "", modeDirty: false, maintenanceState: null,
+    locks: new Set(), scopeId: "", selectedAccount: "", maintenanceScopeId: "", modeDirty: false, maintenanceState: null,
     maintenanceIdentity: "", maintenanceCheckedAt: 0,
     maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "",
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     backgroundReadRevision: 0, backgroundDraft: null,
-    renderBackground() {},
+    renderBackground() {}, renderScope() {},
+    clearCommands() {},
     renderServiceVersion() {},
     clearUpgrade() {},
     modelWatch: null, feedbackTimer: null,
     hydrateConfig() {}, providerSelect() {}, refreshAccountPlatforms() {}, updateProviderHelp() {},
     readMaintenanceStatus: async () => {},
     option: (value, label, disabled = false) => Object.assign(node(), { value, textContent: label, disabled }),
-    activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "保存并自动使用记忆", readonly: "只自动使用已有记忆", paused: "暂停保存和自动使用" },
+    activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "读写记忆", readonly: "只读记忆", paused: "停用记忆" },
     scopeName: () => "user", countDescription: () => "queue", maintenanceDescription: () => "maintenance",
     refreshBootstrap: async () => {
       context.data = { config: { configured: true } };
       context.$("startup").hidden = true;
     },
   });
-  for (const name of ["withTimeout", "errorMessage", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode"]) {
+  for (const name of ["withTimeout", "errorMessage", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode", "accountKey", "accountScopes", "updateUserChoices", "maintenanceScope", "renderMaintenance"]) {
     vm.runInContext(declaration(name), context);
   }
   return context;
@@ -73,7 +78,7 @@ test("version notices distinguish managed upgrades external services and unknown
   const context = harness();
   vm.runInContext(declaration("renderServiceVersion"), context);
   context.data = { config: { configured: true, managed: true }, backend: {
-    version: "1.1.0", supported: true, managed: true, upgrade_available: true, pending: false,
+    version: "1.1.0", target: "1.2.0", supported: true, managed: true, upgrade_available: true, pending: false,
   } };
   context.renderServiceVersion();
   assert.equal(context.$("service-upgrade").hidden, false);
@@ -83,13 +88,14 @@ test("version notices distinguish managed upgrades external services and unknown
   context.data.backend.managed = false;
   context.renderServiceVersion();
   assert.equal(context.$("service-upgrade").hidden, true);
-  assert.equal(context.$("go-upgrade").hidden, false);
+  assert.equal(context.$("go-upgrade").hidden, true);
+  assert.equal(context.$("upgrade-notice").hidden, false);
   context.data.backend = { version: null, upgrade_available: false };
   context.renderServiceVersion();
   assert.equal(context.$("go-upgrade").hidden, true);
   assert.equal(context.$("upgrade-prepare").disabled, true);
   context.data = { config: { configured: true, managed: true }, backend: {
-    version: "1.2.0", managed: true, upgrade_available: false, pending: false,
+    version: "1.2.0", target: "1.2.0", managed: true, upgrade_available: false, pending: false,
     upgrade_paused: true, resume_available: true,
   } };
   context.renderServiceVersion();
@@ -150,27 +156,25 @@ test("missing SDK and singleton pending handshake require reloading the plugin f
   assert.equal(reloaded.$("refresh").disabled, false);
 });
 
-test("account fields use platform hints and keep opaque identifiers as strings", () => {
+test("account form uses platform hints and preserves opaque identifiers as strings", () => {
   const context = harness();
-  vm.runInContext(declaration("addAccount"), context);
+  vm.runInContext(declaration("updateAccountHint"), context);
   context.data = { platforms: [
-    { id: "onebot", supported: true, numeric_user_id: true, user_label: "用户 QQ 号" },
-    { id: "official", supported: false, numeric_user_id: false, user_label: "用户 OpenID", user_hint: "OpenID，不是 QQ 号" },
+    { id: "onebot", numeric_user_id: true, user_label: "用户 QQ 号" },
+    { id: "official", numeric_user_id: false, user_label: "用户 OpenID", user_hint: "OpenID，不是 QQ 号" },
   ] };
-  const select = context.addAccount({ platform_instance_id: "onebot", user_id: "9007199254740993" });
-  const row = context.$("accounts").children[0];
-  const caption = row.children[1].children[0];
-  const input = row.children[1].children[1];
+  context.$("account-platform").value = "onebot";
+  const input = context.$("account-user");
+  input.value = "9007199254740993";
+  context.updateAccountHint();
   assert.equal(input.value, "9007199254740993");
   assert.equal(input.inputMode, "numeric");
   assert.equal(input.pattern, "[0-9]+");
-  assert.equal(select.children[2].disabled, true);
+  context.$("account-platform").value = "official";
   input.value = "AbC_opaque-id";
-  select.value = "official";
-  select.listeners.change();
-  assert.equal(caption.textContent, "用户 OpenID");
+  context.updateAccountHint();
+  assert.equal(context.$("account-user-label").textContent, "用户 OpenID");
   assert.equal(input.placeholder, "OpenID，不是 QQ 号");
-  assert.equal(input.inputMode, "text");
   assert.equal(input.pattern, undefined);
   assert.equal(input.value, "AbC_opaque-id");
 });
@@ -185,11 +189,10 @@ test("historical scope disables modes and retry while preserving maintenance and
   }] };
   context.scopeId = "old";
   context.renderScope();
-  for (const id of ["scope-mode", "save-mode", "retry"]) assert.equal(context.$(id).disabled, true);
-  for (const id of ["maintenance-begin", "forget"]) assert.equal(context.$(id).disabled, false);
-  assert.equal(context.$("scope-mode-field").hidden, true);
-  assert.equal(context.$("save-mode").hidden, true);
-  assert.match(context.$("historical-mode").textContent, /990001.*暂停保存和自动使用/);
+  for (const id of ["mode-active", "mode-readonly", "mode-paused", "retry"]) assert.equal(context.$(id).disabled, true);
+  for (const id of ["forget"]) assert.equal(context.$(id).disabled, false);
+  assert.equal(context.$("mode-control").hidden, true);
+  assert.match(context.$("historical-mode").textContent, /停用记忆/);
 });
 
 function installBootstrapChain(context) {
@@ -200,9 +203,9 @@ function installBootstrapChain(context) {
 
 function maintenanceBootstrap() {
   return {
-    config: { configured: true, managed: false, connection_revision: "connection-1" }, platforms: [], providers: {},
+    config: { configured: true, managed: false, connection_revision: "connection-1", allowed_accounts: [{platform_instance_id: "qq", user_id: "123"}] }, platforms: [], providers: {},
     status: { connected: true }, scopes: [{
-      scope_id: "one", mode: "active", bank: "bank", owner_id: "owner-1", generation: 1, revision: 2,
+      scope_id: "one", platform_instance_id: "qq", user_id: "123", mode: "active", bank: "bank", owner_id: "owner-1", generation: 1, revision: 2,
       summary: { counts: {}, maintenance: { connection_id: "service-1", started_at: 123 } },
     }],
   };
@@ -217,13 +220,14 @@ test("late bootstrap cannot restore an older bank or reenable historical control
   const current = maintenanceBootstrap();
   current.scopes[0].bank = "new-bank";
   current.scopes[0].historical = true;
+  current.scopes[0].availability = "historical";
   current.scopes[0].summary.maintenance = null;
   context.bridge.apiGet = async () => current;
   await context.refreshBootstrap({ automatic: true });
   older(maintenanceBootstrap());
   await first;
   assert.equal(context.$("scope-bank").value, "new-bank");
-  assert.equal(context.$("save-mode").disabled, true);
+  assert.equal(context.$("mode-active").disabled, true);
 });
 
 test("starting an action invalidates an outstanding automatic bootstrap", async () => {
@@ -240,12 +244,12 @@ test("starting an action invalidates an outstanding automatic bootstrap", async 
   older(maintenanceBootstrap());
   await first;
   assert.equal(context.data.scopes[0].bank, "after-action");
-  assert.equal(context.$("save-mode").disabled, true);
+  assert.equal(context.$("mode-active").disabled, true);
 });
 
 test("failed authorization drops the consumed token and allows preparing a fresh confirmation", async () => {
   const context = harness();
-  for (const name of ["perform", "prepareAuthorization", "confirmAuthorization"]) {
+  for (const name of ["perform", "requestAuthorization", "prepareAuthorization", "confirmAuthorization"]) {
     vm.runInContext(declaration(name), context);
   }
   const calls = [];
@@ -372,7 +376,7 @@ test("manual maintenance status also times out and releases its controls", async
   await context.maintenanceAction(context.$("maintenance-retry"), "maintenance_status");
   assert.equal(context.$("memory-fields").disabled, false);
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /获取暂停进度超时/);
+  assert.match(context.$("maintenance-detail").textContent, /获取暂停进度超时/);
   assert.equal(context.$("maintenance-retry").hidden, false);
 });
 
@@ -390,17 +394,17 @@ test("same-scope polling retains confirmed ready until an actual failure, tasks 
   const poll = context.refreshBootstrap({ automatic: true });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(context.$("maintenance-resume").disabled, false);
-  assert.equal(context.$("maintenance-state").textContent, "可以修改记忆");
+  assert.equal(context.$("maintenance-detail").textContent, "可以修改记忆");
   finish({ maintenance: { ready: false, phase: "draining", remote_active: 2 } });
   await poll;
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /2 个任务/);
+  assert.match(context.$("maintenance-detail").textContent, /2 个任务/);
   context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
   await context.readMaintenanceStatus();
   context.bridge.apiGet = async () => { throw new Error("connection refused"); };
   await context.readMaintenanceStatus();
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /connection refused/);
+  assert.match(context.$("maintenance-detail").textContent, /connection refused/);
   context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
   await context.readMaintenanceStatus();
   context.bridge.apiGet = async () => ({ maintenance: {
@@ -408,13 +412,13 @@ test("same-scope polling retains confirmed ready until an actual failure, tasks 
   } });
   await context.readMaintenanceStatus();
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /暂停范围已变化/);
+  assert.match(context.$("maintenance-detail").textContent, /暂停范围已变化/);
   context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
   await context.readMaintenanceStatus();
   context.maintenanceCheckedAt -= 30001;
   context.renderScope();
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /过期/);
+  assert.match(context.$("maintenance-detail").textContent, /过期/);
   context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
   await context.readMaintenanceStatus();
   context.bridge.apiGet = async () => ({});
@@ -470,7 +474,7 @@ test("ready expires without polling under setup locks and old timers cannot expi
   context.locks.add("setup");
   first.callback();
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("maintenance-state").textContent, /过期/);
+  assert.match(context.$("maintenance-detail").textContent, /过期/);
   await context.readMaintenanceStatus();
   const second = context.expiryTimers.at(-1);
   first.callback();
@@ -500,13 +504,11 @@ test("discard visibility uses backend capability and ordinary pause never discar
   assert.equal(context.$("discard-records").hidden, true);
   const calls = [];
   context.maintenanceAction = (button, action, extra) => { calls.push(extra.discard_pending); };
-  for (const id of ["maintenance-begin", "maintenance-discard"]) {
-    vm.runInContext(source.split("\n").find((line) => line.startsWith(`$("${id}").addEventListener`)), context);
-  }
+  vm.runInContext(source.split("\n").find((line) => line.startsWith('$("maintenance-discard").addEventListener')), context);
   context.$("discard-pending").checked = true;
-  context.$("maintenance-begin").listeners.click();
   context.$("maintenance-discard").listeners.click();
-  assert.deepEqual(calls, [false, true]);
+  assert.deepEqual(calls, [true]);
+  assert.equal(source.includes('$("maintenance-begin").addEventListener'), false);
 });
 
 test("a late bootstrap response cannot hydrate the page after timeout", async () => {
@@ -545,8 +547,7 @@ test("connected service does not hide the user's recall failure", () => {
   context.renderScope();
   assert.equal(context.$("status-label").textContent, "服务已连接");
   const text = context.$("scope-recall-status").textContent;
-  assert.match(text, /最近记忆检索：超时/);
-  assert.match(text, /连续失败 3 次/);
+  assert.match(text, /超时/);
   assert.match(text, /增加召回等待时间/);
 });
 
@@ -568,8 +569,8 @@ function backgroundHarness() {
   context.renderScope = context.renderBackground;
   context.refreshBootstrap = async () => {};
   context.data = {
-    config: {}, config_revision: "config-1", status: {}, scopes: [{
-      scope_id: "one", bank: "bank-1", summary: {}, background: {
+    config: {allowed_accounts: [{platform_instance_id: "qq", user_id: "123"}]}, config_revision: "config-1", status: {}, scopes: [{
+      scope_id: "one", platform_instance_id: "qq", user_id: "123", bank: "bank-1", summary: {}, background: {
         revision: 1, scope_revision: 2, page_id: "kp-1", enabled: true,
       },
     }],
@@ -579,29 +580,27 @@ function backgroundHarness() {
   return context;
 }
 
-test("background polling preserves an unsaved choice but clears an old bank draft", () => {
+test("background polling retains saved selection and clears references after Bank rotation", () => {
   const context = backgroundHarness();
   context.backgroundDraft.page_id = "unsaved-page";
   context.backgroundDraft.enabled = false;
   context.renderBackground();
-  assert.equal(context.$("background-page").value, "unsaved-page");
-  assert.equal(context.$("background-enabled").checked, false);
+  assert.equal(context.$("background-page").value, "kp-1");
   context.data.scopes[0].bank = "new-bank";
   context.data.scopes[0].background = { revision: 2, scope_revision: 3, enabled: false, page_id: "" };
   context.renderBackground();
   assert.equal(context.$("background-page").value, "");
-  assert.equal(context.$("background-enabled").checked, false);
 });
 
 test("historical and maintenance scopes never offer page reads; maintenance permits closing", () => {
   const context = backgroundHarness();
   context.data.scopes[0].summary.maintenance = {};
   context.renderBackground();
-  for (const id of ["background-page", "background-load", "background-save"]) assert.equal(context.$(id).disabled, true);
-  assert.equal(context.$("background-close").disabled, false);
+  assert.equal(context.$("background-page").disabled, false);
+  assert.equal(context.$("background-page").options[1].disabled, true);
   context.data.scopes[0].historical = true;
   context.renderBackground();
-  assert.equal(context.$("background-close").disabled, true);
+  assert.equal(context.$("background-page").disabled, true);
 });
 
 test("late background index cannot overwrite another user's draft", async () => {
@@ -624,7 +623,7 @@ test("background index timeout releases controls and never interprets names as H
   context.bridge = { apiGet: () => new Promise(() => {}) };
   await context.loadBackground();
   assert.match(context.$("background-feedback").textContent, /超时/);
-  assert.equal(context.$("background-load").disabled, false);
+  assert.equal(context.backgroundDraft.loading, false);
   context.bridge.apiGet = async () => ({
     pages: [{ page_id: "kp-1", path: "<img src=x onerror=alert(1)>" }],
     selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1",
@@ -638,12 +637,13 @@ test("background save carries original revisions and closing does not delete a p
   const context = backgroundHarness();
   const calls = [];
   context.bridge = { apiPost: async (endpoint, payload) => { calls.push({ endpoint, payload }); return { message: "saved" }; } };
-  context.backgroundDraft.page_id = "kp-2";
+  context.$("background-page").value = "kp-2";
   context.data.config_revision = "new-config";
   await context.saveBackground();
   assert.equal(calls[0].payload.config_revision, "config-1");
   assert.equal(calls[0].payload.page_id, "kp-2");
-  await context.saveBackground(true);
+  context.$("background-page").value = "";
+  await context.saveBackground();
   assert.equal(calls[1].payload.enabled, false);
   assert.equal(calls[1].payload.page_id, "kp-1");
   assert.equal(calls[1].endpoint, "scopes/one/background");
@@ -680,11 +680,11 @@ test("settings refresh invalidates old drafts and allows closing during maintena
   assert.notEqual(context.backgroundDraft, oldDraft);
   assert.equal(context.backgroundDraft.page_id, "kp-1");
   assert.equal(context.backgroundDraft.config_revision, "config-2");
-  assert.equal(context.$("background-load").disabled, true);
-  assert.equal(context.$("background-close").disabled, false);
+  assert.equal(context.$("background-page").disabled, false);
   await context.refreshBootstrap({ pollMaintenance: false });
   assert.equal(context.backgroundDraft.config_revision, "config-2");
-  await context.saveBackground(true);
+  context.$("background-page").value = "";
+  await context.saveBackground();
   assert.equal(context.data.scopes[0].background.enabled, false);
   assert.ok(calls.length >= 3);
 });
@@ -703,4 +703,135 @@ test("configuration change drops a pending old page list and unsaved choice rath
   assert.equal(context.backgroundDraft.page_id, "kp-1");
   assert.equal(context.backgroundDraft.pages.length, 0);
   assert.equal(context.$("background-page").value, "kp-1");
+});
+
+test("removed accounts stay out of user choices even while their Banks are retained", () => {
+  const context = harness();
+  context.data = maintenanceBootstrap();
+  context.data.config.allowed_accounts = [{ platform_instance_id: "qq", user_id: "456" }];
+  context.data.scopes.push({ scope_id: "other", platform_instance_id: "qq", user_id: "456", mode: "active", summary: {} });
+  context.selectedAccount = JSON.stringify(["qq", "123"]);
+  context.scopeId = "one";
+  context.updateUserChoices();
+  assert.equal(context.$("scope-picker").options.length, 1);
+  assert.match(context.$("scope-picker").options[0].textContent, /456/);
+  assert.equal(context.scopeId, "other");
+  assert.equal(context.data.scopes[0].bank, "bank");
+});
+
+test("disconnected saved Banks remain accessible without being labeled as old robots", () => {
+  const context = harness();
+  context.data = maintenanceBootstrap();
+  context.data.scopes[0] = { ...context.data.scopes[0], historical: true, availability: "disconnected", bot_id: "bot" };
+  context.data.scopes.push({ scope_id: "pending", platform_instance_id: "qq", user_id: "123",
+    pending: true, pending_reason: "platform" });
+  context.selectedAccount = JSON.stringify(["qq", "123"]);
+  context.updateUserChoices();
+  assert.equal(context.$("bank-picker").options.length, 2);
+  assert.equal(context.$("bank-picker").options[0].textContent, "等待连接");
+  assert.equal(context.$("bank-picker").options[1].value, "one");
+  assert.equal(context.$("bank-picker").options[1].textContent, "机器人 bot（未连接）");
+});
+
+test("failed mode changes keep the server's mode selected", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  vm.runInContext(declaration("setMode"), context);
+  context.data = maintenanceBootstrap();
+  context.data.scopes[0].mode = "readonly";
+  context.data.scopes[0].summary.maintenance = null;
+  context.scopeId = "one";
+  context.bridge = { apiPost: async () => { throw new Error("save failed"); } };
+  await context.setMode(context.$("mode-active"), "active");
+  assert.equal(context.$("mode-active").attributes["aria-pressed"], "false");
+  assert.equal(context.$("mode-readonly").attributes["aria-pressed"], "true");
+  assert.match(context.$("feedback-message").textContent, /save failed/);
+});
+
+test("ignored update notices never hide an unfinished upgrade", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderServiceVersion"), context);
+  context.data = { config: { configured: true, managed: true, connection_revision: "first" }, backend: {
+    version: "1.1.0", target: "1.2.0", managed: true, upgrade_available: true, ignored: true,
+  } };
+  context.renderServiceVersion();
+  assert.equal(context.$("upgrade-notice").hidden, true);
+  assert.equal(context.$("go-upgrade").hidden, false);
+  context.data.backend.upgrade_paused = true;
+  context.renderServiceVersion();
+  assert.equal(context.$("upgrade-notice").hidden, false);
+  assert.equal(context.$("ignore-upgrade").hidden, true);
+  context.data.backend.upgrade_paused = false;
+  context.data.config.connection_revision = "second";
+  context.data.backend.ignored = false;
+  context.renderServiceVersion();
+  assert.equal(context.$("upgrade-notice").hidden, false);
+});
+
+test("confirmed additions survive failed bootstrap reads and subsequent additions", async () => {
+  const context = harness();
+  for (const name of ["saveAccounts", "submitAccount", "perform"]) vm.runInContext(declaration(name), context);
+  context.data = maintenanceBootstrap();
+  context.settingsRevision = "revision-1";
+  let server = context.data.config.allowed_accounts;
+  let revision = 1;
+  context.bridge = { apiPost: async (endpoint, payload) => {
+    assert.equal(endpoint, "settings/save");
+    assert.equal(payload.config_revision, `revision-${revision}`);
+    server = payload.allowed_accounts.map((account) => ({ ...account }));
+    return { saved: true, config_revision: `revision-${++revision}` };
+  } };
+  context.refreshBootstrap = async () => { throw new Error("bootstrap unavailable"); };
+  context.requestAuthorization = async () => {};
+  context.$("account-platform").value = "qq";
+  for (const user of ["456", "789"]) {
+    context.$("account-user").value = user;
+    await context.submitAccount();
+  }
+  assert.deepEqual(Array.from(server, (account) => account.user_id), ["123", "456", "789"]);
+  assert.equal(context.data.config_revision, "revision-3");
+});
+
+test("confirmed removals survive failed bootstrap reads without reviving users", async () => {
+  const context = harness();
+  for (const name of ["saveAccounts", "requestAccountRemoval", "confirmAccountRemoval", "perform"]) vm.runInContext(declaration(name), context);
+  context.data = maintenanceBootstrap();
+  context.data.config.allowed_accounts.push({ platform_instance_id: "qq", user_id: "456" });
+  context.data.scopes.push({ scope_id: "two", platform_instance_id: "qq", user_id: "456", summary: {} });
+  context.selectedAccount = JSON.stringify(["qq", "123"]);
+  context.settingsRevision = "revision-1";
+  let server;
+  let revision = 1;
+  context.bridge = { apiPost: async (endpoint, payload) => {
+    assert.equal(payload.config_revision, `revision-${revision}`);
+    server = payload.allowed_accounts.map((account) => ({ ...account }));
+    return { saved: true, config_revision: `revision-${++revision}` };
+  } };
+  context.refreshBootstrap = async () => { throw new Error("bootstrap unavailable"); };
+  for (let index = 0; index < 2; index++) {
+    context.requestAccountRemoval();
+    await context.confirmAccountRemoval();
+  }
+  assert.equal(server.length, 0);
+  assert.equal(context.data.config.allowed_accounts.length, 0);
+  assert.equal(context.$("no-scopes").hidden, false);
+});
+
+test("removed Banks with only a missing flag retain recovery and clearing controls", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  const snapshot = maintenanceBootstrap();
+  snapshot.config.allowed_accounts = [];
+  snapshot.scopes[0].summary = { bank_missing: true, maintenance: null, counts: {} };
+  context.bridge = { apiGet: async () => snapshot };
+  await context.refreshBootstrap({ automatic: true });
+  assert.equal(context.scopeId, "");
+  assert.equal(context.$("paused-banks-notice").hidden, false);
+  context.maintenanceScopeId = "one";
+  context.renderMaintenance();
+  assert.equal(context.$("maintenance-bank-check").hidden, false);
+  assert.equal(context.$("maintenance-bank-check").disabled, false);
+  assert.equal(context.$("maintenance-forget").hidden, false);
+  assert.match(context.$("maintenance-detail").textContent, /找不到/);
+  assert.equal(context.$("maintenance-resume").disabled, true);
 });
