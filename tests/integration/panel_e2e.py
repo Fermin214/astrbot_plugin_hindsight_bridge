@@ -58,7 +58,13 @@ async def verify_panel(acceptance, page, context, frame, scope):
     assert (await acceptance.config())["allowed_accounts"] == configuration["allowed_accounts"]
     assert await frame.locator("#setup-intro").is_hidden()
     await frame.locator("#backup-guide").click()
-    assert await frame.locator("#backup-dialog a").get_attribute("href")
+    assert await frame.locator("#backup-dialog").is_visible()
+    backup_command = await frame.locator("#backup-command").input_value()
+    assert "scripts/backup.py" in backup_command and "--latest-control" in backup_command
+    assert (await frame.locator("#backup-doc-url").input_value()).endswith("/docs/DATA-MAINTENANCE.md")
+    await context.grant_permissions(["clipboard-read", "clipboard-write"], origin=acceptance.dashboard)
+    await frame.locator('[data-copy="backup-command"]').click()
+    assert await page.evaluate("navigator.clipboard.readText()") == backup_command
     await frame.locator('[data-close="backup-dialog"]').first.click()
     acceptance.passed("connection_save_preserves_users_and_service_buttons_open_real_workflows")
 
@@ -337,16 +343,15 @@ async def verify_panel(acceptance, page, context, frame, scope):
                                              ("1.2.0", True, False), (None, True, False), ("1.2.0", True, True)]:
             version_override.update(version=version, managed=managed, finishing=finishing)
             await reload_panel()
-            available = version == "1.1.0" or finishing
+            available = managed and (version == "1.1.0" or finishing)
             assert await frame.locator("#upgrade-notice").is_visible() == available
             assert await frame.locator("#ignore-upgrade").is_visible() == (available and not finishing)
             await frame.locator("#tab-setup").click()
             assert await frame.locator("#go-upgrade").is_visible() == (managed and available)
             if available:
                 await frame.locator("#view-upgrade").click()
-                dialog = "upgrade-dialog" if managed else "external-upgrade"
-                assert await frame.locator("#" + dialog).is_visible()
-                await frame.locator('[data-close="' + dialog + '"]').click()
+                assert await frame.locator("#upgrade-dialog").is_visible()
+                await frame.locator('[data-close="upgrade-dialog"]').click()
         version_override.update(version="1.1.0", managed=True, finishing=False)
         await reload_panel()
         await frame.locator("#ignore-upgrade").click()

@@ -74,7 +74,7 @@ function harness() {
   return context;
 }
 
-test("version notices distinguish managed upgrades external services and unknown versions", () => {
+test("version notices show upgrades only for the connected managed service", () => {
   const context = harness();
   vm.runInContext(declaration("renderServiceVersion"), context);
   context.data = { config: { configured: true, managed: true }, backend: {
@@ -89,7 +89,12 @@ test("version notices distinguish managed upgrades external services and unknown
   context.renderServiceVersion();
   assert.equal(context.$("service-upgrade").hidden, true);
   assert.equal(context.$("go-upgrade").hidden, true);
-  assert.equal(context.$("upgrade-notice").hidden, false);
+  assert.equal(context.$("upgrade-notice").hidden, true);
+  context.data.backend.pending = true;
+  context.data.backend.upgrade_paused = true;
+  context.renderServiceVersion();
+  assert.equal(context.$("upgrade-notice").hidden, true);
+  assert.equal(context.$("save-settings").disabled, false);
   context.data.backend = { version: null, upgrade_available: false };
   context.renderServiceVersion();
   assert.equal(context.$("go-upgrade").hidden, true);
@@ -104,6 +109,31 @@ test("version notices distinguish managed upgrades external services and unknown
   assert.equal(context.$("upgrade-resume").disabled, false);
   assert.equal(context.$("upgrade-abandon").hidden, true);
   assert.equal(context.$("upgrade-cancel").disabled, true);
+});
+
+test("opening an upgrade cannot expose service management for an existing connection", () => {
+  const context = harness();
+  vm.runInContext(declaration("openUpgrade"), context);
+  context.data = { config: { managed: false }, backend: { managed: true, upgrade_available: true } };
+  context.openUpgrade();
+  assert.notEqual(context.$("upgrade-dialog").open, true);
+  context.data.config.managed = true;
+  context.openUpgrade();
+  assert.equal(context.$("upgrade-dialog").open, true);
+});
+
+test("a model task outside the connected service releases polling and setup controls", async () => {
+  const context = harness();
+  vm.runInContext(declaration("watchModels"), context);
+  context.data = { config: { managed: false } };
+  context.modelRequestId = "previous";
+  context.bridge = { apiGet: async () => ({ status: "idle" }) };
+  await context.watchModels("previous");
+  assert.equal(context.modelWatch, null);
+  assert.equal(context.modelRequestId, "");
+  assert.equal(context.locks.has("setup"), false);
+  assert.equal(context.$("setup-fields").disabled, false);
+  assert.match(context.$("model-progress").textContent, /请求未确认/);
 });
 
 test("upgrade controls require backup confirmation and preserve failure state", async () => {

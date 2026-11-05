@@ -176,7 +176,7 @@ function updateConnectionMode() {
   $("check-connection").hidden = managed && !data?.config.configured;
   $("deployment-capabilities").textContent = managed
     ? "配套服务在插件中配置模型，并生成升级、重新部署和卸载命令。测试服务连接检查记忆 API 和认证。"
-    : "已有服务通过 API 使用记忆功能，模型配置、升级和卸载由原部署工具管理。测试服务连接检查记忆 API 和认证。";
+    : "已有服务通过 API 使用插件记忆功能。测试服务连接检查记忆 API 和认证。";
 }
 
 function renderServiceVersion() {
@@ -184,14 +184,14 @@ function renderServiceVersion() {
   $("service-version").hidden = !data?.config.configured;
   $("service-version-text").textContent = backend.version ? `Hindsight ${backend.version}` : "版本尚未确认";
   const managed = data?.config.managed && backend.managed;
-  const upgrading = !!backend.pending || !!backend.upgrade_paused;
-  const available = backend.upgrade_available === true;
-  $("upgrade-notice").hidden = !upgrading && (!available || backend.ignored === true);
+  const upgrading = managed && (!!backend.pending || !!backend.upgrade_paused);
+  const available = managed && backend.upgrade_available === true;
+  $("upgrade-notice").hidden = !managed || (!upgrading && (!available || backend.ignored === true));
   $("upgrade-notice-title").textContent = upgrading
     ? backend.resume_available ? "Hindsight 已升级，读写仍暂停" : "Hindsight 升级待完成"
     : `Hindsight 可升级：${backend.version} → ${backend.target}`;
   $("ignore-upgrade").hidden = upgrading;
-  $("view-upgrade").textContent = upgrading ? "查看升级进度" : managed ? "查看升级" : "查看升级指引";
+  $("view-upgrade").textContent = upgrading ? "查看升级进度" : "查看升级";
   $("go-upgrade").hidden = !managed || (!available && !upgrading);
   $("go-upgrade").textContent = upgrading ? "查看升级进度" : "升级服务";
   $("service-upgrade").hidden = !managed || (!available && !upgrading);
@@ -987,9 +987,9 @@ function clearCommands() {
 }
 
 function openUpgrade() {
+  if (!data?.config.managed || !data?.backend?.managed) return;
   activateTab("setup");
-  const id = data?.config.managed && data?.backend?.managed ? "upgrade-dialog" : "external-upgrade";
-  if (!$(id).open) $(id).showModal();
+  if (!$("upgrade-dialog").open) $("upgrade-dialog").showModal();
 }
 
 async function prepareForget(button, id) {
@@ -1088,6 +1088,7 @@ $("generate-uninstall").addEventListener("click", () => void perform($("generate
 $("delete-memory-data").addEventListener("change", clearUninstall);
 $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", () => copyCommand("uninstall-command", "uninstallation", "卸载命令已复制，请在服务器执行。")));
 $("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
+  if (!data?.has_installation) throw new Error("请先生成并执行配套服务安装命令。");
   modelRequestId ||= globalThis.crypto?.randomUUID?.() || `model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const selection = { config_revision: settingsRevision, background: true, request_id: modelRequestId };
   for (const kind of ["chat", "embedding", "rerank"]) {

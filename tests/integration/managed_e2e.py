@@ -79,6 +79,15 @@ class Managed(Acceptance):
                 await frame.locator("#tab-setup").wait_for(state="visible", timeout=60000)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 await frame.locator("#tab-setup").click()
+                if not self.settings.get("upgrade_from_1_1"):
+                    await frame.locator("#chat-provider").select_option("delivery-chat")
+                    await frame.locator("#embedding-provider").select_option("delivery-embedding")
+                    await frame.locator("#save-models").click()
+                    await frame.locator("#feedback.error").filter(has_text="请先生成并执行").wait_for()
+                    assert await frame.locator("#prepare").is_enabled()
+                    assert await frame.locator("#save-models").is_enabled()
+                    assert (await self.http("GET", self.prefix + "/bootstrap"))["model_job"] is None
+                    self.passed("saving_models_before_installation_shows_install_step_and_keeps_setup_available")
                 await frame.locator("#prepare").click()
                 await until(lambda: frame.locator("#install-command").input_value(), timeout=20)
                 private_command("managed_install", await frame.locator("#install-command").input_value())

@@ -428,6 +428,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_installation_needs_no_models_and_stale_revision_is_rejected(self):
+        self.config["api_url"] = ""
         catalog = self.panel.providers()
         self.panel.providers = lambda: catalog
         revision = self.panel.config_revision()
@@ -455,6 +456,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.panel.bootstrap())["config"]["configured"])
 
     async def test_model_settings_are_applied_after_installation(self):
+        self.config["api_url"] = ""
         self.panel.saved_state = {"id": "012345abcdef", "api_url": "http://managed-service:8888"}
         self.panel.managed_request = AsyncMock(return_value={"installed": True, "configured": True, "ready": True})
         catalog = self.panel.providers()
@@ -470,26 +472,95 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.profile.save_config.assert_not_called()
 
     async def test_uninstall_requires_explicit_data_deletion_and_owned_installation(self):
+        state = self.panel.state(create=True)
+        state["api_url"] = self.config["api_url"]
+        state["api_key"] = self.config["api_key"]
+        self.panel.store_state(state)
         self.panel.body = AsyncMock(return_value={"delete_memory_data": False})
         with self.assertRaisesRegex(module.PanelError, "确认删除"):
             await self.panel.prepare_uninstall()
+        self.panel.saved_state = {}
         self.panel.body = AsyncMock(return_value={"delete_memory_data": True})
-        with self.assertRaisesRegex(ValueError, "找不到"):
+        with self.assertRaisesRegex(module.PanelError, "配套服务"):
             await self.panel.prepare_uninstall()
-        self.panel.state(create=True)
+        self.panel.store_state(state)
         result = await self.panel.prepare_uninstall()
         self.assertTrue(result["command"])
 
-    async def test_reinstall_does_not_need_the_uninstalled_service(self):
+    async def test_existing_connection_cannot_manage_a_retained_installation_or_reuse_its_model_job(self):
+        state = self.panel.state(create=True)
+        state.update(api_url="http://managed-service:8888", management_url="http://managed-service:8766")
+        self.panel.store_state(state)
+        before = copy.deepcopy(state)
+        config = copy.deepcopy(self.config)
+        self.panel.managed_request = AsyncMock()
+        self.panel.model_selection = {
+            "chat_provider_id": "chat", "embedding_provider_id": "embed", "rerank_provider_id": "",
+        }
+        self.panel.model_job = {"request_id": "previous", "status": "succeeded"}
+        for handler, payload in (
+            (self.panel.prepare, {"repair": True}),
+            (self.panel.save_models, {}),
+            (self.panel.save_models, {
+                **self.panel.model_selection, "background": True, "request_id": "previous",
+            }),
+            (self.panel.prepare_uninstall, {"delete_memory_data": True}),
+        ):
+            with self.subTest(handler=handler.__name__, payload=payload):
+                self.panel.body = AsyncMock(return_value={
+                    "config_revision": self.panel.config_revision(), **payload,
+                })
+                with self.assertRaisesRegex(module.PanelError, "配套服务"):
+                    await handler()
+                self.assertEqual(self.panel.state(), before)
+                self.assertEqual(self.config, config)
+        snapshot = await self.panel.bootstrap()
+        self.assertFalse(snapshot["config"]["managed"])
+        self.assertFalse(snapshot["has_installation"])
+        self.assertEqual(snapshot["installation_api_url"], "")
+        self.assertEqual(snapshot["control_plane_key_command"], "")
+        self.assertIsNone(snapshot["managed_service"])
+        self.assertIsNone(snapshot["model_job"])
+        self.assertEqual(await self.panel.model_status(), {"status": "idle"})
+        self.assertIsNone(self.panel.model_task)
+        self.panel.managed_request.assert_not_awaited()
+        self.plugin._close_resources.assert_not_awaited()
+
+    async def test_existing_credentials_at_a_recorded_address_do_not_grant_managed_access(self):
         state = self.panel.state(create=True)
         state.update(api_url=self.config["api_url"], management_url="http://old-service:8766")
+        self.panel.store_state(state)
+        self.panel.managed_request = AsyncMock()
+        self.panel.body = AsyncMock(return_value={"delete_memory_data": True, "repair": True})
+        for handler in (self.panel.save_models, self.panel.prepare, self.panel.prepare_uninstall):
+            with self.subTest(handler=handler.__name__), self.assertRaisesRegex(module.PanelError, "配套服务"):
+                await handler()
+        snapshot = await self.panel.bootstrap()
+        self.assertFalse(snapshot["config"]["managed"])
+        self.assertIsNone(snapshot["managed_service"])
+        self.assertEqual(snapshot["control_plane_key_command"], "")
+        self.panel.managed_request.assert_not_awaited()
+        self.assertEqual(self.panel.state(), state)
+        self.panel.body = AsyncMock(return_value={
+            "api_url": self.config["api_url"], "api_key": self.config["api_key"],
+        })
+        self.assertTrue((await self.panel.check())["ready"])
+        await self.save()
+        self.assertEqual(self.config["service_id"], "old-service-id")
+        self.assertEqual(self.panel.state()["api_key"], state["api_key"])
+        self.panel.managed_request.assert_not_awaited()
+
+    async def test_reinstall_does_not_need_the_uninstalled_service(self):
+        state = self.panel.state(create=True)
+        state.update(api_url=self.config["api_url"], api_key=self.config["api_key"],
+                     management_url="http://old-service:8766")
         self.panel.store_state(state)
         self.panel.managed_request = AsyncMock(side_effect=module.PanelError("offline"))
         snapshot = await self.panel.bootstrap()
         self.assertTrue(snapshot["config"]["configured"])
         self.assertFalse(snapshot["managed_service"]["installed"])
         self.panel.managed_request.reset_mock()
-        self.panel.body = AsyncMock(return_value={"config_revision": snapshot["config_revision"]})
+        self.panel.body = AsyncMock(return_value={"config_revision": snapshot["config_revision"], "repair": True})
         with patch.object(module, "installation", return_value={
             "api_url": state["api_url"], "management_url": state["management_url"],
             "command": "reinstall-command", "message": "",
@@ -502,6 +573,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_managed_tracks_active_url_rather_than_candidate_existence(self):
         state = self.panel.state(create=True)
         state["api_url"] = "http://managed-service:8888"
+        state["api_key"] = self.config["api_key"]
         self.panel.store_state(state)
         self.assertFalse((await self.panel.bootstrap())["config"]["managed"])
         for url in ("", state["api_url"], state["api_url"] + "/"):
@@ -548,8 +620,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bootstrap_hides_invalid_address_and_service_secrets(self):
         self.panel.saved_state = {
-            "id": "012345abcdef",
-            "api_key": "setup-secret", "management_key": "manager-secret",
+            "id": "012345abcdef", "api_url": self.config["api_url"],
+            "api_key": self.config["api_key"], "management_key": "manager-secret",
             "control_plane_key": "cp-secret", "database_password": "db-secret",
         }
         self.config["control_plane_url"] = "https://memory.example.com/?key=cp-secret"
@@ -561,6 +633,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, serialized)
 
     async def test_installer_control_plane_hint_is_optional_and_safe(self):
+        self.config["api_url"] = ""
         for hint in (None, "http://127.0.0.1:9999"):
             self.panel.body = AsyncMock(return_value={})
             result = {

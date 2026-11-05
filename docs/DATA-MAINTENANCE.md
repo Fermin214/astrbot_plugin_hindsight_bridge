@@ -1,16 +1,16 @@
 # 备份、升级与恢复
 
-本文供管理 AstrBot 和 Hindsight 服务的人使用。只想查看或导出个人记忆，请看 [使用指南](USAGE.md)。
+本文说明插件自身数据的备份与恢复，以及插件配套服务的运维。连接已有 Hindsight 时，服务配置、数据库和生命周期由服务管理员负责，插件不提供操作步骤。只想查看或导出个人记忆，请看 [使用指南](USAGE.md)。
 
 ## 需要保存什么
 
-完整备份包含三部分：
+插件备份包含业务数据、控制数据和插件配置；配套部署还需保存 Hindsight 数据与配置：
 
 | 数据 | 默认位置 | 用途 |
 | --- | --- | --- |
 | 插件业务数据 | AstrBot 的 `data/plugin_data/astrbot_plugin_hindsight_bridge/` | 尚未完成的记录、去重信息、短期语境和配套服务的 `setup.json` |
 | 插件控制数据 | AstrBot 的 `data/plugin_data/astrbot_plugin_hindsight_bridge_control/` | 部署身份、账号与 Bank 归属、代次、模式、保存和查询暂停状态、清空记录和操作凭据 |
-| Hindsight 数据与配置 | PostgreSQL 数据库及后端的 `.env` | 已整理的记忆、来源材料、任务历史及服务配置 |
+| 配套 Hindsight 数据与配置 | 配套 PostgreSQL、安装目录和模型设置卷 | 已整理的记忆、来源材料、任务历史及服务配置 |
 
 官方页面中的 Bank 是每个用户的记忆库，插件页用“记忆库 ID”标明归属。首次保存聊天时自动建库，无需在官方页面另建。
 
@@ -43,20 +43,21 @@ Docker Compose 部署可以在 AstrBot 的 Compose 目录中，给上述命令�
 
 备份结果包含 `runtime.sqlite3`、`manifest.json` 和单独的控制库副本。将备份复制到服务主机之外保存，同时备份插件配置；恢复业务快照时使用最新控制库，控制副本也要持续更新。
 
-## 备份 Hindsight 数据库
+## 备份配套 Hindsight 数据库
 
-使用仓库部署模板时，在后端 `deploy` 目录执行：
+停用插件，停止配套 Hindsight 的写入并等待任务结束。在配套服务安装目录执行：
 
 ```bash
-docker compose exec -T db pg_dump -U hindsight -d hindsight -Fc -f /tmp/hindsight-backup.dump
-docker compose cp db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
+docker compose stop memory-api
+docker compose exec -T memory-db pg_dump -U hindsight -d hindsight -Fc -f /tmp/hindsight-backup.dump
+docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 ```
 
-这会把数据库备份复制到主机的 `deploy/hindsight-backup.dump`，同时保存同目录的 `.env`。每次备份后将文件移入按日期区分的备份目录。
+这会将数据库备份复制到安装目录的 `hindsight-backup.dump`。另存安装目录、`.env`、覆盖文件和 `memory_settings` 卷中的 `models.json`，每次使用独立的备份目录。
 
-使用其他方式安装 Hindsight 时，使用对应 PostgreSQL 部署的备份工具。只备份插件业务库或导出个人 JSON，无法替代完整数据库备份。
+只备份插件业务库或导出个人 JSON，无法替代配套服务的完整数据库备份。
 
-插件业务库、控制库与 PostgreSQL 应在暂停写入期间备份，或使用一致性快照，确保记录能相互对应。恢复备份时先在独立环境确认数据可用。
+插件业务库、控制库与配套 PostgreSQL 应在暂停写入期间备份，或使用一致性快照。先在独立环境确认备份可恢复；日常备份完成后启动 `memory-api`，启用插件并确认恢复检查通过。升级前备份完成后保持停写，按升级流程继续。
 
 ## 在官方面板修改记忆
 
@@ -66,7 +67,7 @@ Hindsight 官方管理页面（Control Plane）提供浏览、搜索、更正、
 
 升级或故障造成的读写暂停在 **查看暂停状态** 中处理。页面自动核对在途请求、已接收任务与 Bank；结果不明时保持暂停。选择放弃未发送或已确认失败记录时，勾选确认后点击 **放弃记录**，已发送但结果不明的记录不能放弃。检查通过后点击 **解除读写暂停**。
 
-个人记忆模式不取消 Hindsight 已接收的任务，原生整合与知识页刷新按服务自身设置运行。批量迁移或一致性备份需停止所有写入并等待任务结束，不能仅靠个人 `/hindsight pause`。
+个人记忆模式不取消 Hindsight 已接收的任务，原生整合与知识页刷新按服务自身设置运行。个人 `/hindsight pause` 只暂停该用户的插件记忆读写。
 
 在官方页面删除整个 Bank 后，插件报告 `bank_missing` 并暂停该用户的记忆保存和查询，不会自动重建。可选择：
 
@@ -79,11 +80,11 @@ Hindsight 官方管理页面（Control Plane）提供浏览、搜索、更正、
 
 升级时，空的历史 `corrections` 表会自动移除；存在记录时显示 `legacy_corrections_require_handover`，需先完成旧更正的交接。
 
-管理员先停用插件，备份业务库、最新控制库与 Hindsight 数据，核对更正内容、归属和相关保存任务，将需要保留的更正迁入官方服务，再重载插件。原表应保留到交接完成，避免丢失更正内容。
+管理员先停用插件，保存业务库和最新控制库，核对更正内容、归属和相关保存任务，将需要保留的更正迁入对应 Bank，再重载插件。原表应保留到交接完成，避免丢失更正内容。
 
 ## 升级插件
 
-1. 创建插件业务快照，单独保存最新控制库，并备份 Hindsight 数据库和配置。
+1. 创建插件业务快照，单独保存最新控制库及插件配置。
 2. 在 AstrBot 的插件管理中更新 Hindsight Bridge，重载插件。
 3. 沿用原有连接、账号配置和数据目录，查看运行状态并按页面提示确认账号。
 
@@ -95,9 +96,9 @@ Hindsight 官方管理页面（Control Plane）提供浏览、搜索、更正、
 
 ## 升级 Hindsight 服务
 
-更新插件后，已有 Hindsight 容器仍使用原版本。配套部署通过插件生成升级命令；独立部署使用原部署工具。
+本节仅适用于插件配套部署。更新插件本身不改变 Hindsight 服务；配套服务升级通过插件另行生成命令。
 
-插件页显示实际 Hindsight 版本，1.1.0 仍受支持。有适用更新时，配套部署的顶部横幅提供 **查看升级**，独立部署显示 **查看升级指引**，在页内展示步骤和可复制内容。忽略只针对该连接与目标版本，升级未结束时不能忽略。
+插件页显示实际 Hindsight 版本，1.1.0 仍受支持。有适用更新时，配套部署的顶部横幅提供 **查看升级**。忽略只针对该连接与目标版本，升级未结束时不能忽略。
 
 ### 配套部署升级
 
@@ -119,48 +120,29 @@ Hindsight 官方管理页面（Control Plane）提供浏览、搜索、更正、
 
 升级暂停开始后，面板和 QQ 的清空入口暂时停用，包括此前取得的 QQ 清空确认码；解除升级暂停或选择暂不升级后恢复。生成命令、保存核对结果及批量解除暂停前，还会检查整个连接的在途请求和遗忘清理，旧记忆库的晚到请求也必须处理完成。已经建立却丢失的记忆库须先恢复；只有从未创建、没有已派发请求且远程列表也不存在的空白记忆库可以继续升级。
 
-### 独立部署升级
-
-独立部署的模型配置和服务生命周期由原部署工具管理。插件的连接测试检查记忆 API 和认证；官方 Control Plane、插件配套管理接口及安装目录分别核对，不能用 API 连接成功代替部署检查。
-
-1. 记录原部署目录、服务名、实际镜像版本、数据库及数据卷、模型配置和向量维数。停用插件，停止其他客户端、官方面板及定时任务的写入，处理结果不明的任务，等待已接收任务、原生整合与知识页刷新结束。
-2. 按原部署方式停止 Hindsight 服务，保留数据库运行。备份完整 PostgreSQL、服务配置、模型设置、插件配置、业务数据、`setup.json` 和最新控制数据，在独立环境确认能恢复。Bank 的逻辑导出和配置仓库归档另作迁移材料；数据库、密钥文件与插件状态需分别备份。
-3. 在原部署配置中把 Hindsight 镜像固定为目标版本，沿用原镜像类型。Slim 部署使用 `ghcr.io/vectorize-io/hindsight:1.2.0-slim`。使用本仓库模板时修改 `.env` 的 `HINDSIGHT_IMAGE`；其他 Compose 以实际引用的变量或 `image` 字段为准。官方管理页若单独部署，同步升级至与 API 匹配的版本。
-4. 保留数据库、扩展、网络、模型参数、向量维数与数据卷。容器退出宽限需覆盖 Hindsight 的退出等待；本仓库模板使用 90 秒。在原 Compose 目录执行以下示例，`hindsight` 替换为实际 API 服务名；非 Compose 部署使用原启动工具。
-
-   ```bash
-   docker compose pull hindsight
-   docker compose up -d --no-deps hindsight
-   ```
-
-5. 检查 `/v1/version`、API 认证和与服务版本匹配的官方管理页，核对原 Bank、来源材料、知识页、任务、模型及向量维数。沿用原 `service_id`、账号配置和数据目录，在 AstrBot 插件面板启用插件，重新打开记忆管理页，确认恢复检查通过。
-6. 在 **用户与记忆 → 查看暂停状态** 处理已有读写暂停，保留需要继续暂停或只读的账号模式，恢复其他客户端及定时任务。
-
-升级失败时保持保存和查询暂停并检查服务日志。更换嵌入模型或维数需要独立的数据迁移，不与版本升级一起操作。需要退回旧服务时，先在独立环境确认旧版本与升级前备份匹配，再恢复相应数据库及模型配置；保留最新控制库和清空记录，避免恢复已遗忘的材料。
-
 ## 恢复业务数据
 
 1. 停用插件或停止 AstrBot。
 2. 保存运行目录中的最新控制数据，核对快照 `manifest.json` 中的部署 ID 和控制库 ID 与目标部署一致。
-3. 需要恢复 Hindsight 时，先按下一节恢复数据库；只修复插件业务库时沿用后端数据库。
+3. 核对所连接的 Hindsight 与插件快照匹配。配套服务需要恢复数据库时使用下一节；已有服务的数据状态由服务管理员确认。
 4. 用选定快照恢复 `runtime.sqlite3`。使用 SQLite 备份接口，或在进程完全停止后复制快照并移走目标目录的旧 `runtime.sqlite3-wal`、`runtime.sqlite3-shm`，避免混入旧日志。
 5. 沿用最新控制目录，以及有效的 `control_state_dir`、`agent_id`、`service_id` 和账号配置，启动插件。
 6. 插件自动检查数据归属、应用清空记录、清理失效任务并核对后端操作。通过恢复检查后，核对用户的记忆库 ID和保存和查询暂停状态；已暂停保存和查询的用户需点击 **解除读写暂停**。Bank 丢失时先恢复原 Bank，或按清空记忆流程舍弃旧数据。个人暂停的账号再用 `/hindsight on` 开启。
 
 删除尚未完成时，插件会继续清理后端旧记忆。恢复检查期间自动记录和记忆查询暂时关闭，进度从 `/hindsight status` 查看。
 
-## 恢复 Hindsight 数据库
+## 恢复配套 Hindsight 数据库
 
-使用仓库部署模板时，在 `deploy` 目录放入选定的 `hindsight-backup.dump`，停止 AstrBot 插件，并停止后端服务、保留数据库运行：
+先在独立环境确认备份可恢复。停用插件，在配套安装目录放入选定的 `hindsight-backup.dump`，保留数据库运行：
 
 ```bash
-docker compose stop hindsight
-docker compose cp ./hindsight-backup.dump db:/tmp/hindsight-restore.dump
-docker compose exec -T db pg_restore -U hindsight -d hindsight --clean --if-exists --exit-on-error /tmp/hindsight-restore.dump
-docker compose up -d hindsight
+docker compose stop memory-api
+docker compose cp ./hindsight-backup.dump memory-db:/tmp/hindsight-restore.dump
+docker compose exec -T memory-db pg_restore -U hindsight -d hindsight --clean --if-exists --exit-on-error /tmp/hindsight-restore.dump
+docker compose up -d memory-api
 ```
 
-这会将数据库恢复到所选备份。数据库账号或名称改过时，替换命令中的对应值；恢复后按上一节恢复或沿用匹配的插件数据。
+这会将配套数据库恢复到所选备份。模型设置须与数据库备份匹配；恢复后按上一节恢复或沿用匹配的插件数据。
 
 ## 异常提示
 
@@ -170,7 +152,7 @@ docker compose up -d hindsight
 | `control_mismatch` 或 `deployment_mismatch` | 核对是否挂载了另一套部署的数据；比较部署 ID 与控制库 ID |
 | `control_rolled_back` | 使用更新的控制库副本，保留较新的清空与身份记录 |
 | `account_mapping_missing` | 恢复完整控制库，找回原有账号归属 |
-| `accepted_operation_missing` | 核对后端数据库恢复点和操作历史，保留 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0` |
+| `accepted_operation_missing` | 保持插件暂停，由服务管理员核对操作历史和数据状态；配套部署使用 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0` 保留操作历史 |
 | `payload_digest_conflict` | 检查插件业务库完整性和备份来源 |
 | `bank_missing` | 已建好的记忆库丢失，保持暂停；恢复原 Bank 后点击“核对记忆库”，已有读写暂停时再解除；也可清空记忆，清理后重新开启。不会自动重建 |
 | `maintenance_active` | 新保存和记忆查询已暂停，等待发送的记录与重试也暂停；管理员检查暂停进度，完成内容操作后点击“解除读写暂停” |

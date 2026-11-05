@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from test_runtime_diagnostics import bridge_class, Configuration, Plain
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
+from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
 from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel
 
@@ -81,12 +83,16 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_forget_waits_for_upgrade_including_an_earlier_confirmation(self):
         panel = self.plugin.panel
         panel.directory = lambda: self.root / "setup"
+        self.config.update(api_url="http://memory.test", api_key="valid-key")
+        owned = {"id": "012345abcdef", "api_url": self.config["api_url"], "api_key": self.config["api_key"]}
         scope = dict(self.plugin.outbox.scope(self.incoming))
         awaitable = self.plugin.memory_forget(self.event("/hindsight forget", mid="forget-prepare"))
         replies = [text async for text in awaitable]
         self.assertIn("120 秒", str(replies))
         token = self.plugin.confirmations[scope["owner_id"]]["token"]
-        panel.store_state({"upgrade_check": {"connection_id": self.plugin.outbox.connection_id, "verified": False}})
+        panel.store_state({**owned, "upgrade_check": {
+            "connection_id": self.plugin.outbox.connection_id, "verified": False,
+        }})
         for index, confirmation in enumerate(("", token)):
             replies = [text async for text in self.plugin.memory_forget(
                 self.event(
@@ -96,13 +102,57 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
             )]
             self.assertIn("服务升级期间", str(replies))
             self.assertEqual(self.plugin.outbox.scope(self.incoming)["bank"], scope["bank"])
-        panel.store_state({"upgrade_check": {"connection_id": self.plugin.outbox.connection_id, "verified": True}})
+        panel.store_state({**owned, "upgrade_check": {
+            "connection_id": self.plugin.outbox.connection_id, "verified": True,
+        }})
         replies = [text async for text in self.plugin.memory_forget(
             self.event("/hindsight forget " + token, mid="forget-confirm", timestamp=104), token,
         )]
         self.assertIn("正在清空", str(replies))
         self.assertNotEqual(self.plugin.outbox.scope(self.incoming)["bank"], scope["bank"])
 
+    async def test_native_commands_recover_with_explicit_bank_resume_after_retained_upgrade(self):
+        panel = self.plugin.panel
+        panel.directory = lambda: self.root / "setup"
+        self.config.update(api_url="http://memory.test", api_key="replacement-key")
+        client = HindsightClient(self.config["api_url"], self.config["api_key"])
+        self.addAsyncCleanup(client.close)
+        client.ensure_auth = AsyncMock()
+        client.bank_exists = AsyncMock(return_value=True)
+        client.bank_list_contains = AsyncMock(return_value=False)
+        client.list_operations = AsyncMock(return_value=[])
+        self.plugin.client = client
+        queue = self.plugin.outbox
+        self.plugin.worker.maintenance = Maintenance(queue, client)
+        scope = dict(queue.scope(self.incoming))
+        self.plugin.worker.maintenance.begin(scope["scope_id"], management=queue.management(scope["scope_id"]))
+        panel.store_state({
+            "id": "012345abcdef", "api_url": self.config["api_url"], "api_key": "previous-key",
+            "upgrade_check": {"connection_id": queue.connection_id, "verified": False},
+            "upgrade_pauses": {"connection_id": queue.connection_id, "banks": []},
+        })
+        self.assertFalse(panel.managed_connection())
+        self.assertIn("已暂停", await self.plugin.mode(self.event("/hindsight on", mid="on-paused"), "active"))
+        self.assertTrue(queue.summary(scope["scope_id"])["maintenance"])
+        panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
+            request=SimpleNamespace(method="POST", username="admin"),
+        )}):
+            await panel.action(scope["scope_id"])
+        self.assertIsNone(queue.summary(scope["scope_id"])["maintenance"])
+        self.assertIn("已开启", await self.plugin.mode(
+            self.event("/hindsight on", mid="on-resumed", timestamp=102), "active",
+        ))
+        replies = [text async for text in self.plugin.memory_forget(
+            self.event("/hindsight forget", mid="forget-after-upgrade", timestamp=103),
+        )]
+        self.assertIn("120 秒", str(replies))
+        token = self.plugin.confirmations[scope["owner_id"]]["token"]
+        replies = [text async for text in self.plugin.memory_forget(
+            self.event("/hindsight forget " + token, mid="forget-after-upgrade-confirm", timestamp=104), token,
+        )]
+        self.assertIn("正在清空", str(replies))
+        self.assertNotEqual(queue.scope(self.incoming)["bank"], scope["bank"])
     async def test_first_observation_of_old_event_after_bot_switch_is_rejected(self):
         old = self.event()
         self.bot.get_login_info.return_value = {"user_id": 1002}

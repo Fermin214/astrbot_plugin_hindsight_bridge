@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
-from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
+from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, PanelError
 
 
@@ -69,6 +69,136 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.panel.service_status())["version"])
         self.client.request.side_effect = HindsightError("http_503")
         self.assertIsNone((await self.panel.service_status())["version"])
+
+    async def test_existing_service_reports_version_without_retained_installation_upgrade_state(self):
+        state = self.panel.state()
+        state.update(
+            api_url="http://previous-managed.test",
+            upgrade_check={"connection_id": self.queue.connection_id, "verified": False},
+            upgrade_pauses={"connection_id": self.queue.connection_id, "banks": []},
+        )
+        self.panel.store_state(state)
+        status = await self.panel.service_status()
+        self.assertEqual(status["version"], "1.1.0")
+        self.assertTrue(status["supported"])
+        self.assertFalse(status["managed"])
+        self.assertFalse(status["upgrade_available"])
+        self.assertIsNone(status["target"])
+        self.assertFalse(status["pending"])
+        self.assertFalse(status["upgrade_paused"])
+        for action in ("begin", "prepare", "verify", "resume", "cancel"):
+            with self.subTest(action=action), self.assertRaises(PanelError):
+                await self.action(action, backup_confirmed=True)
+        with self.assertRaises(PanelError):
+            await self.ignore()
+        self.assertEqual(self.panel.state(), state)
+        self.panel.managed_request.assert_not_awaited()
+        self.assertTrue(all(not self.queue.summary(row["scope_id"])["maintenance"] for row in self.rows))
+
+    async def test_retained_upgrade_records_allow_existing_service_settings_and_checked_personal_recovery(self):
+        initial = self.panel.state()
+        original_key = self.client.api_key
+        self.plugin.confirmations = {}
+        for form in ("pending", "legacy_check", "pauses_only", "verified_check"):
+            with self.subTest(form=form):
+                self.client.api_key = self.plugin.config["api_key"] = original_key
+                self.panel.store_state(initial)
+                for row in self.rows:
+                    self.queue.control.set_bank_state(self.queue.connection_id, row["bank"], "established")
+                self.queue.set_mode(self.rows[0]["scope_id"], "readonly")
+                await self.action("begin")
+                await self.action("prepare", backup_confirmed=True)
+                with self.assertRaises(PanelError):
+                    self.panel.ensure_no_upgrade()
+                state = self.panel.state()
+                if form == "legacy_check":
+                    state.pop("upgrade_pauses")
+                elif form == "pauses_only":
+                    state.pop("upgrade_check")
+                elif form == "verified_check":
+                    state["upgrade_check"]["verified"] = True
+                self.panel.store_state(state)
+                self.client.api_key = self.plugin.config["api_key"] = "replacement-key"
+                self.reopen_queue()
+                self.panel = self.reload_panel()
+                self.assertFalse(self.panel.managed_connection())
+                self.assertTrue(all(self.queue.summary(row["scope_id"])["maintenance"] for row in self.rows))
+                self.panel.ensure_no_upgrade()
+                self.panel.body = AsyncMock(return_value={"config_revision": self.panel.config_revision()})
+                with patch.object(self.panel, "_save", new=AsyncMock(return_value={"saved": True})) as save:
+                    self.assertTrue((await self.panel.save())["saved"])
+                    save.assert_awaited_once()
+                request = SimpleNamespace(method="POST", username="admin")
+                with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}):
+                    for row in self.rows:
+                        self.panel.body = AsyncMock(return_value={"action": "maintenance_status"})
+                        self.assertTrue((await self.panel.action(row["scope_id"]))["maintenance"]["ready"])
+                        self.panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
+                        self.client.bank_exists.return_value = False
+                        with self.assertRaisesRegex(QueueError, "bank_missing"):
+                            await self.panel.action(row["scope_id"])
+                        self.assertTrue(self.queue.summary(row["scope_id"])["maintenance"])
+                        self.client.bank_exists.return_value = True
+                        await self.panel.action(row["scope_id"])
+                        self.assertIsNone(self.queue.summary(row["scope_id"])["maintenance"])
+                    self.panel.body = AsyncMock(return_value={"action": "forget_prepare"})
+                    self.assertIn("confirmation", await self.panel.action(self.rows[0]["scope_id"]))
+                self.assertEqual(self.queue.scope_owner(self.rows[0]["scope_id"])["mode"], "readonly")
+                self.assertEqual(self.panel.state(), state)
+                self.panel.ensure_no_upgrade()
+                with self.assertRaises(PanelError):
+                    await self.action("cancel")
+
+    async def test_forgotten_bank_invalidates_old_upgrade_after_restoring_managed_credentials(self):
+        original_key = self.client.api_key
+        remote_banks = {row["bank"] for row in self.rows}
+        self.client.bank_exists.side_effect = lambda bank: bank in remote_banks
+        self.client.delete_bank = AsyncMock(side_effect=lambda bank: remote_banks.discard(bank))
+        self.plugin.confirmations = {}
+        self.queue.set_mode(self.rows[1]["scope_id"], "readonly")
+        await self.action("begin")
+        await self.action("prepare", backup_confirmed=True)
+        old_state = self.panel.state()
+        self.client.api_key = self.plugin.config["api_key"] = "replacement-key"
+        self.reopen_queue()
+        self.panel = self.reload_panel()
+
+        async def personal(row, action, **extra):
+            self.panel.body = AsyncMock(return_value={"action": action, **extra})
+            with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
+                request=SimpleNamespace(method="POST", username="admin"),
+            )}):
+                return await self.panel.action(row["scope_id"])
+
+        await personal(self.rows[0], "maintenance_resume")
+        confirmation = await personal(self.rows[0], "forget_prepare")
+        await personal(self.rows[0], "forget_confirm", confirmation=confirmation["confirmation"])
+        self.assertTrue(await self.maintenance.check(force=True))
+        self.assertEqual(self.queue.control.erasures(self.queue.connection_id)[0]["phase"], "verified")
+        self.assertEqual(self.panel.state(), old_state)
+        self.client.api_key = self.plugin.config["api_key"] = original_key
+        self.reopen_queue()
+        self.panel = self.reload_panel()
+        self.assertTrue(self.panel.managed_connection())
+        status = await self.panel.service_status(force=False)
+        self.assertFalse(status["pending"])
+        self.assertFalse(status["upgrade_paused"])
+        self.panel.ensure_no_upgrade()
+        self.assertTrue(self.queue.summary(self.rows[1]["scope_id"])["maintenance"])
+        await personal(self.rows[1], "maintenance_resume")
+        self.assertEqual(self.queue.scope_owner(self.rows[1]["scope_id"])["mode"], "readonly")
+        self.panel.ensure_no_upgrade()
+        await self.action("begin")
+        await self.action("prepare", backup_confirmed=True)
+        self.assertNotIn(self.rows[0]["bank"], {
+            row["bank"] for row in self.panel.state()["upgrade_pauses"]["banks"]
+        })
+        self.client.request.return_value = {"api_version": "1.2.0"}
+        await self.action("verify")
+        await self.action("resume")
+        self.assertTrue(all(not self.queue.summary(row["scope_id"])["maintenance"] for row in self.rows))
+        self.assertEqual(self.queue.scope_owner(self.rows[1]["scope_id"])["mode"], "readonly")
+        self.panel.ensure_no_upgrade()
 
     async def ignore(self, **extra):
         self.panel.body = AsyncMock(return_value={
@@ -355,10 +485,16 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.assertIn("同版本修复仅支持1.2.0", script(result))
         self.assertNotIn("upgrade_check", self.panel.state())
 
-    async def test_external_old_version_can_create_a_new_isolated_managed_installation(self):
+    async def test_existing_connection_cannot_prepare_an_installation_but_empty_configuration_can(self):
         self.panel.store_state({})
         before = dict(self.plugin.config)
         self.panel.body = AsyncMock(return_value={})
+        with self.assertRaisesRegex(PanelError, "配套服务"):
+            await self.panel.prepare()
+        self.assertEqual(self.panel.state(), {})
+        self.assertEqual(self.plugin.config, before)
+        self.plugin.config["api_url"] = ""
+        before = dict(self.plugin.config)
         result = await self.panel.prepare()
         self.assertNotEqual(result["api_url"], self.client.url)
         self.assertEqual(self.plugin.config, before)

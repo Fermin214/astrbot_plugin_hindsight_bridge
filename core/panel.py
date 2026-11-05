@@ -182,6 +182,48 @@ class MemoryPanel:
         temporary.chmod(0o600)
         temporary.replace(directory / "setup.json")
 
+    def managed_connection(self, state=None, *, api_url=None, api_key=None):
+        state = self.state() if state is None else state
+        url = self.plugin.config.get("api_url", "") if api_url is None else api_url
+        key = self.plugin.config.get("api_key", "") if api_key is None else api_key
+        return bool(
+            re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", "")))
+            and state.get("api_url")
+            and (not url or (
+                self.connection_url(url) == self.connection_url(state["api_url"])
+                and state.get("api_key") and key == state["api_key"]
+            ))
+        )
+
+    def require_managed(self):
+        state = self.state()
+        if not self.managed_connection(state):
+            raise PanelError("此操作仅适用于插件安装的配套服务；已有服务仅提供连接与记忆功能。")
+        return state
+
+    def upgrade_state(self, state=None):
+        state = dict(self.state() if state is None else state)
+        queue = self.plugin.outbox
+        names = ("upgrade_check", "upgrade_pauses")
+        records = [
+            state[name] for name in names if state.get(name) and queue
+            and state[name].get("connection_id") == queue.connection_id
+        ]
+        if records:
+            retired = {
+                (row["owner_id"], row["old_bank"], row["old_generation"])
+                for row in queue.control.erasures(queue.connection_id)
+            }
+            if any(
+                (bank.get("owner_id"), bank.get("bank"), bank.get("generation")) in retired
+                for record in records for bank in record.get("banks", [])
+            ):
+                # Forgetting invalidates the snapshot, never the actual Bank pauses.
+                for name in names:
+                    if state.get(name) and state[name].get("connection_id") == queue.connection_id:
+                        state.pop(name)
+        return state
+
     def config_revision(self):
         """Opaque fingerprint of the plugin configuration and setup metadata."""
         return sha256(json.dumps(
@@ -202,9 +244,9 @@ class MemoryPanel:
             raise PanelError("配置已被更新，请刷新页面后重新保存。")
 
     def ensure_no_upgrade(self):
-        state, queue = self.state(), self.plugin.outbox
+        state, queue = self.upgrade_state(), self.plugin.outbox
         check, pauses = state.get("upgrade_check"), state.get("upgrade_pauses")
-        if queue and (
+        if queue and self.managed_connection(state) and (
             check and check.get("connection_id") == queue.connection_id and not check.get("verified")
             or pauses and pauses.get("connection_id") == queue.connection_id
         ):
@@ -261,18 +303,26 @@ class MemoryPanel:
             return await self._bootstrap()
 
     async def service_status(self, *, force=True):
-        plugin, state = self.plugin, self.state()
+        plugin, state = self.plugin, self.upgrade_state()
         client = plugin.client
+        managed = self.managed_connection(state) and (
+            not client or self.connection_url(state["api_url"]) == client.url
+        )
         ignored = state.get("ignored_upgrades", {})
         result = {
-            "version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False,
-            "ignored": isinstance(ignored, dict) and ignored.get(self.connection_revision()) == HINDSIGHT_VERSION,
+            "version": None, "target": HINDSIGHT_VERSION if managed else None,
+            "managed": managed, "upgrade_available": False,
+            "ignored": bool(managed and isinstance(ignored, dict)
+                            and ignored.get(self.connection_revision()) == HINDSIGHT_VERSION),
         }
         if (not client or not plugin.outbox or plugin.stopping
                 or not isinstance(getattr(client, "api_key", None), str)
                 or not callable(getattr(client, "request", None))):
             return result
-        identity = (client.url, sha256(client.api_key), self.config_revision())
+        identity = (
+            client.url, sha256(client.api_key), self.config_revision(),
+            bool(state.get("upgrade_check")), bool(state.get("upgrade_pauses")),
+        )
         if not force and self.version_cache and self.version_cache[0] == identity and self.version_cache[1] > time.monotonic():
             return self.version_cache[2]
         try:
@@ -283,16 +333,21 @@ class MemoryPanel:
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                 raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
             result.update(version=version, supported=version in SUPPORTED_VERSIONS,
-                          upgrade_available=version == "1.1.0")
+                          upgrade_available=managed and version == "1.1.0")
         except (HindsightError, TimeoutError, PanelError):
-            result["message"] = "暂时无法核对服务版本；升级前请恢复连接并重新检查。"
+            result["message"] = "暂时无法核对服务版本，请检查连接后重试。"
         if plugin.client is not client or plugin.stopping:
             return {"version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False}
-        result["managed"] = bool(state.get("id")) and self.connection_url(state.get("api_url", "")) == client.url
-        result["pending"] = bool(state.get("upgrade_check") and not state["upgrade_check"].get("verified"))
+        check = state.get("upgrade_check", {})
+        result["pending"] = bool(
+            managed and check and check.get("connection_id") == plugin.outbox.connection_id
+            and not check.get("verified")
+        )
         pauses = state.get("upgrade_pauses")
-        result["upgrade_paused"] = bool(pauses and pauses.get("connection_id") == plugin.outbox.connection_id)
-        result["resume_available"] = bool(result["upgrade_paused"] and state.get("upgrade_check", {}).get("verified"))
+        result["upgrade_paused"] = bool(
+            managed and pauses and pauses.get("connection_id") == plugin.outbox.connection_id
+        )
+        result["resume_available"] = bool(result["upgrade_paused"] and check.get("verified"))
         self.version_cache = (identity, time.monotonic() + 30, result)
         return result
 
@@ -305,6 +360,7 @@ class MemoryPanel:
                 raise PanelError("请使用 AstrBot 管理账号登录。")
             self.check_revision(payload)
             self.ensure_no_upgrade()
+            self.require_managed()
             if (
                 payload.get("target") != HINDSIGHT_VERSION
                 or payload.get("connection_revision") != self.connection_revision()
@@ -326,7 +382,7 @@ class MemoryPanel:
             raise PanelError("请使用 AstrBot 管理账号登录。")
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(60):
             self.check_revision(payload)
-            plugin, state = self.plugin, self.state()
+            plugin, state = self.plugin, self.upgrade_state()
             status = await self.service_status()
             if not status.get("managed") or not plugin.outbox or plugin.outbox.recovering:
                 raise PanelError("此入口只升级当前插件的配套服务；外部服务请由其管理员升级。")
@@ -681,8 +737,9 @@ class MemoryPanel:
                 connection_message = self.error_message("auth_timeout")
         scopes = await self.user_scopes()
         state = self.state()
+        managed = self.managed_connection(state)
         key_command = ""
-        if re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", ""))):
+        if managed:
             key_command = (
                 "sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "
                 '"${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/'
@@ -690,7 +747,7 @@ class MemoryPanel:
                 r" | tr -d '\047\042'"
             )
         managed_status = None
-        if state.get("management_url") and state.get("management_key"):
+        if managed and state.get("management_url") and state.get("management_key"):
             try:
                 managed_status = await self.managed_request(state)
             except PanelError:
@@ -710,23 +767,19 @@ class MemoryPanel:
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
                 "connection_revision": self.connection_revision(),
                 "allowed_accounts": config.get("allowed_accounts", []),
-                "managed": bool(state.get("id")) and (
-                    not config.get("api_url")
-                    or self.connection_url(config["api_url"])
-                    == self.connection_url(state.get("api_url", ""))
-                ),
-                **{k: state.get(k, "") for k in (
+                "managed": managed,
+                **{k: state.get(k, "") if managed else "" for k in (
                     "chat_provider_id", "embedding_provider_id", "rerank_provider_id"
                 )},
             },
             "platforms": self.platforms(),
             "managed_service": managed_status,
             "backend": await self.service_status(force=False),
-            "model_job": self.model_job,
-            "has_installation": bool(state.get("id")),
-            "installation_api_url": state.get("api_url", ""),
+            "model_job": self.model_job if managed else None,
+            "has_installation": managed,
+            "installation_api_url": state.get("api_url", "") if managed else "",
             "control_plane_key_command": key_command,
-            "providers": self.providers().options(),
+            "providers": self.providers().options() if managed or not configured else {},
             "status": {
                 "label": configuration_message(config) or connection_message or plugin.status,
                 "message": connection_message,
@@ -756,7 +809,7 @@ class MemoryPanel:
         payload = await self.body()
         url, key = self.credentials(payload)
         state = self.state()
-        if state.get("management_url") and self.connection_url(url) == self.connection_url(state.get("api_url", "")):
+        if state.get("management_url") and self.managed_connection(state, api_url=url, api_key=key):
             status = await self.managed_request(state)
             if not status["ready"]:
                 return {"ok": True, "ready": False, "message": "配套服务已安装，请选择模型并保存。"}
@@ -806,10 +859,13 @@ class MemoryPanel:
         async with self.lock:
             self.check_revision(payload)
             self.ensure_no_upgrade()
+            if self.state().get("api_url") or self.plugin.config.get("api_url"):
+                self.require_managed()
             status = await self.service_status()
             if status.get("managed") and status.get("upgrade_available"):
                 raise PanelError("当前服务为 1.1.0，请使用「升级 Hindsight」暂停保存和查询、备份并升级。")
-            if status.get("managed") and status.get("version") is None and payload.get("repair") is not True:
+            if (status.get("managed") and status.get("version") is None
+                    and self.plugin.config.get("api_url") and payload.get("repair") is not True):
                 raise PanelError("无法确认已有服务版本。请恢复连接；重新部署命令只会替换实际确认的 1.2.0 服务，不会升级未知版本。")
             state = self.state(create=True)
             if "control_plane_url" in payload:
@@ -832,6 +888,7 @@ class MemoryPanel:
 
     async def save_models(self):
         payload = await self.body()
+        self.require_managed()
         selection = {key: payload.get(key, "") for key in (
             "chat_provider_id", "embedding_provider_id", "rerank_provider_id",
         )}
@@ -861,7 +918,7 @@ class MemoryPanel:
         return await self.apply_models(payload)
 
     async def model_status(self):
-        return dict(self.model_job) if self.model_job else {"status": "idle"}
+        return dict(self.model_job) if self.managed_connection() and self.model_job else {"status": "idle"}
 
     async def run_model_job(self, payload):
         try:
@@ -889,7 +946,7 @@ class MemoryPanel:
         async with self.lock:
             self.ensure_no_upgrade()
             self.check_revision(payload)
-            state = self.state()
+            state = self.require_managed()
             await self.managed_request(state)
             selection = {key: payload.get(key, "") for key in (
                 "chat_provider_id", "embedding_provider_id", "rerank_provider_id",
@@ -925,9 +982,10 @@ class MemoryPanel:
         async with self.lock:
             self.ensure_no_upgrade()
             self.check_revision(payload)
+            state = self.require_managed()
             if payload.get("delete_memory_data") is not True:
                 raise PanelError("请确认删除这套配套服务及全部记忆数据。")
-            return uninstallation(self.state())
+            return uninstallation(state)
 
     async def save(self):
         payload = await self.body()
@@ -1005,7 +1063,9 @@ class MemoryPanel:
         )
         try:
             if not local_change:
-                if state.get("management_url") and client.url == self.connection_url(state.get("api_url", "")):
+                if state.get("management_url") and self.managed_connection(
+                    state, api_url=client.url, api_key=key,
+                ):
                     status = await self.managed_request(state)
                     if not status["configured"] or not status["ready"]:
                         raise PanelError("请先选择模型并点击「保存模型」，服务启动成功后再保存连接。")
@@ -1187,7 +1247,8 @@ class MemoryPanel:
             if action in {"forget_prepare", "forget_confirm"}:
                 self.ensure_no_upgrade()
             maintenance = plugin.worker.maintenance
-            if (action == "maintenance_resume" and (check := self.state().get("upgrade_check"))
+            if (action == "maintenance_resume" and self.managed_connection()
+                    and (check := self.upgrade_state().get("upgrade_check"))
                     and check.get("connection_id") == queue.connection_id and not check.get("verified")):
                 raise PanelError("请先在插件设置中核对升级结果，确认原记忆库仍在，再解除读写暂停。")
             management = queue.management(scope_id)
