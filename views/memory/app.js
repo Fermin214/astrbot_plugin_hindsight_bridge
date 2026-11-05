@@ -174,6 +174,9 @@ function updateConnectionMode() {
   $("api-key-field").hidden = managed && !data?.config.configured;
   $("api-url").readOnly = managed && !data?.config.configured;
   $("check-connection").hidden = managed && !data?.config.configured;
+  $("deployment-capabilities").textContent = managed
+    ? "配套服务在插件中配置模型，并生成升级、重新部署和卸载命令。测试服务连接检查记忆 API 和认证。"
+    : "已有服务通过 API 使用记忆功能，模型配置、升级和卸载由原部署工具管理。测试服务连接检查记忆 API 和认证。";
 }
 
 function renderServiceVersion() {
@@ -1062,7 +1065,13 @@ $("ignore-upgrade").addEventListener("click", () => void perform($("ignore-upgra
 for (const action of ["begin", "prepare", "verify", "resume", "cancel"]) $("upgrade-" + action).addEventListener("click", () => void upgradeAction(action, $("upgrade-" + action)));
 $("copy-upgrade").addEventListener("click", () => void perform($("copy-upgrade"), "copy", () => copyCommand("upgrade-command", "upgrade-installation", "升级命令已复制，请在原服务器执行。")));
 $("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", () => copyCommand("install-command", "installation", "部署命令已复制，请在运行 AstrBot 的服务器执行。")));
-$("backup-guide").addEventListener("click", () => $("backup-dialog").showModal());
+for (const button of document.querySelectorAll("[data-guide]")) button.addEventListener("click", () => {
+  const dialog = $(button.dataset.guide);
+  if (!dialog.open) dialog.showModal();
+});
+for (const button of document.querySelectorAll("[data-copy]")) button.addEventListener("click", () => void perform(
+  button, "copy", () => copyValue(button.dataset.copy, "已复制。", button.dataset.feedback), button.dataset.feedback,
+));
 $("prepare-uninstall").addEventListener("click", () => {
   clearUninstall();
   $("delete-memory-data").checked = false;

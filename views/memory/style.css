@@ -46,6 +46,10 @@ input::placeholder { color: var(--muted); opacity: 1; }
 input[readonly] { background: var(--bg); }
 input[type="radio"], input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; padding: 0; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
 textarea { resize: vertical; min-height: 96px; }
+.guide-steps { padding-left: 24px; }
+.guide-steps li { margin-bottom: 22px; }
+.guide-steps h3, .guide-steps p, .guide-steps textarea { margin-bottom: 12px; }
+.guide-steps textarea { font-family: Consolas, monospace; font-size: 13px; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 label { display: grid; gap: 9px; min-width: 0; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
