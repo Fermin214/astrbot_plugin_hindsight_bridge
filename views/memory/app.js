@@ -1,11 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let bridge = window.AstrBotPluginView;
 const modeLabels = { active: "保存并自动使用记忆", readonly: "只自动使用已有记忆", paused: "暂停保存和自动使用" };
-const modeHelp = {
-  active: "日常聊天使用：自动查找已有记忆，并保存新的聊天内容。",
-  readonly: "想继续用旧记忆、但不记录这次聊天时使用：自动查找已有记忆，不保存新的聊天内容。",
-  paused: "想暂时不使用记忆时选择：不自动查找记忆，也不保存新的聊天内容；仍可手动查看。",
-};
 let data = null;
 let settingsRevision = "";
 let scopeId = "";
@@ -14,6 +9,9 @@ let forgetState = null;
 let authorizationState = null;
 let accountRemovalState = null;
 let maintenanceState = null;
+let maintenanceIdentity = "";
+let maintenanceCheckedAt = 0;
+let maintenanceExpiryTimer;
 let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
@@ -189,7 +187,10 @@ function renderServiceVersion() {
     ? `Hindsight ${backend.version}${backend.upgrade_available ? " · 可升级到 1.2.0，当前版本仍受支持。" : backend.supported === false ? " · 此版本未经兼容验证。" : ""}`
     : "Hindsight 版本尚未确认，请恢复服务连接后重新检查。";
   const managed = data?.config.managed && backend?.managed;
+  $("external-upgrade").hidden = !!data?.config.managed;
   const upgrading = backend?.pending || backend?.upgrade_paused;
+  $("setup-update").hidden = !backend?.upgrade_available && !upgrading;
+  $("setup-update").textContent = upgrading ? "升级待完成" : "可升级";
   $("go-upgrade").hidden = !backend?.upgrade_available && !upgrading;
   $("go-upgrade").textContent = managed ? "查看升级步骤" : "查看服务升级指引";
   $("service-upgrade").hidden = !managed || (!backend?.upgrade_available && !upgrading);
@@ -397,7 +398,11 @@ function renderStatus() {
     }
   }
   $("status-description").hidden = !$("status-description").textContent;
-
+  const attention = !!status.recovering || !data.config.configured || connected !== true;
+  $("service-alert").hidden = !attention;
+  $("service-alert-message").textContent = attention
+    ? [$("status-label").textContent, $("status-description").textContent].filter(Boolean).join("：")
+    : "";
 }
 
 function recallDescription(recall) {
@@ -415,16 +420,20 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   let next;
   try {
     next = await withTimeout(bridge.apiGet("bootstrap"), 15000, "获取插件状态超时，请点击重新获取。");
+    if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   } catch (error) {
     if (revision !== bootstrapReadRevision) return;
+    if (maintenanceIdentity) {
+      maintenanceReadRevision++;
+      maintenanceState = { ready: false, error: errorMessage(error) };
+      renderScope();
+    }
     throw error;
   }
   if (revision !== bootstrapReadRevision) return;
-  if (!next || !next.config || !Array.isArray(next.scopes)) throw new Error("设置数据不完整，请刷新页面重试。");
   if (settingsRevision && next.config_revision !== settingsRevision) clearUpgrade();
   data = next;
   renderServiceVersion();
-  maintenanceState = null;
   if (hydrate) hydrateConfig();
   else if (!automatic) {
     for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, $(`${kind}-provider`).value);
@@ -477,48 +486,117 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
 
 function maintenanceDescription(summary = {}, state = null) {
   if (summary.bank_missing || state?.bank_missing) return "找不到这个用户的记忆库，记忆功能已暂停。请恢复原记忆库，或通过「清空此用户的记忆」重新开始。";
-  if (state?.phase === "inactive" || !summary.maintenance) return "日常聊天无需操作这里；修改记忆前请先暂停保存和查询。";
-  if (state?.error) return `暂时无法确认保存进度：${state.error} 请稍后点击「检查暂停进度」，确认完成后再修改记忆。`;
-  if (state?.ready === true && state.phase === "ready") return "可以修改记忆：新记录和记忆查询已暂停，之前的记录已处理完。请到官方面板操作，完成后点击「恢复原记忆模式」。";
-  if (state?.pending) return "仍有未保存的记录。Hindsight 已接收的记录会继续处理；尚未发送或保存失败的记录如需放弃，勾选下方选项后再次点击「暂停保存和查询」。";
-  if (state?.in_flight || state?.remote_active) return "正在等待 Hindsight 处理已接收的记录。请稍后检查暂停进度。";
-  return "正在确认保存结果。请等到显示「可以修改记忆」后再去官方面板操作。";
+  if (!summary.maintenance) return "";
+  if (state?.error) return `无法确认保存进度：${state.error} 请检查服务后点击「重试检查」。`;
+  if (state?.phase === "inactive") return "暂停已解除，正在更新用户状态。";
+  if (state?.ready === true && state.phase === "ready") return "可以修改记忆";
+  if (state?.pending) return summary.can_discard
+    ? `仍有 ${state.pending} 条记录未保存；请等待已接收任务完成，或在「放弃记录」中处理未发送及失败记录。`
+    : `仍有 ${state.pending} 条记录未保存，正在确认已发送请求的处理结果。`;
+  if (state?.in_flight || state?.remote_active) return `正在等待 Hindsight 处理已接收的记录${state.remote_active ? `（${state.remote_active} 个任务）` : ""}。`;
+  return "正在确认保存结果…";
+}
+
+function maintenanceSnapshot(scope, snapshot = data) {
+  if (!scope?.summary?.maintenance || scope.pending || scope.summary.bank_missing || snapshot?.status?.recovering) return "";
+  const record = scope.summary.maintenance;
+  return JSON.stringify([
+    scope.scope_id, scope.bank, scope.owner_id, scope.generation, scope.revision,
+    snapshot.config.connection_revision, snapshot.config.api_url,
+    record.connection_id, record.started_at, record.discard_pending,
+  ]);
+}
+
+function syncMaintenanceState() {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const identity = maintenanceSnapshot(scope);
+  if (identity !== maintenanceIdentity) {
+    maintenanceReadRevision++;
+    maintenanceIdentity = identity;
+    maintenanceState = null;
+    maintenanceCheckedAt = 0;
+    $("discard-pending").checked = false;
+    $("discard-records").open = false;
+  } else if (maintenanceState?.ready && Date.now() - maintenanceCheckedAt > 30000) {
+    maintenanceState = { ready: false, error: "暂停检查结果已过期。" };
+  }
+  if (identity && data.status?.connected === false) {
+    maintenanceState = { ready: false, error: data.status.message || "记忆服务未连接。" };
+  }
+  if (!maintenanceState?.ready) clearTimeout(maintenanceExpiryTimer);
+}
+
+function scheduleMaintenanceExpiry() {
+  clearTimeout(maintenanceExpiryTimer);
+  if (!maintenanceIdentity || !maintenanceState?.ready || maintenanceState.phase !== "ready") return;
+  const identity = maintenanceIdentity;
+  const result = maintenanceState;
+  const checkedAt = maintenanceCheckedAt;
+  maintenanceExpiryTimer = setTimeout(() => {
+    if (identity !== maintenanceIdentity || result !== maintenanceState || checkedAt !== maintenanceCheckedAt) return;
+    maintenanceState = { ready: false, error: "暂停检查结果已过期。" };
+    renderScope();
+  }, Math.max(0, 30000 - (Date.now() - checkedAt)));
 }
 
 async function readMaintenanceStatus() {
+  syncMaintenanceState();
   const revision = ++maintenanceReadRevision;
-  const snapshot = data;
+  const identity = maintenanceIdentity;
   const id = scopeId;
-  const scope = snapshot?.scopes.find((item) => item.scope_id === id);
-  if (!scope?.summary?.maintenance || scope.pending) return;
+  if (!identity) return;
   let state;
   try {
     const response = await withTimeout(
       bridge.apiGet(endpoint("action", id), { action: "maintenance_status" }),
-      15000, "获取暂停进度超时，请稍后检查暂停进度。",
+      15000, "获取暂停进度超时。",
     );
     state = response.maintenance;
+    if (!state || typeof state.ready !== "boolean") throw new Error("服务未返回有效的暂停进度。");
+    const scope = data?.scopes.find((item) => item.scope_id === id);
+    const record = scope?.summary?.maintenance;
+    if (state.bank && (state.bank !== scope?.bank || state.connection_id !== record?.connection_id
+        || state.started_at !== record?.started_at || state.discard_pending !== record?.discard_pending)) {
+      throw new Error("暂停范围已变化，请重新获取用户状态。");
+    }
   } catch (error) {
     state = { phase: "draining", ready: false, error: errorMessage(error) };
   }
-  if (revision !== maintenanceReadRevision || snapshot !== data || id !== scopeId) return;
+  if (revision !== maintenanceReadRevision || identity !== maintenanceIdentity || id !== scopeId) return;
   maintenanceState = state;
+  maintenanceCheckedAt = Date.now();
   renderScope();
+  scheduleMaintenanceExpiry();
 }
 
 function renderScope() {
+  syncMaintenanceState();
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const summary = scope?.summary || {};
   if (!modeDirty) $("scope-mode").value = scope?.mode || "";
-  $("mode-help").textContent = scope?.pending ? pendingScopeHelp(scope) : modeHelp[$("scope-mode").value] || "";
-  for (const id of ["scope-mode", "save-mode", "retry", "maintenance-begin", "maintenance-status", "maintenance-resume", "discard-pending", "forget"]) $(id).disabled = !scope || scope.pending === true;
+  $("scope-mode-field").hidden = !!scope?.historical;
+  $("save-mode").hidden = !!scope?.historical;
+  $("historical-mode").hidden = !scope?.historical;
+  $("historical-mode").textContent = scope?.historical ? `机器人 ${scope.bot_id} · 原记忆模式：${modeLabels[scope.mode] || scope.mode}` : "";
+  for (const id of ["scope-mode", "save-mode", "retry", "maintenance-begin", "maintenance-retry", "maintenance-resume", "discard-pending", "maintenance-discard", "forget"]) $(id).disabled = !scope || scope.pending === true;
   for (const id of ["scope-mode", "save-mode", "retry"]) $(id).disabled ||= scope?.historical === true;
-  if (scope?.historical) $("mode-help").textContent = "历史范围可暂停保存和查询或清空。重新使用前，请在设置中确认当前机器人身份并授权。";
   const maintenanceActive = !!summary.maintenance;
   $("scope-mode").querySelector('[value="active"]').disabled = maintenanceActive || !!summary.bank_missing;
   $("scope-mode").querySelector('[value="readonly"]').disabled = maintenanceActive || !!summary.bank_missing;
-  $("maintenance-resume").disabled ||= !maintenanceActive || maintenanceState?.ready !== true || maintenanceState.phase !== "ready";
+  $("maintenance-begin").hidden = maintenanceActive;
+  $("maintenance-resume").hidden = !maintenanceActive;
+  $("maintenance-retry").hidden = !maintenanceActive || !maintenanceState?.error;
+  $("maintenance-resume").disabled ||= !maintenanceActive || !!summary.bank_missing || !!maintenanceState?.bank_missing || data?.status?.connected === false || maintenanceState?.ready !== true || maintenanceState.phase !== "ready";
   $("retry").disabled ||= maintenanceActive || !!summary.bank_missing;
+  $("retry").hidden = $("retry").disabled || !(summary.counts?.failed || summary.counts?.dead);
+  const discardable = summary.can_discard === true;
+  $("discard-records").hidden = !discardable;
+  if (!discardable) {
+    $("discard-pending").checked = false;
+    $("discard-records").open = false;
+  }
+  $("maintenance-discard").disabled ||= !$("discard-pending").checked;
+  $("pause-impact").hidden = !scope || !!scope.pending;
   $("scope-error").hidden = !summary.error_message;
   $("scope-error").textContent = text(summary.error_message);
   $("control-plane-address").value = data?.config.control_plane_url || "";
@@ -530,9 +608,12 @@ function renderScope() {
     ? "用安装服务时的账号登录服务器，在终端执行下方命令。输出的内容就是面板登录密钥；自定义过安装目录时，请替换命令中的路径。"
     : "连接已有 Hindsight 时，请向服务管理员获取网页登录密钥。";
   $("scope-bank").value = scope?.bank || "";
-  $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : countDescription(summary.counts);
-  $("scope-recall-status").textContent = scope?.pending ? "" : recallDescription(summary.recall);
+  $("queue-summary").textContent = scope?.pending ? pendingScopeHelp(scope) : Object.keys(summary.counts || {}).length ? countDescription(summary.counts) : "";
+  $("queue-summary").hidden = !$("queue-summary").textContent;
+  $("scope-recall-status").textContent = scope?.pending || !summary.recall ? "" : recallDescription(summary.recall);
+  $("scope-recall-status").hidden = !$("scope-recall-status").textContent;
   $("maintenance-state").textContent = maintenanceDescription(summary, maintenanceState);
+  $("maintenance-state").hidden = !$("maintenance-state").textContent;
   renderBackground();
 }
 
@@ -572,15 +653,15 @@ function renderBackground() {
   select.replaceChildren(...options);
   select.value = backgroundDraft.page_id;
   $("background-enabled").checked = backgroundDraft.enabled;
-  let status = !saved.page_id ? "未选择知识页，聊天时不提供知识页参考。记忆检索按所选模式运行；准备步骤见右上角问号。"
-    : saved.enabled ? "聊天时使用所选知识页已开启。" : "聊天时使用所选知识页已关闭；已选知识页保留，仍可手动查看。";
+  let status = !saved.page_id ? "" : saved.enabled ? "聊天时使用所选知识页已开启。" : "聊天时使用已关闭。";
   if (unavailable) status = saved.error || "请连接当前机器人并确认授权后选择知识页。";
   else if (blocked) status = "保存和查询暂停或数据恢复检查期间不读取知识页；可以停止聊天时使用知识页。";
   else if (scope.mode === "paused" && saved.enabled) status = "已设置聊天时使用知识页，但「暂停保存和自动使用」模式生效，聊天时不提供知识页参考。";
   else if (saved.status?.message) status += ` ${saved.status.message}`;
   else if (saved.status?.used) status += " 最近一次聊天已提供所选知识页参考。内容是否过期尚未确认，请在官方面板核对。";
-  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "这个记忆库还没有知识页。聊天和记忆检索仍按所选记忆模式运行；想使用知识页，请按右上角说明在官方面板创建，再重新获取列表。";
+  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "此记忆库还没有知识页；请按问号中的步骤创建，再获取列表。";
   $("background-status").textContent = status;
+  $("background-status").hidden = !status;
 }
 
 async function loadBackground() {
@@ -645,6 +726,7 @@ function selectScope(id) {
   $("scope-picker").value = id;
   modeDirty = false;
   maintenanceState = null;
+  maintenanceIdentity = "";
   $("discard-pending").checked = false;
   renderScope();
   void readMaintenanceStatus();
@@ -883,12 +965,9 @@ async function prepareInstallation(button) {
 $("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
 $("reinstall").addEventListener("click", () => void prepareInstallation($("reinstall")));
 $("go-upgrade").addEventListener("click", () => {
-  if (!data?.config.managed) {
-    notify("外部 Hindsight 服务请由管理员按备份与恢复指南完成停写、备份与升级；插件不操作外部服务。");
-    return;
-  }
   activateTab("setup", true);
-  $("service-upgrade").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!data?.config.managed) $("external-upgrade").open = true;
+  $(data?.config.managed ? "service-upgrade" : "external-upgrade").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 $("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", async () => {
   const revision = bootstrapReadRevision;
@@ -998,9 +1077,10 @@ async function reloadSettings() {
 }
 $("reload-settings").addEventListener("click", () => void perform($("reload-settings"), "setup", reloadSettings));
 $("go-setup").addEventListener("click", () => activateTab("setup", true));
+$("service-alert-setup").addEventListener("click", () => activateTab("setup", true));
 $("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = true; clearTimeout(feedbackTimer); });
 $("scope-picker").addEventListener("change", () => selectScope($("scope-picker").value));
-$("scope-mode").addEventListener("change", () => { modeDirty = true; $("mode-help").textContent = modeHelp[$("scope-mode").value]; });
+$("scope-mode").addEventListener("change", () => { modeDirty = true; });
 $("save-mode").addEventListener("click", () => void perform($("save-mode"), "memory", async () => {
   const mode = $("scope-mode").value;
   if (!modeLabels[mode]) throw new Error("请选择记忆模式。");
@@ -1015,16 +1095,18 @@ $("retry").addEventListener("click", () => void perform($("retry"), "memory", as
   notify(response.message || "已提交重试，处理结果会自动更新。");
 }));
 async function maintenanceAction(button, action, extra = {}) {
+  if (action === "maintenance_status") {
+    await readMaintenanceStatus();
+    return;
+  }
   await perform(button, "memory", async () => {
-    const revision = ++maintenanceReadRevision;
     const id = scopeId;
     maintenanceState = null;
+    maintenanceCheckedAt = 0;
     renderScope();
     let response;
     try {
-      response = action === "maintenance_status"
-        ? await withTimeout(bridge.apiGet(endpoint("action", id), { action }), 15000, "获取暂停进度超时，请稍后检查暂停进度。")
-        : await bridge.apiPost(endpoint("action", id), {
+      response = await bridge.apiPost(endpoint("action", id), {
           action, ...extra, ...(action === "maintenance_begin" ? { config_revision: settingsRevision } : {}),
         });
     } catch (error) {
@@ -1037,17 +1119,15 @@ async function maintenanceAction(button, action, extra = {}) {
       clearUpgrade();
       settingsRevision = response.config_revision;
     }
-    await refreshBootstrap({ pollMaintenance: action !== "maintenance_status" });
-    if (revision === maintenanceReadRevision && scopeId === id && action === "maintenance_status") {
-      maintenanceState = response.maintenance;
-      renderScope();
-    }
+    await refreshBootstrap();
     if (action === "maintenance_begin") $("discard-pending").checked = false;
-    notify(response.message || maintenanceDescription(data.scopes.find((item) => item.scope_id === id)?.summary, maintenanceState));
+    notify(action === "maintenance_begin" ? "已暂停保存和查询。" : response.message || "已恢复原记忆模式。");
   });
 }
-$("maintenance-begin").addEventListener("click", () => void maintenanceAction($("maintenance-begin"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
-$("maintenance-status").addEventListener("click", () => void maintenanceAction($("maintenance-status"), "maintenance_status"));
+$("maintenance-begin").addEventListener("click", () => void maintenanceAction($("maintenance-begin"), "maintenance_begin", { discard_pending: false }));
+$("maintenance-retry").addEventListener("click", () => void readMaintenanceStatus());
+$("discard-pending").addEventListener("change", () => { $("maintenance-discard").disabled = !$("discard-pending").checked; });
+$("maintenance-discard").addEventListener("click", () => void maintenanceAction($("maintenance-discard"), "maintenance_begin", { discard_pending: $("discard-pending").checked }));
 $("maintenance-resume").addEventListener("click", () => void maintenanceAction($("maintenance-resume"), "maintenance_resume"));
 $("background-load").addEventListener("click", () => void loadBackground());
 $("background-save").addEventListener("click", () => void saveBackground());
@@ -1171,7 +1251,10 @@ async function start() {
 }
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
-  if (!document.hidden) scheduleRefresh(0);
+  if (!document.hidden) {
+    if (data) renderScope();
+    scheduleRefresh(0);
+  }
 });
-window.addEventListener("beforeunload", () => { clearTimeout(refreshTimer); offContext?.(); }, { once: true });
+window.addEventListener("beforeunload", () => { clearTimeout(refreshTimer); clearTimeout(maintenanceExpiryTimer); offContext?.(); }, { once: true });
 void start();

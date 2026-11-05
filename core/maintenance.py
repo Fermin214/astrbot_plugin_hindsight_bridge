@@ -46,13 +46,7 @@ class Maintenance:
                 (queue.connection_id, scope["bank"]),
             ).fetchall()
             for row in rows:
-                if row["id"] in queue.in_flight:
-                    continue
-                request = queue.control.request(row["operation_id"])
-                sent = bool(request and request["dispatched"])
-                if (not sent and not row["accepted"]) or (
-                    row["state"] == "failed" and row["accepted"]
-                ):
+                if queue.can_discard(row):
                     queue.control.record_request(row, scope["owner_id"], cancel=True)
                     queue.update(row["id"], "discarded", retry_requested=0)
         return queue.control.maintenance(queue.connection_id, scope["bank"])

@@ -64,7 +64,8 @@ class Managed(Acceptance):
                 await self.bot.connect()
                 core = ROOT / "verification/data/cmd_config.json"
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
-                await self.install("baseline-install.zip" if self.settings.get("upgrade_from_1_1") else "candidate-install.zip")
+                await self.install("panel-baseline.zip" if self.settings.get("panel_baseline_ref") else
+                                   "baseline-install.zip" if self.settings.get("upgrade_from_1_1") else "candidate-install.zip")
                 directory = self.runtime.parent
                 directory.mkdir(parents=True, exist_ok=True)
                 # Use a free CP host port, leaving all installer code/materials unmodified.
@@ -142,6 +143,9 @@ class Managed(Acceptance):
                 )
                 await self.drained()
                 self.passed("managed_service_real_embedding_rerank_retain_new_conversation_recall_and_reply")
+                if self.settings.get("panel_baseline_ref"):
+                    from panel_e2e import verify_panel
+                    await verify_panel(self, page, context, frame, scope)
                 if self.settings.get("upgrade_from_1_1"):
                     await self.install("candidate-upgrade.zip")
                     await page.reload()
@@ -169,6 +173,7 @@ class Managed(Acceptance):
                     await page.reload()
                     await self.dismiss_host_notice(page)
                     await frame.locator("#startup").wait_for(state="hidden", timeout=60000)
+                    await frame.locator("#tab-setup").click()
                     await frame.locator("#go-upgrade").click()
                     async def maintenance_ready():
                         for row in (await self.bootstrap())["scopes"]:
@@ -189,7 +194,10 @@ class Managed(Acceptance):
                         control.execute("CREATE TRIGGER e2e_pause_failure BEFORE UPDATE OF discard_pending ON maintenance "
                                         "BEGIN SELECT RAISE(ABORT,'injected pause write failure'); END")
                     try:
-                        await frame.locator("#maintenance-begin").click()
+                        try:
+                            await self.action(carol["scope_id"], "maintenance_begin", config_revision=stale_revision)
+                        except RuntimeError:
+                            pass
                         await frame.locator("#settings-conflict").wait_for(state="visible", timeout=30000)
                         await until(lambda: frame.locator("#maintenance-begin").is_enabled(), timeout=30)
                     finally:
@@ -205,7 +213,8 @@ class Managed(Acceptance):
                         pass
                     else:
                         raise AssertionError("A stale page revision was accepted after reloading settings")
-                    await frame.locator("#maintenance-begin").click()
+                    await self.action(carol["scope_id"], "maintenance_begin",
+                                      config_revision=(await self.bootstrap())["config_revision"])
                     async def personal_pause():
                         return carol["bank"] not in {
                             row["bank"] for row in json.loads((directory / "setup.json").read_text())["upgrade_pauses"]["banks"]

@@ -171,12 +171,38 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.queue.get(pending.task_id)["last_error"],
                          "maintenance_unknown_operation")
         self.assertFalse((await self.worker.maintenance.status(pending.scope_id))["ready"])
+        self.assertFalse(self.queue.summary(pending.scope_id)["can_discard"])
         self.assertEqual(len(self.service.submissions), 1)
         erasure = self.queue.forget(pending.scope_id)
         self.assertTrue(await self.worker.maintenance.check(force=True))
         self.queue.set_mode(pending.scope_id, "active", now=math.floor(time.time()))
         self.assertNotEqual(self.queue.scope(self.source)["bank"], pending.bank)
         self.assertNotIn(erasure["old_bank"], self.service.banks)
+
+    async def test_pause_before_dispatch_keeps_reconciliation_record_discardable(self):
+        pending = self.enqueue()
+        original = self.client.bank_exists
+
+        async def pause_after_bank_check(bank):
+            exists = await original(bank)
+            self.worker.maintenance.begin(pending.scope_id)
+            return exists
+
+        with patch.object(self.client, "bank_exists", side_effect=pause_after_bank_check):
+            await self.step()
+        row = self.queue.get(pending.task_id)
+        self.assertEqual(row["state"], "unknown")
+        self.assertFalse(row["accepted"])
+        self.assertIsNone(self.queue.control.request(row["operation_id"]))
+        self.assertTrue(self.queue.summary(pending.scope_id)["can_discard"])
+        await self.step()
+        self.assertEqual(self.queue.get(pending.task_id)["state"], "reconcile_required")
+        self.assertTrue(self.queue.summary(pending.scope_id)["can_discard"])
+        self.assertFalse((await self.worker.maintenance.status(pending.scope_id))["ready"])
+        self.worker.maintenance.begin(pending.scope_id, discard_pending=True)
+        self.assertEqual(self.queue.get(pending.task_id)["state"], "discarded")
+        self.assertFalse(self.queue.summary(pending.scope_id)["can_discard"])
+        self.assertTrue((await self.worker.maintenance.status(pending.scope_id))["ready"])
 
     async def test_lost_acceptance_reply_is_tracked_without_replaying(self):
         first = self.enqueue()

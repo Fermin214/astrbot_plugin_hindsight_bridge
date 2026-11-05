@@ -29,31 +29,41 @@ function harness() {
     };
   }
   const context = vm.createContext({
-    console, Promise, Date, Error, setTimeout: (callback) => setTimeout(callback, 5), clearTimeout,
+    console, Promise, Date, Error,
+    setTimeout: (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 5),
+    clearTimeout: (timer) => { if (timer?.callback) timer.cancelled = true; else clearTimeout(timer); },
+    expiryTimers: [],
+    expiryTimer(callback, milliseconds) {
+      const timer = { callback, milliseconds, cancelled: false };
+      this.expiryTimers.push(timer);
+      return timer;
+    },
     $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     el: (tag, kind, content) => Object.assign(node(), { textContent: content, className: kind || "" }),
     window: { AstrBotPluginView: null, location: { reload() { context.reloads++; } } },
     document: { documentElement: { dataset: {} }, querySelector: () => ({ value: "existing" }) },
     data: null, bridge: null, startRunning: false, viewReady: false, offContext: undefined, reloads: 0,
     locks: new Set(), scopeId: "", modeDirty: false, maintenanceState: null,
+    maintenanceIdentity: "", maintenanceCheckedAt: 0,
+    maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "",
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     backgroundReadRevision: 0, backgroundDraft: null,
     renderBackground() {},
     renderServiceVersion() {},
     clearUpgrade() {},
-    modelWatch: null, feedbackTimer: null, modeHelp: { active: "读取并保存" },
+    modelWatch: null, feedbackTimer: null,
     hydrateConfig() {}, providerSelect() {}, refreshAccountPlatforms() {}, updateProviderHelp() {},
     readMaintenanceStatus: async () => {},
     option: (value, label, disabled = false) => Object.assign(node(), { value, textContent: label, disabled }),
-    activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "正常记忆" },
+    activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "保存并自动使用记忆", readonly: "只自动使用已有记忆", paused: "暂停保存和自动使用" },
     scopeName: () => "user", countDescription: () => "queue", maintenanceDescription: () => "maintenance",
     refreshBootstrap: async () => {
       context.data = { config: { configured: true } };
       context.$("startup").hidden = true;
     },
   });
-  for (const name of ["withTimeout", "errorMessage", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode"]) {
+  for (const name of ["withTimeout", "errorMessage", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode"]) {
     vm.runInContext(declaration(name), context);
   }
   return context;
@@ -170,14 +180,16 @@ test("historical scope disables modes and retry while preserving maintenance and
   vm.runInContext(declaration("text"), context);
   vm.runInContext(declaration("renderScope"), context);
   context.data = { config: {}, scopes: [{
-    scope_id: "old", historical: true, mode: "paused", bank: "old-bank",
+    scope_id: "old", historical: true, bot_id: "990001", mode: "paused", bank: "old-bank",
     summary: { counts: {}, maintenance: null },
   }] };
   context.scopeId = "old";
   context.renderScope();
   for (const id of ["scope-mode", "save-mode", "retry"]) assert.equal(context.$(id).disabled, true);
   for (const id of ["maintenance-begin", "forget"]) assert.equal(context.$(id).disabled, false);
-  assert.match(context.$("mode-help").textContent, /历史范围/);
+  assert.equal(context.$("scope-mode-field").hidden, true);
+  assert.equal(context.$("save-mode").hidden, true);
+  assert.match(context.$("historical-mode").textContent, /990001.*暂停保存和自动使用/);
 });
 
 function installBootstrapChain(context) {
@@ -188,9 +200,10 @@ function installBootstrapChain(context) {
 
 function maintenanceBootstrap() {
   return {
-    config: { configured: true, managed: false }, platforms: [], providers: {},
+    config: { configured: true, managed: false, connection_revision: "connection-1" }, platforms: [], providers: {},
     status: { connected: true }, scopes: [{
-      scope_id: "one", mode: "active", bank: "bank", summary: { counts: {}, maintenance: {} },
+      scope_id: "one", mode: "active", bank: "bank", owner_id: "owner-1", generation: 1, revision: 2,
+      summary: { counts: {}, maintenance: { connection_id: "service-1", started_at: 123 } },
     }],
   };
 }
@@ -306,7 +319,7 @@ test("partial first-screen hydration still offers a full frame reload", async ()
 test("switching A to B to A discards old success after a newer read fails", async () => {
   const context = harness();
   installBootstrapChain(context);
-  context.setTimeout = (callback) => setTimeout(callback, 1000);
+  context.setTimeout = (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 1000);
   context.data = maintenanceBootstrap();
   context.data.scopes.push({ scope_id: "two", mode: "active", summary: { counts: {} } });
   context.scopeId = "one";
@@ -330,7 +343,7 @@ test("switching A to B to A discards old success after a newer read fails", asyn
 test("starting a maintenance action invalidates an outstanding status read", async () => {
   const context = harness();
   installBootstrapChain(context);
-  context.setTimeout = (callback) => setTimeout(callback, 1000);
+  context.setTimeout = (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 1000);
   context.data = maintenanceBootstrap();
   context.scopeId = "one";
   let resolveOld, rejectAction;
@@ -356,10 +369,144 @@ test("manual maintenance status also times out and releases its controls", async
   context.data = maintenanceBootstrap();
   context.scopeId = "one";
   context.bridge = { apiGet: () => new Promise(() => {}) };
-  await context.maintenanceAction(context.$("maintenance-status"), "maintenance_status");
+  await context.maintenanceAction(context.$("maintenance-retry"), "maintenance_status");
   assert.equal(context.$("memory-fields").disabled, false);
   assert.equal(context.$("maintenance-resume").disabled, true);
-  assert.match(context.$("feedback-message").textContent, /获取暂停进度超时/);
+  assert.match(context.$("maintenance-state").textContent, /获取暂停进度超时/);
+  assert.equal(context.$("maintenance-retry").hidden, false);
+});
+
+test("same-scope polling retains confirmed ready until an actual failure, tasks or expiry", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  context.setTimeout = (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 1000);
+  context.data = maintenanceBootstrap();
+  context.scopeId = "one";
+  context.bridge = { apiGet: async () => ({ maintenance: { ready: true, phase: "ready" } }) };
+  await context.readMaintenanceStatus();
+  let finish;
+  context.bridge.apiGet = (path) => path === "bootstrap" ? Promise.resolve(maintenanceBootstrap())
+    : new Promise((resolve) => { finish = resolve; });
+  const poll = context.refreshBootstrap({ automatic: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(context.$("maintenance-resume").disabled, false);
+  assert.equal(context.$("maintenance-state").textContent, "可以修改记忆");
+  finish({ maintenance: { ready: false, phase: "draining", remote_active: 2 } });
+  await poll;
+  assert.equal(context.$("maintenance-resume").disabled, true);
+  assert.match(context.$("maintenance-state").textContent, /2 个任务/);
+  context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
+  await context.readMaintenanceStatus();
+  context.bridge.apiGet = async () => { throw new Error("connection refused"); };
+  await context.readMaintenanceStatus();
+  assert.equal(context.$("maintenance-resume").disabled, true);
+  assert.match(context.$("maintenance-state").textContent, /connection refused/);
+  context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
+  await context.readMaintenanceStatus();
+  context.bridge.apiGet = async () => ({ maintenance: {
+    ready: true, phase: "ready", bank: "bank", connection_id: "service-1", started_at: 999,
+  } });
+  await context.readMaintenanceStatus();
+  assert.equal(context.$("maintenance-resume").disabled, true);
+  assert.match(context.$("maintenance-state").textContent, /暂停范围已变化/);
+  context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
+  await context.readMaintenanceStatus();
+  context.maintenanceCheckedAt -= 30001;
+  context.renderScope();
+  assert.equal(context.$("maintenance-resume").disabled, true);
+  assert.match(context.$("maintenance-state").textContent, /过期/);
+  context.bridge.apiGet = async () => ({ maintenance: { ready: true, phase: "ready" } });
+  await context.readMaintenanceStatus();
+  context.bridge.apiGet = async () => ({});
+  await assert.rejects(context.refreshBootstrap({ automatic: true }), /设置数据不完整/);
+  assert.equal(context.$("maintenance-resume").disabled, true);
+});
+
+test("confirmed maintenance is bound to owner generation bank connection and pause boundary", async () => {
+  const mutations = [
+    (state) => { state.scopes[0].owner_id = "other-owner"; },
+    (state) => { state.scopes[0].generation++; },
+    (state) => { state.scopes[0].revision++; },
+    (state) => { state.scopes[0].bank = "other-bank"; },
+    (state) => { state.config.connection_revision = "other-key"; },
+    (state) => { state.scopes[0].summary.maintenance.started_at++; },
+    (state) => { state.scopes[0].summary.bank_missing = true; },
+    (state) => { state.scopes[0].summary.maintenance = null; },
+  ];
+  for (const mutate of mutations) {
+    const context = harness();
+    installBootstrapChain(context);
+    context.data = maintenanceBootstrap();
+    context.scopeId = "one";
+    context.bridge = { apiGet: async () => ({ maintenance: { ready: true, phase: "ready" } }) };
+    await context.readMaintenanceStatus();
+    assert.equal(context.$("maintenance-resume").disabled, false);
+    mutate(context.data);
+    context.renderScope();
+    assert.equal(context.$("maintenance-resume").disabled, true);
+    assert.equal(context.maintenanceState, null);
+  }
+  const context = harness();
+  installBootstrapChain(context);
+  context.data = maintenanceBootstrap();
+  context.scopeId = "one";
+  context.bridge = { apiGet: async () => ({ maintenance: { ready: true, phase: "ready" } }) };
+  await context.readMaintenanceStatus();
+  context.data.config_revision = "unrelated-settings";
+  context.data.scopes.push({ scope_id: "other", revision: 90, summary: {} });
+  context.renderScope();
+  assert.equal(context.$("maintenance-resume").disabled, false);
+});
+
+test("ready expires without polling under setup locks and old timers cannot expire new results", async () => {
+  const context = harness();
+  installBootstrapChain(context);
+  context.data = maintenanceBootstrap();
+  context.scopeId = "one";
+  context.bridge = { apiGet: async () => ({ maintenance: { ready: true, phase: "ready" } }) };
+  await context.readMaintenanceStatus();
+  const first = context.expiryTimers.at(-1);
+  assert.ok(first.milliseconds > 29000 && first.milliseconds <= 30000);
+  context.locks.add("setup");
+  first.callback();
+  assert.equal(context.$("maintenance-resume").disabled, true);
+  assert.match(context.$("maintenance-state").textContent, /过期/);
+  await context.readMaintenanceStatus();
+  const second = context.expiryTimers.at(-1);
+  first.callback();
+  assert.equal(context.$("maintenance-resume").disabled, false);
+  context.data.scopes[0].summary.maintenance.started_at++;
+  await context.readMaintenanceStatus();
+  second.callback();
+  assert.equal(context.$("maintenance-resume").disabled, false);
+  context.selectScope("");
+  context.expiryTimers.at(-1).callback();
+  assert.equal(context.maintenanceState, null);
+});
+
+test("discard visibility uses backend capability and ordinary pause never discards", () => {
+  const context = harness();
+  installBootstrapChain(context);
+  context.data = maintenanceBootstrap();
+  context.scopeId = "one";
+  const summary = context.data.scopes[0].summary;
+  summary.counts = { reconcile_required: 1 };
+  summary.can_discard = true;
+  context.renderScope();
+  assert.equal(context.$("discard-records").hidden, false);
+  summary.can_discard = false;
+  summary.counts = { unknown: 1 };
+  context.renderScope();
+  assert.equal(context.$("discard-records").hidden, true);
+  const calls = [];
+  context.maintenanceAction = (button, action, extra) => { calls.push(extra.discard_pending); };
+  for (const id of ["maintenance-begin", "maintenance-discard"]) {
+    vm.runInContext(source.split("\n").find((line) => line.startsWith(`$("${id}").addEventListener`)), context);
+  }
+  context.$("discard-pending").checked = true;
+  context.$("maintenance-begin").listeners.click();
+  context.$("maintenance-discard").listeners.click();
+  assert.deepEqual(calls, [false, true]);
 });
 
 test("a late bootstrap response cannot hydrate the page after timeout", async () => {

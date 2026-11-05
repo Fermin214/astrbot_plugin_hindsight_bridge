@@ -1039,6 +1039,15 @@ class Outbox:
             )
         return cursor.rowcount
 
+    def can_discard(self, row) -> bool:
+        if row["id"] in self.in_flight or row["state"] in {"done", "discarded"}:
+            return False
+        request = self.control.request(row["operation_id"])
+        sent = bool(request and request["dispatched"])
+        return (not sent and not row["accepted"]) or (
+            row["state"] == "failed" and bool(row["accepted"])
+        )
+
     def summary(self, scope_id: str) -> dict:
         scope = self.scope_owner(scope_id)
         rows = self.db.execute(
@@ -1072,6 +1081,11 @@ class Outbox:
             "tasks": [{"id": r["id"], "state": r["state"]} for r in tasks],
             "maintenance": self.control.maintenance(self.connection_id, scope["bank"]),
             "bank_missing": self.control.bank_state(self.connection_id, scope["bank"]) == "missing",
+            "can_discard": any(self.can_discard(row) for row in self.db.execute(
+                "SELECT id,operation_id,state,accepted FROM outbox "
+                "WHERE connection_id=? AND bank=? AND state NOT IN ('done','discarded')",
+                (self.connection_id, scope["bank"]),
+            )),
         }
 
     def scope_owner(self, scope_id):

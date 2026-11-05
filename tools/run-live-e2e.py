@@ -181,7 +181,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 elif body["action"] == "extraction_status":
                     self.reply(200, json.dumps({"held": self.server.extraction_held}).encode())
                     return
-                elif body["action"] in {"managed_install", "managed_reinstall", "managed_upgrade", "managed_uninstall"}:
+                elif body["action"] in {"managed_install", "managed_reinstall", "managed_upgrade", "managed_uninstall",
+                                       "managed_pause", "managed_unpause"}:
                     state.managed_control(body["action"])
                 elif body["action"] in {"stop_hindsight", "start_hindsight", "restart_hindsight", "rrf_hindsight", "restart_astrbot", "stop_astrbot", "start_astrbot"}:
                     state.control(body["action"])

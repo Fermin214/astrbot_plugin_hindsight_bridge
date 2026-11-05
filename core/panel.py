@@ -516,6 +516,7 @@ class MemoryPanel:
                 "pending_reason": scope.get("pending_reason", ""),
                 "historical": scope.get("historical", False),
                 "bot_id": Scope(*json.loads(scope["identity_json"])).bot_id if scope.get("identity_json") else "",
+                **{key: scope.get(key) for key in ("owner_id", "generation", "revision")},
                 "summary": summary,
             })
             if queue and not scope.get("pending"):
@@ -662,6 +663,11 @@ class MemoryPanel:
                     or (state.get("control_plane_url", "") if not configured else "")
                 ),
                 "has_api_key": bool(config.get("api_key") or state.get("api_key")),
+                "connection_revision": sha256(json.dumps([
+                    config.get(key, "") for key in (
+                        "api_url", "api_key", "service_id", "service_address_revision",
+                    )
+                ])),
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": bool(state.get("id")) and (
                     not config.get("api_url")
