@@ -69,6 +69,7 @@ class OneBot:
 
     def __init__(self, session, settings):
         self.session, self.settings = session, settings
+        self.bot_id = settings.get("bot_id", BOT)
         self.socket = None
         self.reader = None
         self.actions = []
@@ -81,14 +82,14 @@ class OneBot:
             try:
                 self.socket = await self.session.ws_connect(
                     f'http://127.0.0.1:{self.settings["onebot_port"]}/ws',
-                    headers={"X-Self-ID": str(BOT), "X-Client-Role": "Universal",
+                    headers={"X-Self-ID": str(self.bot_id), "X-Client-Role": "Universal",
                              "Authorization": "Bearer " + self.settings["onebot_token"]})
                 return True
             except (aiohttp.ClientError, OSError):
                 return False
         await until(attempt, timeout=30, label="OneBot connection")
         self.reader = asyncio.create_task(self.read())
-        await self.socket.send_json({"time": int(time.time()), "self_id": BOT, "post_type": "meta_event",
+        await self.socket.send_json({"time": int(time.time()), "self_id": self.bot_id, "post_type": "meta_event",
                                      "meta_event_type": "lifecycle", "sub_type": "connect"})
 
     async def read(self):
@@ -100,7 +101,7 @@ class OneBot:
             self.actions.append(body)
             result = {}
             if action == "get_login_info":
-                result = {"user_id": BOT, "nickname": "Delivery bot"}
+                result = {"user_id": self.bot_id, "nickname": "Delivery bot"}
             elif action == "get_status":
                 result = {"online": True, "good": True}
             elif action in {"send_msg", "send_private_msg", "send_group_msg", "send_private_forward_msg", "send_group_forward_msg"}:
@@ -128,7 +129,7 @@ class OneBot:
         while not self.replies.empty():
             self.replies.get_nowait()
         event = {
-            "time": int(time.time()), "self_id": BOT, "post_type": "message", "message_type": "group" if group else "private",
+            "time": int(time.time()), "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
             "sub_type": "normal" if group else "friend", "user_id": user,
             "message_id": message_id or self.message_id, "message": [{"type": "text", "data": {"text": text}}],
             "raw_message": text, "font": 0, "sender": {"user_id": user, "nickname": "Synthetic user", "role": "member"},

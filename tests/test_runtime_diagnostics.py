@@ -93,6 +93,7 @@ def bridge_class(directory, logger):
         StarTools=SimpleNamespace(get_data_dir=lambda name: directory / (
             "control" if name.endswith("_control") else "runtime"
         )),
+        get_astrbot_data_path=lambda: str(directory),
     )
     exec(compile(ast.Module(body=[bridge], type_ignores=[]), str(source), "exec"), namespace)
     return namespace["HindsightBridge"]
@@ -390,6 +391,14 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.plugin.client)
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+
+    async def test_default_control_allocation_is_independent_of_business_directory_alias(self):
+        root = self.plugin.control_directory()
+        namespace = self.plugin.control_root.__func__.__globals__
+        with patch.dict(namespace, StarTools=SimpleNamespace(
+            get_data_dir=lambda name: self.directory / "external-business",
+        )):
+            self.assertEqual(self.plugin.control_directory(), root)
 
     async def test_control_file_links_cannot_write_outside_the_allocated_root(self):
         await self.plugin._close_resources()

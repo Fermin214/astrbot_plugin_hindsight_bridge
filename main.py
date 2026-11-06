@@ -16,6 +16,7 @@ from astrbot.api.message_components import File, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
 from .core.background import ReadGuard, compose_background, reference
@@ -205,7 +206,7 @@ class HindsightBridge(Star):
     def control_root(self):
         # Derive the allocation before resolving links, so a redirected root is rejected.
         return (
-            Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")).parent
+            (Path(get_astrbot_data_path()) / "plugin_data").resolve()
             / "astrbot_plugin_hindsight_bridge_control"
         )
 

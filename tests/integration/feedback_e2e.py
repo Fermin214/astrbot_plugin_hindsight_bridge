@@ -27,6 +27,9 @@ class Feedback(Acceptance):
         if self.settings.get("view_only"):
             self.report["acceptance_scope"] = "native Dashboard responsive layout and invalidated selection"
             self.report["not_covered"].append("chat feedback and business snapshot recovery")
+        if self.settings.get("recovery_only"):
+            self.report["acceptance_scope"] = "native erasure and business snapshot recovery"
+            self.report["not_covered"].append("chat feedback and responsive layout")
 
     async def layout(self, page, frame):
         await page.set_viewport_size({"width": 390, "height": 844})
@@ -43,6 +46,30 @@ class Feedback(Acceptance):
             })""")
             await page.screenshot(path=str(ROOT / "feedback-phone.png"), full_page=True)
         self.passed("native_phone_layout_has_no_horizontal_overflow_with_invalidated_selection")
+
+    async def switch_bot(self, frame, old_scope, old_page):
+        old_bot = self.bot.bot_id
+        await self.bot.close()
+        self.bot = OneBot(self.session, {**self.settings, "bot_id": old_bot + 1})
+        await self.bot.connect()
+        await self.bot.chat(ALICE, "/hindsight status")
+        await self.confirm(ALICE)
+        current = await self.scope()
+        assert current["bot_id"] == str(old_bot + 1) and current["bank"] != old_scope["bank"]
+        selection = current["background"]
+        assert selection["revision"] == 0 and selection["invalidated"] and not selection["page_id"]
+        assert not selection["mental_model_id"]
+        await frame.locator("#bank-picker option[value='" + current["scope_id"] + "']").wait_for(state="attached", timeout=15000)
+        await frame.locator("#bank-picker").select_option(current["scope_id"])
+        await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
+        assert await frame.locator("#background-page").input_value() == ""
+        retained = await self.native("GET", old_scope["bank"] + "/knowledge-base/pages/" + old_page)
+        assert retained["id"] == old_page
+        self.report["measurements"]["bot_switch"] = {
+            "old_bot": old_bot, "new_bot": self.bot.bot_id, "old_bank": old_scope["bank"],
+            "new_bank": current["bank"], "selection_revision": selection["revision"], "old_page_retained": True,
+        }
+        self.passed("native_new_bot_login_creates_revision_zero_scope_with_notice_without_copying_old_reference")
 
     async def native(self, method, path, body=None):
         async with self.session.request(method, self.settings["hindsight_url"] + "/v1/default/banks/" + path,
@@ -175,12 +202,23 @@ class Feedback(Acceptance):
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 if self.settings.get("view_only"):
-                    await self.confirm(ALICE)
-                    await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
+                    await self.switch_bot(frame, scope, short)
                     await self.layout(page, frame)
                     self.report["complete"] = True
                     self.save()
                     return
+                if self.settings.get("recovery_only"):
+                    before_alias = await self.scope()
+                    business = self.runtime.parent
+                    def move_business():
+                        destination = ROOT / "business-volume"
+                        business.rename(destination)
+                        business.symlink_to(destination, target_is_directory=True)
+                    await self.restart(move_business)
+                    after_alias = await self.scope()
+                    assert after_alias["bank"] == before_alias["bank"]
+                    assert after_alias["background"]["page_id"] == before_alias["background"]["page_id"]
+                    self.passed("native_business_directory_alias_preserves_default_control_allocation_and_bank")
 
                 async def chat_status(expected, used):
                     before = (await self.scope())["background"].get("status", {}).get("checked_at", 0)
@@ -198,33 +236,34 @@ class Feedback(Acceptance):
                     await frame.locator("#scope-picker").select_option(json.dumps(["delivery-onebot", str(ALICE)], separators=(",", ":")))
                     await frame.locator("#background-status").filter(has_text=expected).wait_for(timeout=15000)
 
-                await chat_status("上次聊天已使用知识页", True)
-                long = await self.page(bank, "HB-FEEDBACK-LONG")
-                await self.select(long)
-                await chat_status("知识页太长", False)
-                empty, empty_operation = await self.page(bank, "HB-FEEDBACK-EMPTY", wait=False)
-                await self.select(empty)
-                await chat_status("知识页还没有正文", False)
-                await self.completed(bank, empty_operation)
-                await self.select(short)
-                await self.control("delay_background", seconds=2)
-                try:
-                    await chat_status("读取知识页超时", False)
-                finally:
-                    await self.control("delay_background", seconds=0)
-                await self.native("DELETE", bank + "/knowledge-base/nodes/" + short)
-                await chat_status("找不到所选知识页", False)
-                self.passed("real_page_success_size_empty_missing_and_delayed_reads_remain_visible_after_index_polling_and_user_switch")
+                if not self.settings.get("recovery_only"):
+                    await chat_status("上次聊天已使用知识页", True)
+                    long = await self.page(bank, "HB-FEEDBACK-LONG")
+                    await self.select(long)
+                    await chat_status("知识页太长", False)
+                    empty, empty_operation = await self.page(bank, "HB-FEEDBACK-EMPTY", wait=False)
+                    await self.select(empty)
+                    await chat_status("知识页还没有正文", False)
+                    await self.completed(bank, empty_operation)
+                    await self.select(short)
+                    await self.control("delay_background", seconds=2)
+                    try:
+                        await chat_status("读取知识页超时", False)
+                    finally:
+                        await self.control("delay_background", seconds=0)
+                    await self.native("DELETE", bank + "/knowledge-base/nodes/" + short)
+                    await chat_status("找不到所选知识页", False)
+                    self.passed("real_page_success_size_empty_missing_and_delayed_reads_remain_visible_after_index_polling_and_user_switch")
 
-                await self.confirm(ALICE)
-                async def invalidated():
-                    return "选择已失效" in await frame.locator("#background-status").inner_text()
-                await until(invalidated, timeout=15)
-                assert (await self.scope())["background"]["invalidated"]
-                assert await frame.locator("#background-page").input_value() == ""
-                await self.select(long)
-                assert not (await self.scope())["background"].get("invalidated")
-                self.passed("identity_reconfirmation_invalidates_reference_and_explicit_reselection_clears_notice")
+                    await self.confirm(ALICE)
+                    async def invalidated():
+                        return "选择已失效" in await frame.locator("#background-status").inner_text()
+                    await until(invalidated, timeout=15)
+                    assert (await self.scope())["background"]["invalidated"]
+                    assert await frame.locator("#background-page").input_value() == ""
+                    await self.select(long)
+                    assert not (await self.scope())["background"].get("invalidated")
+                    self.passed("identity_reconfirmation_invalidates_reference_and_explicit_reselection_clears_notice")
 
                 snapshot = ROOT / "pre-forget.sqlite3"
                 with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
@@ -246,13 +285,21 @@ class Feedback(Acceptance):
                 assert restored["bank"] == latest["bank"] and restored["generation"] == latest["generation"]
                 assert restored["background"]["invalidated"] and not restored["background"]["page_id"]
                 assert not (await self.memories(bank))["total"]
+                for absent_bank in (bank, restored["bank"]):
+                    async with self.session.get(
+                        self.settings["hindsight_url"] + "/v1/default/banks/" + absent_bank + "/config",
+                        headers={"Authorization": "Bearer " + self.settings["memory_key"]},
+                    ) as response:
+                        assert response.status == 404, (absent_bank, response.status)
+                self.report["measurements"]["bank_config_after_restore"] = {"retired": 404, "new": 404}
                 assert all(row["state"] == "discarded" for row in database(self.runtime, "SELECT state FROM outbox WHERE bank=?", (bank,)))
                 await page.reload()
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-                await until(invalidated, timeout=15)
+                await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
                 self.passed("forget_then_old_business_restore_preserves_latest_migrated_journal_and_cannot_revive_bank_or_page")
-                await self.layout(page, frame)
+                if not self.settings.get("recovery_only"):
+                    await self.layout(page, frame)
                 assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
                 self.report["complete"] = True
                 self.save()
