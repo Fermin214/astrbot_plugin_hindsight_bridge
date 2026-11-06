@@ -104,8 +104,9 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             outbox=None, permissions=None, permission_revision=0,
             panel=SimpleNamespace(closed=False), stopping=False, confirmations={},
             source_accounts={}, prepare_sources=AsyncMock(),
-            control_directory=lambda: root / "control", warning=Mock(),
+            control_directory=lambda: root / "control", control_root=lambda: root / "control", warning=Mock(),
             _close_resources=AsyncMock(), recall_outcomes={}, background_outcomes={}, monitor_connection=AsyncMock(),
+            background_sequences={},
         )
         for name in ("initialize", "refresh_permissions"):
             setattr(plugin, name, MethodType(namespace[name], plugin))
