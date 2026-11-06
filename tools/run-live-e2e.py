@@ -374,7 +374,7 @@ class Environment:
             self.start_hindsight(rrf=True)
         else:
             command = "restart" if action.startswith("restart") else "stop" if action.startswith("stop") else "start"
-            self.docker(command, *( ["-t", "90"] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
+            self.docker(command, *( ["-t", str(self.settings.get("stop_timeout", 90))] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
 
     def wait(self, predicate, timeout=240):
         deadline = time.monotonic() + timeout

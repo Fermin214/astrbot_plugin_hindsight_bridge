@@ -21,6 +21,28 @@ class Feedback(Acceptance):
             chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", rerank_model="rrf",
             not_covered=["real QQ login", "production model quality"],
         )
+        if self.settings.get("feedback_only"):
+            self.report["acceptance_scope"] = "native Dashboard page feedback, identity invalidation and snapshot recovery"
+            self.report["not_covered"].append("0.2.6 upgrade and external control migration")
+        if self.settings.get("view_only"):
+            self.report["acceptance_scope"] = "native Dashboard responsive layout and invalidated selection"
+            self.report["not_covered"].append("chat feedback and business snapshot recovery")
+
+    async def layout(self, page, frame):
+        await page.set_viewport_size({"width": 390, "height": 844})
+        async def fits():
+            return await frame.locator("body").evaluate("() => document.documentElement.scrollWidth <= window.innerWidth + 1")
+        try:
+            await until(fits, timeout=10)
+        finally:
+            self.report["measurements"]["phone_layout"] = await frame.locator("body").evaluate("""() => ({
+              viewport: innerWidth, width: document.documentElement.scrollWidth,
+              overflow: [...document.querySelectorAll('body *')].filter(el => {
+                const box = el.getBoundingClientRect(); return box.width && box.right > innerWidth + 1;
+              }).slice(0, 12).map(el => ({id: el.id, tag: el.tagName, right: el.getBoundingClientRect().right}))
+            })""")
+            await page.screenshot(path=str(ROOT / "feedback-phone.png"), full_page=True)
+        self.passed("native_phone_layout_has_no_horizontal_overflow_with_invalidated_selection")
 
     async def native(self, method, path, body=None):
         async with self.session.request(method, self.settings["hindsight_url"] + "/v1/default/banks/" + path,
@@ -36,7 +58,10 @@ class Feedback(Acceptance):
         await until(ready, timeout=90)
 
     async def scope(self, user=ALICE):
-        return next(row for row in (await self.bootstrap())["scopes"] if row["user_id"] == str(user) and not row["historical"])
+        async def ready():
+            return next((row for row in (await self.bootstrap())["scopes"]
+                         if row["user_id"] == str(user) and not row["historical"] and not row["pending"]), None)
+        return await until(ready, timeout=30)
 
     async def confirm(self, user):
         state = await self.bootstrap()
@@ -49,11 +74,13 @@ class Feedback(Acceptance):
             "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
         })
 
-    async def page(self, bank, query):
+    async def page(self, bank, query, *, wait=True):
         value = await self.native("POST", bank + "/knowledge-base/pages", {
             "name": query, "source_query": query, "max_tokens": 8192,
             "trigger": {"refresh_after_consolidation": False, "fact_types": ["world"]},
         })
+        if not wait:
+            return value["page_id"], value["operation_id"]
         await self.completed(bank, value["operation_id"])
         return value["page_id"]
 
@@ -73,6 +100,7 @@ class Feedback(Acceptance):
         await self.control("start_astrbot")
         self.bot = OneBot(self.session, self.settings)
         await self.bot.connect()
+        await self.bot.chat(ALICE, "/hindsight status")
         await self.usable()
 
     async def run(self):
@@ -96,10 +124,11 @@ class Feedback(Acceptance):
             try:
                 core = ROOT / "verification/data/cmd_config.json"
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
-                await self.install("baseline-install.zip")
+                full = not self.settings.get("feedback_only")
+                await self.install("baseline-install.zip" if full else "candidate-install.zip")
                 legacy = ROOT / "verification/legacy-control"
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
-                                  service_id=self.settings["owner"], control_state_dir=str(legacy), allowed_accounts=[
+                                  service_id=self.settings["owner"], control_state_dir=str(legacy) if full else "", allowed_accounts=[
                                       {"__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(user)}
                                       for user in (ALICE, BOB)
                                   ])
@@ -113,37 +142,45 @@ class Feedback(Acceptance):
                 bank, identifier = scope["bank"], scope["scope_id"]
                 short = await self.page(bank, "Short background")
                 await self.select(short)
-                settings = database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key")
-                mode = legacy.stat().st_mode
-                await self.install("candidate-upgrade.zip")
-                rejected = await self.bootstrap()
-                assert "control_directory_outside_plugin" in rejected["status"]["label"], rejected["status"]
-                assert database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key") == settings
-                assert legacy.stat().st_mode == mode
-                target = self.runtime.parent.parent / (NAME + "_control")
-                assert not (target / "control.sqlite3").exists()
-                self.passed("native_026_upgrade_rejects_external_path_without_replacement_journal_or_external_mutation")
+                if full:
+                    settings = database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key")
+                    mode = legacy.stat().st_mode
+                    await self.install("candidate-upgrade.zip")
+                    rejected = await self.bootstrap()
+                    assert "control_directory_outside_plugin" in rejected["status"]["label"], rejected["status"]
+                    assert database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key") == settings
+                    assert legacy.stat().st_mode == mode
+                    target = ROOT / "control-volume"
+                    assert not (target / "control.sqlite3").exists()
+                    self.passed("native_026_upgrade_rejects_external_path_without_replacement_journal_or_external_mutation")
 
-                config_file = ROOT / "verification/data/config" / (NAME + "_config.json")
-                def migrate():
-                    assert not list(target.iterdir())
-                    shutil.copytree(legacy, target, dirs_exist_ok=True)
-                    value = json.loads(config_file.read_text(encoding="utf-8-sig"))
-                    value["control_state_dir"] = ""
-                    config_file.write_text(json.dumps(value, indent=2))
-                await self.restart(migrate)
-                migrated = await self.scope()
-                assert migrated["bank"] == bank and migrated["mode"] == scope["mode"]
-                assert migrated["background"]["page_id"] == short and migrated["background"]["enabled"]
-                latest = dict((row["key"], row["value"]) for row in database(target / "control.sqlite3", "SELECT key,value FROM settings"))
-                original = dict((row["key"], row["value"]) for row in settings)
-                assert all(latest[key] == original[key] for key in ("deployment_id", "control_id", "revision"))
-                self.passed("stopped_full_control_copy_to_dedicated_mount_preserves_identity_revision_bank_mode_selection")
+                    config_file = ROOT / "verification/data/config" / (NAME + "_config.json")
+                    def migrate():
+                        assert not list(target.iterdir())
+                        shutil.copytree(legacy, target, dirs_exist_ok=True)
+                        value = json.loads(config_file.read_text(encoding="utf-8-sig"))
+                        value["control_state_dir"] = ""
+                        config_file.write_text(json.dumps(value, indent=2))
+                    await self.restart(migrate)
+                    migrated = await self.scope()
+                    assert migrated["bank"] == bank and migrated["mode"] == scope["mode"]
+                    assert migrated["background"]["page_id"] == short and migrated["background"]["enabled"]
+                    latest = dict((row["key"], row["value"]) for row in database(target / "control.sqlite3", "SELECT key,value FROM settings"))
+                    original = dict((row["key"], row["value"]) for row in settings)
+                    assert all(latest[key] == original[key] for key in ("deployment_id", "control_id", "revision"))
+                    self.passed("stopped_full_control_copy_to_dedicated_mount_preserves_identity_revision_bank_mode_selection")
                 await self.action(identifier, "mode", mode="readonly")
                 await page.goto(self.dashboard + "/#/plugin-view/" + NAME + "/memory")
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("view_only"):
+                    await self.confirm(ALICE)
+                    await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
+                    await self.layout(page, frame)
+                    self.report["complete"] = True
+                    self.save()
+                    return
 
                 async def chat_status(expected, used):
                     before = (await self.scope())["background"].get("status", {}).get("checked_at", 0)
@@ -165,9 +202,10 @@ class Feedback(Acceptance):
                 long = await self.page(bank, "HB-FEEDBACK-LONG")
                 await self.select(long)
                 await chat_status("知识页太长", False)
-                empty = await self.page(bank, "HB-FEEDBACK-EMPTY")
+                empty, empty_operation = await self.page(bank, "HB-FEEDBACK-EMPTY", wait=False)
                 await self.select(empty)
                 await chat_status("知识页还没有正文", False)
+                await self.completed(bank, empty_operation)
                 await self.select(short)
                 await self.control("delay_background", seconds=2)
                 try:
@@ -214,9 +252,7 @@ class Feedback(Acceptance):
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 await until(invalidated, timeout=15)
                 self.passed("forget_then_old_business_restore_preserves_latest_migrated_journal_and_cannot_revive_bank_or_page")
-                await page.set_viewport_size({"width": 390, "height": 844})
-                assert await page.frames[-1].evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
-                await page.screenshot(path=str(ROOT / "feedback-phone.png"), full_page=True)
+                await self.layout(page, frame)
                 assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
                 self.report["complete"] = True
                 self.save()

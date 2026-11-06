@@ -65,10 +65,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             request_text = json.dumps(body)
             page_content = MARKER
-            if "HB-FEEDBACK-LONG" in request_text:
+            if "HB-FEEDBACK-EMPTY" in request_text:
+                time.sleep(20)
+            elif "HB-FEEDBACK-LONG" in request_text:
                 page_content = "HB-FEEDBACK-LONG complete paragraph. " * 120
-            elif "HB-FEEDBACK-EMPTY" in request_text:
-                page_content = ""
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):
@@ -101,6 +101,14 @@ class Handler(BaseHTTPRequestHandler):
             elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
                 choice = body.get("tool_choice")
                 name = choice.get("function", {}).get("name") if isinstance(choice, dict) else "done"
+                searched = any(
+                    call.get("function", {}).get("name") == "recall"
+                    for message in body.get("messages", []) for call in message.get("tool_calls", [])
+                )
+                if not isinstance(choice, dict) and not searched and any(
+                    tool.get("function", {}).get("name") == "recall" for tool in body["tools"]
+                ):
+                    name = "recall"
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": "fixture-call", "type": "function",
                     "function": {"name": name, "arguments": json.dumps(arguments(name, page_content))},

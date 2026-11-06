@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
+    parser.add_argument("--scope", choices=("full", "feedback", "view"), default="full")
     args = parser.parse_args()
     args.magpie_url = "http://127.0.0.1:3425/v1"
     args.chat_model = "compatibility-fixture"
@@ -30,6 +31,10 @@ def main():
         args.model_environment.write_text(json.dumps({"ASTRBOT_MEMORY_MODEL_CONFIG": "{}"}))
         state = live.Environment(args)
         state.driver = "feedback_e2e.py"
+        state.settings["stop_timeout"] = 10
+        state.settings["feedback_only"] = args.scope != "full"
+        state.settings["view_only"] = args.scope == "view"
+        live.private_json(state.output / "live-settings.json", state.settings)
         control_volume = state.output / "control-volume"
         control_volume.mkdir()
         state.astrbot_mounts = ["-v", str(control_volume) + ":/delivery/verification/data/plugin_data/astrbot_plugin_hindsight_bridge_control"]
