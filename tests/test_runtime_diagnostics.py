@@ -464,6 +464,54 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
 
 
 class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
+    async def test_late_success_cannot_erase_newer_connection_failure(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def service(request):
+            if request.url.path == "/slow":
+                entered.set()
+                await release.wait()
+                return httpx.Response(200, json={})
+            raise httpx.ConnectError("offline", request=request)
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+        client.auth_until = time.monotonic() + 60
+        older = asyncio.create_task(client.request("GET", "/slow"))
+        try:
+            await entered.wait()
+            with self.assertRaises(HindsightError):
+                await client.request("GET", "/newer")
+            release.set()
+            await older
+            self.assertFalse(client.connection["connected"])
+            self.assertEqual(client.connection["code"], "connection_error")
+        finally:
+            release.set()
+            await older
+            await client.close()
+
+    async def test_streamed_auth_failure_and_recovery_update_connection_but_missing_content_does_not(self):
+        status = 401
+
+        async def service(request):
+            return httpx.Response(status, json={})
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+        client.auth_until = time.monotonic() + 60
+        try:
+            with self.assertRaises(HindsightError):
+                await client.read_bounded("/page")
+            self.assertFalse(client.connection["connected"])
+            status = 200
+            await client.read_bounded("/page")
+            self.assertTrue(client.connection["connected"])
+            status = 404
+            with self.assertRaises(HindsightError):
+                await client.read_bounded("/page")
+            self.assertTrue(client.connection["connected"])
+        finally:
+            await client.close()
+
     async def test_recall_wait_overrides_http_timeout_without_changing_queue_defaults(self):
         observed = []
         async def service(request):

@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -46,6 +48,7 @@ class MemoryPanel:
             ("bootstrap", "GET", self.bootstrap),
             ("connection/check", "POST", self.check),
             ("settings/save", "POST", self.save),
+            ("access/save", "POST", self.save_access),
             ("accounts/authorize", "POST", self.authorize),
             ("install/prepare", "POST", self.prepare),
             ("service/status", "GET", self.service_status),
@@ -53,6 +56,10 @@ class MemoryPanel:
             ("service/upgrade/ignore", "POST", self.ignore_upgrade),
             ("models/save", "POST", self.save_models),
             ("models/status", "GET", self.model_status),
+            ("managed/options", "POST", self.managed_options),
+            ("managed/connect", "POST", self.managed_connect),
+            ("managed/status", "POST", self.managed_status),
+            ("managed/version", "POST", self.managed_version),
             ("uninstall/prepare", "POST", self.prepare_uninstall),
             ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
             ("scopes/<scope_id>/background", ["GET", "POST"], self.background),
@@ -187,7 +194,8 @@ class MemoryPanel:
         url = self.plugin.config.get("api_url", "") if api_url is None else api_url
         key = self.plugin.config.get("api_key", "") if api_key is None else api_key
         return bool(
-            re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", "")))
+            state.get("connection_mode") != "existing"
+            and re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", "")))
             and state.get("api_url")
             and (not url or (
                 self.connection_url(url) == self.connection_url(state["api_url"])
@@ -226,8 +234,10 @@ class MemoryPanel:
 
     def config_revision(self):
         """Opaque fingerprint of the plugin configuration and setup metadata."""
+        state = dict(self.state())
+        state.pop("connection_job", None)
         return sha256(json.dumps(
-            {"config": dict(self.plugin.config), "setup": self.state()},
+            {"config": dict(self.plugin.config), "setup": state},
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
 
@@ -328,7 +338,7 @@ class MemoryPanel:
         try:
             async with plugin.using_resources(), asyncio.timeout(3):
                 await client.ensure_auth()
-                response = await client.request("GET", "/v1/version")
+                response = await client.request("GET", "/v1/version", timeout=2.5)
             version = response.get("api_version") if isinstance(response, dict) else None
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                 raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
@@ -636,7 +646,7 @@ class MemoryPanel:
                     ):
                         result[-1]["background"]["status"] = {
                             "used": state["used"], "checked_at": state["checked_at"],
-                            "message": self.error_message(state["code"]) if state["code"] else "",
+                            "message": "上次聊天未使用知识页：" + self.error_message(state["code"]) if state["code"] else "",
                         }
                 except QueueError as exc:
                     result[-1]["background"] = {"error": self.error_message(str(exc))}
@@ -754,6 +764,14 @@ class MemoryPanel:
                 managed_status = {"installed": False, "configured": False, "ready": False}
         missing = missing_connection(config)
         configured = not missing
+        backend = await self.service_status(force=True)
+        if plugin.client and plugin.outbox and not plugin.stopping:
+            evidence = getattr(plugin.client, "connection", {})
+            connected = evidence.get("connected", connected)
+            if connected is False:
+                connection_message = self.error_message(evidence.get("code") or "connection_error")
+            elif connected is True:
+                connection_message = ""
         return {
             "config_revision": self.config_revision(),
             "config": {
@@ -774,8 +792,11 @@ class MemoryPanel:
             },
             "platforms": self.platforms(),
             "managed_service": managed_status,
-            "backend": await self.service_status(force=False),
+            "backend": backend,
             "model_job": self.model_job if managed else None,
+            "connection_job": self.public_connection_job(state["connection_job"])
+            if managed and isinstance(state.get("connection_job"), dict) else None,
+            "installation_id": state.get("id", "") if managed else "",
             "has_installation": managed,
             "installation_api_url": state.get("api_url", "") if managed else "",
             "control_plane_key_command": key_command,
@@ -842,10 +863,15 @@ class MemoryPanel:
                         raise PanelError(response.json().get("message", "模型配置应用失败。"))
                     response.raise_for_status()
                     status = response.json()
+                    if status.get("installation_id") != state.get("id") or status.get("protocol") != 1:
+                        raise PanelError("配套服务标识不匹配，请检查安装记录。")
                 return {
                     "installed": True, "configured": status.get("configured") is True,
                     "ready": status.get("ready") is True,
                     "embedding_fingerprint": status.get("embedding_fingerprint", ""),
+                    "configuration_fingerprint": status.get("configuration_fingerprint"),
+                    "applying": status.get("applying") is True,
+                    "applying_fingerprint": status.get("applying_fingerprint", ""),
                 }
         except PanelError:
             raise
@@ -859,7 +885,8 @@ class MemoryPanel:
         async with self.lock:
             self.check_revision(payload)
             self.ensure_no_upgrade()
-            if self.state().get("api_url") or self.plugin.config.get("api_url"):
+            explicit = payload.get("mode") == "managed"
+            if not explicit and (self.state().get("api_url") or self.plugin.config.get("api_url")):
                 self.require_managed()
             status = await self.service_status()
             if status.get("managed") and status.get("upgrade_available"):
@@ -884,7 +911,198 @@ class MemoryPanel:
                 "command": result["command"], "message": result["message"],
                 "api_url": result["api_url"], "config_revision": self.config_revision(),
                 "control_plane_url": control_plane_url,
+                "installation_id": state["id"],
             }
+
+    def managed_target(self, payload):
+        self.ensure_open()
+        state = self.state()
+        if payload.get("mode") != "managed" or payload.get("installation_id") != state.get("id"):
+            raise PanelError("配套安装记录已变化，请重新选择配套服务。")
+        if not re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", ""))) or not all(
+            isinstance(state.get(key), str) and state[key] for key in ("api_url", "api_key", "management_url", "management_key")
+        ):
+            raise PanelError("请先生成并执行配套服务安装命令。")
+        return state
+
+    @staticmethod
+    def public_connection_job(job):
+        result = {key: job[key] for key in ("request_id", "status", "stage", "message", "saved") if key in job}
+        result["config_revision"] = job.get("config_revision", job.get("expected_revision", ""))
+        return result
+
+    async def managed_options(self):
+        payload = await self.body()
+        self.check_revision(payload)
+        if payload.get("mode") != "managed":
+            raise PanelError("请先选择安装配套服务。")
+        state = self.state()
+        present = bool(re.fullmatch(r"[0-9a-f]{12}", str(state.get("id", ""))) and state.get("api_url"))
+        return {"installation_id": state.get("id", "") if present else "", "api_url": state.get("api_url", "") if present else "",
+                "has_installation": present, "providers": self.providers().options(),
+                "selection": {key: state.get(key, "") for key in ("chat_provider_id", "embedding_provider_id", "rerank_provider_id")},
+                "job": self.public_connection_job(state["connection_job"]) if isinstance(state.get("connection_job"), dict) else None}
+
+    def persist_connection_job(self, job, **updates):
+        state = self.state()
+        stored = state.get("connection_job", {})
+        if stored.get("request_id") != job["request_id"] or state.get("id") != job["installation_id"]:
+            raise PanelError("配套接入任务已变化，请刷新页面。")
+        job.update(updates)
+        state["connection_job"] = dict(job)
+        self.store_state(state)
+        self.model_job = self.public_connection_job(job)
+
+    def check_connection_job(self, job):
+        self.ensure_open()
+        state = self.managed_target({"mode": "managed", "installation_id": job["installation_id"]})
+        if job["expected_revision"] != self.config_revision():
+            raise PanelError("接入期间配置已变化，请重新保存并连接。")
+        target_service = state.get("connections", {}).get(self.connection_url(state["api_url"]))
+        if target_service and any((state.get(key) or {}).get("connection_id") == target_service
+                                  for key in ("upgrade_check", "upgrade_pauses")):
+            raise PanelError("配套升级尚未结束，请先核对升级结果并解除升级暂停。")
+        return state
+
+    async def managed_connect(self):
+        payload = await self.body()
+        self.managed_target(payload)
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", request_id):
+            raise PanelError("请求标识无效，请重新保存并连接。")
+        selection = {key: payload.get(key, "") for key in ("chat_provider_id", "embedding_provider_id", "rerank_provider_id")}
+        if self.model_task and not self.model_task.done():
+            if selection != self.model_selection:
+                raise PanelError("模型配置正在处理，请等待完成后再更换模型。")
+            return dict(self.model_job)
+        async with self.lock:
+            state = self.managed_target(payload)
+            old = state.get("connection_job")
+            if isinstance(old, dict) and old.get("request_id") == request_id:
+                if old.get("selection") != selection:
+                    raise PanelError("同一请求的模型选择已变化，请重新提交。")
+                if old.get("status") == "succeeded":
+                    self.check_connection_job(old)
+                    return self.public_connection_job(old)
+                job = dict(old)
+            else:
+                self.check_revision(payload)
+                job = {"request_id": request_id, "installation_id": state["id"], "selection": selection,
+                       "expected_revision": self.config_revision(), "fingerprint": "", "stage": "validating"}
+                state["connection_job"] = job
+                self.store_state(state)
+            self.check_connection_job(job)
+            self.persist_connection_job(job, status="running", message="正在检查模型与配套服务…")
+            self.model_selection = selection
+            self.model_task = asyncio.create_task(self.run_connection_job(job), name="hindsight-managed-connect")
+            return dict(self.model_job)
+
+    async def managed_status(self):
+        payload = await self.body()
+        state = self.managed_target(payload)
+        job = state.get("connection_job")
+        if not isinstance(job, dict):
+            return {"status": "idle"}
+        if job.get("status") in {"running", "interrupted"} and (not self.model_task or self.model_task.done()):
+            async with self.lock:
+                state = self.managed_target(payload)
+                job = state.get("connection_job")
+                if (not isinstance(job, dict) or job.get("status") not in {"running", "interrupted"}
+                        or self.model_task and not self.model_task.done()):
+                    return self.public_connection_job(job) if isinstance(job, dict) else {"status": "idle"}
+                self.check_connection_job(job)
+                self.model_selection = job["selection"]
+                self.persist_connection_job(job, status="running", message="正在核对接入结果…")
+                self.model_task = asyncio.create_task(self.run_connection_job(job), name="hindsight-managed-connect")
+        return self.public_connection_job(self.state()["connection_job"])
+
+    async def managed_version(self):
+        state = self.managed_target(await self.body())
+        status = await self.managed_request(state)
+        result = {"managed": True, "target": HINDSIGHT_VERSION, "version": None, "upgrade_available": False}
+        if not status["configured"] or not status["ready"]:
+            return {**result, "message": "配套组件已安装，请先选择模型并点击「保存并连接」。"}
+        client = HindsightClient(state["api_url"], state["api_key"])
+        try:
+            async with asyncio.timeout(10):
+                await client.ensure_auth(force=True)
+                response = await client.request("GET", "/v1/version")
+                version = response.get("api_version")
+                if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+                    raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
+                return {**result, "version": version, "supported": version in SUPPORTED_VERSIONS,
+                        "upgrade_available": version == "1.1.0"}
+        finally:
+            await client.close()
+
+    async def run_connection_job(self, job):
+        plugin = self.plugin
+        closed_active = False
+        try:
+            async with self.lock:
+                state = self.check_connection_job(job)
+                status = await self.managed_request(state)
+                if status.get("configuration_fingerprint") is None:
+                    raise PanelError("配套组件不支持接入结果核对，请先重新部署配套服务文件，再保存并连接。")
+                deadline = time.monotonic() + 360
+                while status.get("applying"):
+                    if not job["fingerprint"] or status.get("applying_fingerprint") != job["fingerprint"]:
+                        raise PanelError("配套服务正在应用其他模型配置，请等待完成后重试。")
+                    if time.monotonic() >= deadline:
+                        raise PanelError("模型应用仍在进行，请稍后重新打开页面核对结果。")
+                    await asyncio.sleep(2)
+                    self.check_connection_job(job)
+                    status = await self.managed_request(state)
+                if not job["fingerprint"] or status.get("configuration_fingerprint") != job["fingerprint"] or not status["ready"]:
+                    environment = await self.providers().resolve_checked(job["selection"])
+                    self.check_connection_job(job)
+                    fingerprint = hmac.new(state["api_key"].encode(), json.dumps(
+                        environment, sort_keys=True, separators=(",", ":"),
+                    ).encode(), hashlib.sha256).hexdigest()
+                    if job["fingerprint"] and job["fingerprint"] != fingerprint:
+                        raise PanelError("模型供应商配置已变化，请重新提交保存并连接。")
+                    self.persist_connection_job(job, fingerprint=fingerprint, stage="applying", message="正在验证模型并启动记忆服务…")
+                    if (self.connection_url(plugin.config.get("api_url", "")) == self.connection_url(state["api_url"])
+                            and plugin.config.get("api_key") == state["api_key"] and plugin.outbox):
+                        plugin.stopping = True
+                        closed_active = True
+                        await plugin._close_resources()
+                        self.check_connection_job(job)
+                    status = await self.managed_request(state, environment)
+                    self.check_connection_job(job)
+                    if not status["ready"] or status.get("configuration_fingerprint") != fingerprint:
+                        raise PanelError("模型应用结果尚未确认，请稍后重试核对。")
+                state = self.check_connection_job(job)
+                state.update(job["selection"])
+                self.store_state(state)
+                self.persist_connection_job(job, expected_revision=self.config_revision(), stage="connecting", message="模型已保存，正在连接插件…")
+                client = plugin.client
+                active = (
+                    self.managed_connection(state) and plugin.outbox and not plugin.stopping and client
+                    and client.url == self.connection_url(state["api_url"])
+                    and client.api_key == state["api_key"]
+                    and plugin.outbox.connection_id == plugin.config.get("service_id")
+                )
+                if closed_active or not active:
+                    await self._save({"api_url": state["api_url"], "api_key": state["api_key"], "mode": "managed"},
+                                     self.config_revision(), force_initialize=True, job=job)
+                else:
+                    async with plugin.using_resources(), asyncio.timeout(10):
+                        await plugin.client.ensure_auth(force=True)
+                    self.check_connection_job(job)
+                self.persist_connection_job(job, expected_revision=self.config_revision(), status="succeeded", stage="complete", saved=True,
+                                            config_revision=self.config_revision(), message="模型已保存，插件已连接。")
+        except asyncio.CancelledError:
+            self.persist_connection_job(job, status="interrupted", message="接入已中断，重新打开页面可核对结果。")
+            raise
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, (PanelError, ValueError)) else "接入失败，请检查配套服务和插件数据目录后重试。"
+            self.persist_connection_job(job, status="failed", message=message)
+        finally:
+            if closed_active and not plugin.outbox and not self.closed and not asyncio.current_task().cancelling():
+                plugin.permissions = None
+                plugin.stopping = False
+                await plugin.initialize()
 
     async def save_models(self):
         payload = await self.body()
@@ -995,6 +1213,21 @@ class MemoryPanel:
             revision = self.config_revision()
             return await self._save(payload, revision)
 
+    async def save_access(self):
+        payload = await self.body()
+        async with self.lock:
+            self.check_revision(payload)
+            address = self.control_plane_url(payload.get("control_plane_url", ""))
+            previous = copy.deepcopy(dict(self.plugin.config))
+            try:
+                self.write_config({"control_plane_url": address})
+            except Exception:
+                self.plugin.config.clear()
+                self.plugin.config.update(previous)
+                self.plugin.config.save_config()
+                raise PanelError("管理地址保存失败，请检查插件数据目录后重试。") from None
+            return {"saved": True, "config_revision": self.config_revision(), "message": "官方管理地址已保存。"}
+
     def write_config(self, updates):
         config = self.plugin.config
         for obsolete in ("enabled", "permission_config_version", "allowed_platform_ids", "allowed_user_ids", "timezone"):
@@ -1009,7 +1242,7 @@ class MemoryPanel:
             "message": "配置已保存并生效。正常聊天即可，无需再重载插件。",
         }
 
-    async def _save(self, payload, revision):
+    async def _save(self, payload, revision, *, force_initialize=False, job=None):
         self.ensure_open()
         plugin = self.plugin
         try:
@@ -1040,6 +1273,10 @@ class MemoryPanel:
                 raise PanelError("所选账号需要使用 AstrBot 内置 Agent，请先在配置文件中选择内置执行器。")
         url, key = self.credentials(payload)
         state = self.state()
+        previous_mode = state.get("connection_mode")
+        mode = payload.get("mode", previous_mode)
+        if mode not in {None, "managed", "existing"}:
+            raise PanelError("连接方式无效，请重新选择。")
         if not connection_fields(plugin.config)["service_id"] and self.has_identity_data():
             raise PanelError("已有记忆数据但记忆服务识别码缺失，请恢复原插件配置后重新保存。")
         try:
@@ -1057,13 +1294,14 @@ class MemoryPanel:
             ],
         }
         local_change = (
-            old_service and old_url == client.url and key == plugin.config.get("api_key")
+            not force_initialize and old_service and old_url == client.url and key == plugin.config.get("api_key")
+            and mode == previous_mode
             and any(updates[name] != plugin.config.get(name, [] if name == "allowed_accounts" else "")
                     for name in ("allowed_accounts", "control_plane_url"))
         )
         try:
             if not local_change:
-                if state.get("management_url") and self.managed_connection(
+                if mode != "existing" and state.get("management_url") and self.managed_connection(
                     state, api_url=client.url, api_key=key,
                 ):
                     status = await self.managed_request(state)
@@ -1109,30 +1347,68 @@ class MemoryPanel:
         if not service or (client.url != old_url and service == old_service):
             service = "memory-" + secrets.token_hex(6)
         connections[client.url] = service
+        if mode is not None:
+            state["connection_mode"] = mode
         # Persist both identities before changing the active connection so a
         # process interruption cannot lose the route back to the old queue.
         self.store_state(state)
+        if job is not None:
+            self.persist_connection_job(job, expected_revision=self.config_revision())
         updates["service_id"] = service
         plugin.stopping = True
+        write_started = False
+        applied_config = None
         try:
             await plugin._close_resources()
             self.ensure_open()
+            if job is not None:
+                self.check_connection_job(job)
+            write_started = True
             self.write_config(updates)
+            if job is not None:
+                self.persist_connection_job(job, expected_revision=self.config_revision())
+            applied_config = copy.deepcopy(dict(plugin.config))
             plugin.permissions = None
             plugin.stopping = False
             await plugin.initialize()
             self.ensure_open()
+            if job is not None:
+                self.check_connection_job(job)
             if not plugin.outbox:
                 raise PanelError("记忆服务初始化失败，请检查服务配置与本地数据目录。")
         except Exception:
+            configuration_changed = job is not None and (not write_started or applied_config is not None) and (
+                job["expected_revision"] != self.config_revision()
+            )
             await plugin._close_resources()
-            plugin.config.clear()
-            plugin.config.update(previous)
-            plugin.config.save_config()
+            if not configuration_changed:
+                plugin.config.clear()
+                plugin.config.update(previous)
+                plugin.config.save_config()
+            elif applied_config is not None:
+                # Roll back this save without overwriting independent edits.
+                for key in previous.keys() | applied_config.keys():
+                    if (key in plugin.config) == (key in applied_config) and plugin.config.get(key) == applied_config.get(key):
+                        if key in previous:
+                            plugin.config[key] = previous[key]
+                        else:
+                            plugin.config.pop(key, None)
+                plugin.config.save_config()
+            restored = self.state()
+            if restored.get("connection_mode") == mode:
+                if previous_mode is None:
+                    restored.pop("connection_mode", None)
+                else:
+                    restored["connection_mode"] = previous_mode
+            self.store_state(restored)
+            if job is not None and not configuration_changed:
+                self.persist_connection_job(job, expected_revision=self.config_revision())
             plugin.permissions = None
             self.ensure_open()
             plugin.stopping = False
             await plugin.initialize()
+            if configuration_changed:
+                raise PanelError("接入期间配置已变化，请重新保存并连接。") from None
             raise PanelError("配置应用失败，已恢复原有服务配置，请检查服务与数据目录。") from None
         return self.settings_saved()
 

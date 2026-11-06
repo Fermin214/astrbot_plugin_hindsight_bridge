@@ -133,8 +133,10 @@ class Managed(Acceptance):
                     await frame.locator("#authorization-dialog").wait_for(state="visible")
                     await frame.locator("#confirm-authorization").click()
                 else:
-                    await frame.locator("#save-settings").click()
-                    await until(lambda: frame.locator("#save-settings").is_enabled(), timeout=30)
+                    assert (await models_ready()).get("stage") == "complete"
+                    assert (await self.config())["api_url"].startswith("http://memory-")
+                    assert await frame.locator("#save-settings").is_hidden()
+                    self.passed("single_model_save_completes_and_persists_managed_plugin_connection")
                     await frame.locator("#tab-memories").click()
                     await frame.locator("#add-account").click()
                     await frame.locator("#account-platform").select_option("delivery-onebot")
@@ -155,6 +157,7 @@ class Managed(Acceptance):
                 await self.bot.chat(ALICE, "Remember: I prefer oolong tea and my managed-install notebook code is Hazel-63. Reply briefly.")
                 await self.drained()
                 scope = next(row for row in (await self.bootstrap())["scopes"] if row["user_id"] == str(ALICE))
+                assert scope["summary"]["saved_count"] > 0
                 assert "Hazel-63" in json.dumps(await self.memories(scope["bank"]))
                 await self.recall_notebook(
                     "Which tea do I prefer and what is my notebook code? Answer briefly.",

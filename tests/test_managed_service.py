@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -35,6 +36,66 @@ class ConfigurationTests(unittest.TestCase):
         first = service.configuration(self.environment)
         rotated = service.configuration({**self.environment, "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "new-secret"})
         self.assertEqual(first["embedding_fingerprint"], rotated["embedding_fingerprint"])
+
+    def test_lost_response_reuses_ready_configuration_and_fingerprint_survives_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = service.Runtime(directory, "service-key", "012345abcdef")
+
+            def start(candidate):
+                runtime.process = Mock()
+                runtime.process.poll.return_value = None
+
+            with patch.object(runtime, "start", side_effect=start) as launch, patch.object(runtime, "stop") as stop, \
+                    patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), \
+                    patch.object(service.subprocess, "run") as probe:
+                first = runtime.apply(self.environment)
+                self.assertEqual(runtime.apply(dict(reversed(list(self.environment.items())))), first)
+                self.assertEqual((launch.call_count, stop.call_count, probe.call_count), (1, 1, 1))
+                self.assertFalse(first["applying"])
+                self.assertEqual(first["configuration_fingerprint"], runtime.fingerprint(self.environment))
+                changed = {**self.environment, "HINDSIGHT_API_LLM_MODEL": "other-chat"}
+                self.assertNotEqual(runtime.fingerprint(changed), first["configuration_fingerprint"])
+                rotated = {**self.environment, "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "new-secret"}
+                self.assertNotEqual(runtime.fingerprint(rotated), first["configuration_fingerprint"])
+            with patch.object(service.Runtime, "start"), patch.object(service.Runtime, "healthy", return_value=False):
+                reloaded = service.Runtime(directory, "service-key", "012345abcdef")
+                self.assertEqual(reloaded.status()["configuration_fingerprint"], first["configuration_fingerprint"])
+                self.assertNotIn("secret", json.dumps(reloaded.status()))
+
+    def test_status_exposes_pending_configuration_without_claiming_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = service.Runtime(directory, "service-key", "012345abcdef")
+            entered, release = threading.Event(), threading.Event()
+            results = []
+
+            def probe(*args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("probe wait expired")
+
+            def start(candidate):
+                runtime.process = Mock()
+                runtime.process.poll.return_value = None
+
+            with patch.object(runtime, "start", side_effect=start), patch.object(runtime, "stop"), \
+                    patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), \
+                    patch.object(service.subprocess, "run", side_effect=probe):
+                worker = threading.Thread(target=lambda: results.append(runtime.apply(self.environment)))
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    status = runtime.status()
+                    self.assertTrue(status["applying"])
+                    self.assertFalse(status["ready"])
+                    self.assertEqual(status["applying_fingerprint"], runtime.fingerprint(self.environment))
+                    with self.assertRaisesRegex(service.ConfigurationError, "正在应用"):
+                        runtime.apply(self.environment)
+                finally:
+                    release.set()
+                    worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(results[0]["ready"])
+                self.assertFalse(results[0]["applying"])
 
     def test_failed_application_restores_runtime_and_keeps_saved_configuration(self):
         with tempfile.TemporaryDirectory() as directory:

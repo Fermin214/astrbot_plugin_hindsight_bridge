@@ -44,9 +44,6 @@ class Managed(live.Environment):
             with (self.output / "baseline-install.zip").open("wb") as file:
                 live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
                          "c2dec0e25ae8292e3dd01ecb6e326a87965d41ef", cwd=live.ROOT, stdout=file)
-        image = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6"
-        if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-            self.docker("tag", "hindsight-bridge-delivery-postgres:17", image)
         environment = json.loads(self.model_environment.read_text())
         models = json.loads(environment["ASTRBOT_MEMORY_MODEL_CONFIG"])
         live.private_json(self.output / "native-models.json", [

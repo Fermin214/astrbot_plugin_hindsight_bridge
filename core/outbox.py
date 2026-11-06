@@ -1057,6 +1057,14 @@ class Outbox:
             (self.connection_id, self.connection_id, scope["owner_id"]),
         )
         counts = {r["state"]: r["n"] for r in rows}
+        owner = self.control.owner(self.connection_id, scope["owner_id"])
+        saved_count = None
+        if not self.recovering and owner and owner["bank"] == scope["bank"] and owner["generation"] == scope["generation"]:
+            saved_count = self.db.execute(
+                "SELECT COUNT(*) FROM outbox o JOIN scopes s USING(connection_id,scope_id) "
+                "WHERE o.connection_id=? AND s.owner_id=? AND o.bank=? AND o.generation=? AND o.state='done'",
+                (self.connection_id, scope["owner_id"], scope["bank"], scope["generation"]),
+            ).fetchone()[0]
         row = self.db.execute(
             "SELECT last_error FROM outbox WHERE connection_id=? AND scope_id=? "
             "AND last_error<>'' ORDER BY updated_at DESC LIMIT 1",
@@ -1076,6 +1084,7 @@ class Outbox:
         ).fetchall()
         return {
             "counts": counts,
+            "saved_count": saved_count,
             "last_error": row["last_error"] if row else "",
             "oldest_seconds": max(0, int(time.time() - oldest)) if oldest else 0,
             "tasks": [{"id": r["id"], "state": r["state"]} for r in tasks],

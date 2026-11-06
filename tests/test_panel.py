@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import hashlib
+import hmac
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
@@ -85,11 +87,17 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             if self.config.get("api_url") and self.config.get("api_key"):
                 self.plugin.outbox = SimpleNamespace(
                     recovering=False, list_scopes=lambda: [], connection_error=lambda: "",
-                    sync_permissions=Mock(),
+                    sync_permissions=Mock(), connection_id=self.config["service_id"],
                 )
+                self.plugin.client = module.HindsightClient(self.config["api_url"], self.config["api_key"])
+
+        @asynccontextmanager
+        async def resources():
+            yield
 
         self.plugin._close_resources = AsyncMock(side_effect=close_resources)
         self.plugin.initialize = AsyncMock(side_effect=initialize)
+        self.plugin.using_resources = resources
         self.panel = InMemoryPanel(self.plugin)
         self.panel.saved_state = None
         self.panel.providers = lambda: SimpleNamespace(
@@ -110,13 +118,16 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, url, key):
                 self.url = str(module.httpx.URL(url)).rstrip("/")
                 self.key = key
+                self.api_key = key
 
             async def ensure_auth(self, **kwargs):
                 owner.auth_calls.append((self.url, self.key))
                 if owner.auth_gate:
                     await owner.auth_gate(self)
 
-            async def request(self, method, path):
+            async def request(self, method, path, **kwargs):
+                if path == "/v1/version":
+                    return {"api_version": "1.2.0"}
                 owner.marker_keys.append(self.key)
                 owner.assertEqual(method, "GET")
                 parsed = urlsplit(path)
@@ -150,6 +161,220 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
     async def save(self, **updates):
         self.panel.body = AsyncMock(return_value={**self.payload, **updates})
         return await self.panel.save()
+
+    def configure_managed_connect(self):
+        self.panel.saved_state = {"id": "012345abcdef", "api_url": "http://managed-service:8888", "api_key": "managed-key",
+                                  "management_url": "http://managed-service:8766", "management_key": "management-key"}
+        self.model_environment = {"HINDSIGHT_API_LLM_MODEL": "chat"}
+        self.catalog = self.panel.providers()
+        self.catalog.resolve_checked.return_value = self.model_environment
+        self.panel.providers = lambda: self.catalog
+        self.remote_fingerprint = ""
+        self.apply_count = 0
+
+        async def managed(state, environment=None):
+            if environment is not None:
+                self.apply_count += 1
+                self.remote_fingerprint = hmac.new(state["api_key"].encode(), json.dumps(
+                    environment, sort_keys=True, separators=(",", ":"),
+                ).encode(), hashlib.sha256).hexdigest()
+            return {"installed": True, "configured": bool(self.remote_fingerprint), "ready": bool(self.remote_fingerprint),
+                    "configuration_fingerprint": self.remote_fingerprint, "applying": False}
+
+        self.managed = managed
+        self.panel.managed_request = AsyncMock(side_effect=managed)
+        return {"mode": "managed", "installation_id": "012345abcdef", "request_id": "connect-1",
+                "chat_provider_id": "chat-provider", "embedding_provider_id": "embedding-provider", "rerank_provider_id": ""}
+
+    async def connect_managed(self, payload):
+        self.panel.body = AsyncMock(return_value={**payload, "config_revision": self.panel.config_revision()})
+        result = await self.panel.managed_connect()
+        await self.panel.model_task
+        return result, self.panel.saved_state["connection_job"]
+
+    async def test_managed_connect_from_existing_service_persists_connection_once_and_keeps_legacy_boundary(self):
+        payload = self.configure_managed_connect()
+        initial_revision = self.panel.config_revision()
+        _, job = await self.connect_managed(payload)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(job["stage"], "complete")
+        self.assertEqual(self.config["api_url"], "http://managed-service:8888")
+        self.assertEqual(self.config["api_key"], "managed-key")
+        identity = self.config["service_id"]
+        self.assertEqual(self.panel.saved_state["connections"]["http://old-service:8888"], "old-service-id")
+        self.panel.body = AsyncMock(return_value=payload)
+        repeated = await self.panel.managed_connect()
+        self.assertEqual(repeated["status"], "succeeded")
+        self.assertEqual(self.config["service_id"], identity)
+        self.assertEqual(self.apply_count, 1)
+        self.assertNotIn("fingerprint", repeated)
+        self.assertNotEqual(initial_revision, self.panel.config_revision())
+        revision = self.panel.config_revision()
+        self.panel.persist_connection_job(job, message="完成")
+        self.assertEqual(revision, self.panel.config_revision())
+        self.profile.save_config.assert_not_called()
+
+    async def test_managed_connection_commit_failure_recovers_original_config_and_reuses_applied_models(self):
+        payload = self.configure_managed_connect()
+        previous = copy.deepcopy(dict(self.config))
+        failures = 0
+
+        def save_config():
+            nonlocal failures
+            if self.config["api_url"] == "http://managed-service:8888" and not failures:
+                failures += 1
+                raise OSError("disk write failed")
+
+        self.config.save_config = save_config
+        _, job = await self.connect_managed(payload)
+        self.assertEqual(job["status"], "failed", job)
+        self.assertEqual(dict(self.config), previous)
+        self.assertEqual(job["stage"], "connecting")
+        planned_identity = self.panel.saved_state["connections"]["http://managed-service:8888"]
+        _, job = await self.connect_managed(payload)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(self.config["service_id"], planned_identity)
+        self.assertEqual(self.apply_count, 1)
+        self.assertEqual(self.catalog.resolve_checked.await_count, 1)
+
+    async def test_reload_after_model_request_recovers_persistent_job_without_reapplying_models(self):
+        payload = self.configure_managed_connect()
+        entered = asyncio.Event()
+
+        async def dropped(state, environment=None):
+            result = await self.managed(state, environment)
+            if environment is not None:
+                entered.set()
+                await asyncio.Event().wait()
+            return result
+
+        self.panel.managed_request = AsyncMock(side_effect=dropped)
+        self.panel.body = AsyncMock(return_value={**payload, "config_revision": self.panel.config_revision()})
+        await self.panel.managed_connect()
+        await entered.wait()
+        await self.panel.close()
+        saved = copy.deepcopy(self.panel.saved_state)
+        self.assertEqual(saved["connection_job"]["status"], "interrupted")
+        self.assertEqual(self.config["api_url"], "http://old-service:8888")
+        self.panel = InMemoryPanel(self.plugin)
+        self.panel.saved_state = saved
+        self.panel.providers = lambda: self.catalog
+        self.panel.managed_request = AsyncMock(side_effect=self.managed)
+        self.panel.body = AsyncMock(return_value={"mode": "managed", "installation_id": payload["installation_id"]})
+        await self.panel.managed_status()
+        await self.panel.model_task
+        job = self.panel.saved_state["connection_job"]
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(self.apply_count, 1)
+        self.assertEqual(self.catalog.resolve_checked.await_count, 1)
+
+    async def test_explicit_managed_options_and_independent_access_save_do_not_manage_existing_service(self):
+        payload = self.configure_managed_connect()
+        self.panel.body = AsyncMock(return_value=payload)
+        with self.assertRaisesRegex(module.PanelError, "已有服务仅提供"):
+            await self.panel.save_models()
+        options = await self.panel.managed_options()
+        self.assertEqual(options["installation_id"], payload["installation_id"])
+        self.assertNotIn("managed-key", json.dumps(options))
+        self.panel.body = AsyncMock(return_value={"control_plane_url": "https://memory.example.com"})
+        await self.panel.save_access()
+        self.assertEqual(self.config["control_plane_url"], "https://memory.example.com")
+        self.assertEqual(self.config["api_url"], "http://old-service:8888")
+        self.panel.managed_request.assert_not_awaited()
+        self.plugin.initialize.assert_not_awaited()
+
+    async def test_reload_during_connection_commit_recovers_without_reapplying_or_reopening_closed_resources(self):
+        for boundary in ("_close_resources", "initialize"):
+            with self.subTest(boundary=boundary):
+                self.setUp()
+                payload = self.configure_managed_connect()
+                entered = asyncio.Event()
+                operation = getattr(self.plugin, boundary)
+                original = operation.side_effect
+
+                async def interrupted():
+                    await original()
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                operation.side_effect = interrupted
+                self.panel.body = AsyncMock(return_value={**payload, "config_revision": self.panel.config_revision()})
+                await self.panel.managed_connect()
+                await asyncio.wait_for(entered.wait(), 2)
+                planned_identity = self.panel.saved_state["connections"]["http://managed-service:8888"]
+                calls = self.plugin.initialize.await_count
+                await self.panel.close()
+                self.assertEqual(self.plugin.initialize.await_count, calls)
+                self.assertEqual(self.panel.saved_state["connection_job"]["stage"], "connecting")
+                saved = copy.deepcopy(self.panel.saved_state)
+                operation.side_effect = original
+                self.plugin.stopping = False
+                self.panel = InMemoryPanel(self.plugin)
+                self.panel.saved_state = saved
+                self.panel.providers = lambda: self.catalog
+                self.panel.managed_request = AsyncMock(side_effect=self.managed)
+                self.panel.body = AsyncMock(return_value=payload)
+                await self.panel.managed_status()
+                await self.panel.model_task
+                job = self.panel.saved_state["connection_job"]
+                self.assertEqual(job["status"], "succeeded", job)
+                self.assertEqual(self.config["service_id"], planned_identity)
+                self.assertEqual(self.apply_count, 1)
+
+    async def test_external_configuration_change_during_commit_is_not_overwritten_or_accepted(self):
+        for boundary in ("_close_resources", "initialize"):
+            with self.subTest(boundary=boundary):
+                self.setUp()
+                payload = self.configure_managed_connect()
+                operation = getattr(self.plugin, boundary)
+                original = operation.side_effect
+
+                async def changed():
+                    await original()
+                    self.config["recall_timeout_seconds"] = 27
+
+                operation.side_effect = changed
+                _, job = await self.connect_managed(payload)
+                self.assertEqual(job["status"], "failed", job)
+                self.assertIn("配置已变化", job["message"])
+                self.assertEqual(self.config["recall_timeout_seconds"], 27)
+                self.assertEqual(self.config["api_url"], "http://old-service:8888")
+                self.panel.body = AsyncMock(return_value=payload)
+                with self.assertRaisesRegex(module.PanelError, "配置已变化"):
+                    await self.panel.managed_connect()
+
+    async def test_active_model_application_failure_reopens_resources_with_permission_refresh(self):
+        payload = self.configure_managed_connect()
+        await self.connect_managed(payload)
+        self.plugin.permissions = frozenset({("qq", "123")})
+        self.remote_fingerprint = "different-model-configuration"
+
+        async def failed(state, environment=None):
+            if environment is not None:
+                raise module.PanelError("model validation failed")
+            return await self.managed(state)
+
+        self.panel.managed_request.side_effect = failed
+        _, job = await self.connect_managed({**payload, "request_id": "connect-2"})
+        self.assertEqual(job["status"], "failed", job)
+        self.assertIsNotNone(self.plugin.outbox)
+        self.assertIsNone(self.plugin.permissions)
+        self.assertFalse(self.plugin.stopping)
+
+    async def test_same_owned_address_can_use_existing_mode_without_changing_identity_or_granting_management(self):
+        payload = self.configure_managed_connect()
+        await self.connect_managed(payload)
+        identity = self.config["service_id"]
+        self.panel.body = AsyncMock(return_value={"api_url": self.config["api_url"], "mode": "existing"})
+        self.panel.managed_request.reset_mock()
+        await self.panel.save()
+        self.panel.managed_request.assert_not_awaited()
+        self.assertEqual(self.config["service_id"], identity)
+        self.assertFalse(self.panel.managed_connection())
+        self.panel.managed_request.reset_mock()
+        await self.panel.check()
+        self.panel.managed_request.assert_not_awaited()
+        self.assertEqual(await self.panel.model_status(), {"status": "idle"})
 
     async def test_closed_panel_rejects_late_save_and_new_requests(self):
         entered, release = asyncio.Event(), asyncio.Event()

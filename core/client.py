@@ -240,8 +240,17 @@ class HindsightClient:
         self.auth_until = 0.0
         self.auth_lock = asyncio.Lock()
         self.connection = {"connected": None, "code": "", "checked_at": None}
+        self.request_sequence = self.connection_sequence = 0
 
-    def connection_result(self, connected, code=""):
+    def next_connection_sequence(self):
+        self.request_sequence += 1
+        return self.request_sequence
+
+    def connection_result(self, connected, code="", *, sequence=None):
+        sequence = self.next_connection_sequence() if sequence is None else sequence
+        if sequence < self.connection_sequence:
+            return
+        self.connection_sequence = sequence
         self.connection = {"connected": connected, "code": code, "checked_at": time.time()}
 
     @staticmethod
@@ -256,7 +265,11 @@ class HindsightClient:
         body: dict | None = None,
         key: str | None = None,
         timeout: float | None = None,
+        _connection_sequence: int | None = None,
     ) -> dict:
+        sequence = _connection_sequence
+        if key is None and sequence is None:
+            sequence = self.next_connection_sequence()
         credential = self.api_key if key is None else key
         headers = {"Authorization": "Bearer " + credential} if credential else {}
         options = {"timeout": httpx.Timeout(timeout, connect=min(3, timeout))} if timeout is not None else {}
@@ -273,15 +286,15 @@ class HindsightClient:
                 else "timeout"
             )
             if key is None:
-                self.connection_result(False, code)
+                self.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
         except httpx.HTTPError:
             if key is None:
-                self.connection_result(False, "connection_error")
+                self.connection_result(False, "connection_error", sequence=sequence)
             raise HindsightError("connection_error") from None
         if not resp.is_success:
             if key is None and resp.status_code in {401, 403}:
-                self.connection_result(False, f"http_{resp.status_code}")
+                self.connection_result(False, f"http_{resp.status_code}", sequence=sequence)
             raise HindsightError(
                 f"http_{resp.status_code}",
                 permanent=400 <= resp.status_code < 500
@@ -295,16 +308,19 @@ class HindsightClient:
         if not isinstance(value, dict):
             raise HindsightError("invalid_response")
         if key is None and time.monotonic() < self.auth_until:
-            self.connection_result(True)
+            self.connection_result(True, sequence=sequence)
         return value
 
     async def read_bounded(self, path, *, max_bytes=BACKGROUND_MAX_BYTES):
         """Bound decoded response bytes while streaming, not after buffering JSON."""
+        sequence = self.next_connection_sequence()
         try:
             async with self.http.stream(
                 "GET", self.url + path, headers={"Authorization": "Bearer " + self.api_key},
             ) as response:
                 if not response.is_success:
+                    if response.status_code in {401, 403}:
+                        self.connection_result(False, f"http_{response.status_code}", sequence=sequence)
                     raise HindsightError(
                         f"http_{response.status_code}",
                         permanent=400 <= response.status_code < 500
@@ -319,12 +335,16 @@ class HindsightClient:
             value = json.loads(body)
             if not isinstance(value, dict):
                 raise ValueError
+            if time.monotonic() < self.auth_until:
+                self.connection_result(True, sequence=sequence)
             return value
         except (ValueError, RecursionError):
             raise HindsightError("invalid_background_response") from None
         except httpx.TimeoutException:
+            self.connection_result(False, "background_timeout", sequence=sequence)
             raise HindsightError("background_timeout") from None
         except httpx.HTTPError:
+            self.connection_result(False, "connection_error", sequence=sequence)
             raise HindsightError("connection_error") from None
 
     async def _background_read(self, bank, suffix):
@@ -423,8 +443,9 @@ class HindsightClient:
             ):
                 return
             path = "/v1/default/banks"
+            sequence = self.next_connection_sequence()
             try:
-                await self.request("GET", path, timeout=timeout)
+                await self.request("GET", path, timeout=timeout, _connection_sequence=sequence)
                 for wrong_key in ("", "invalid-" + uuid.uuid4().hex):
                     try:
                         await self.request("GET", path, key=wrong_key, timeout=timeout)
@@ -435,10 +456,10 @@ class HindsightClient:
                     raise HindsightError("server_auth_not_enforced")
             except HindsightError as exc:
                 self.auth_until = 0.0
-                self.connection_result(False, exc.code)
+                self.connection_result(False, exc.code, sequence=sequence)
                 raise
             self.auth_until = time.monotonic() + 60
-            self.connection_result(True)
+            self.connection_result(True, sequence=sequence)
 
     async def check_connection(self, *, timeout=10, force=False):
         try:

@@ -53,8 +53,9 @@ async def verify_panel(acceptance, page, context, frame, scope):
     acceptance.passed("browser_mode_selection_saves_immediately_and_failed_save_keeps_server_mode")
 
     await frame.locator("#tab-setup").click()
-    await frame.locator("#save-settings").click()
-    await until(lambda: frame.locator("#save-settings").is_enabled(), timeout=30)
+    save_button = "#save-access" if (await acceptance.bootstrap())["config"]["managed"] else "#save-settings"
+    await frame.locator(save_button).click()
+    await until(lambda: frame.locator(save_button).is_enabled(), timeout=30)
     assert (await acceptance.config())["allowed_accounts"] == configuration["allowed_accounts"]
     assert await frame.locator("#setup-intro").is_hidden()
     await frame.locator("#backup-guide").click()
@@ -377,6 +378,9 @@ async def verify_panel(acceptance, page, context, frame, scope):
             await frame.locator("body").evaluate("(_, theme) => document.documentElement.dataset.theme = theme", theme)
             for tab in ("memories", "setup"):
                 await frame.locator("#tab-" + tab).click()
+                if tab == "memories":
+                    expected = (await selected())["summary"]["saved_count"]
+                    assert await frame.locator("#saved-count").inner_text() == str(expected)
                 assert await frame.locator("details").count() == 0
                 assert await frame.locator("body").evaluate("node => node.scrollWidth <= innerWidth + 1")
                 await page.screenshot(path=str(ROOT / ("panel-" + label + "-" + tab + "-" + theme + ".png")), full_page=True)

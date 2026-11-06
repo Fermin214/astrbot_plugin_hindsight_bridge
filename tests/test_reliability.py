@@ -167,6 +167,29 @@ class DurableCore(unittest.IsolatedAsyncioTestCase):
         with self.queue.db:
             self.queue.db.execute("UPDATE outbox SET next_at=0")
 
+    async def test_saved_count_counts_materials_once_and_excludes_other_users_and_retired_banks(self):
+        user = self.enqueue()
+        assistant = self.queue.capture_assistant(user.task_id, "好的。")
+        other = self.enqueue(self.incoming(user="bob", mid="other"))
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 0)
+        self.queue.update(user.task_id, "done")
+        self.queue.update(user.task_id, "done")
+        self.queue.update(assistant.task_id, "failed")
+        self.queue.update(other.task_id, "done")
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 1)
+        self.queue.update(assistant.task_id, "done")
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 2)
+        self.queue.close()
+        self.open()
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 2)
+        self.queue.forget(user.scope_id, journal_only=True)
+        self.assertIsNone(self.queue.summary(user.scope_id)["saved_count"])
+        self.queue.apply_control()
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 0)
+        self.queue.update(user.task_id, "done")
+        self.assertEqual(self.queue.summary(user.scope_id)["saved_count"], 0)
+        self.assertEqual(self.queue.summary(other.scope_id)["saved_count"], 1)
+
     async def test_lost_ack_survives_reopen_with_one_original_operation(self):
         capture = self.enqueue()
         frozen = dict(self.queue.get(capture.task_id))

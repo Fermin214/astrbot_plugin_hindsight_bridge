@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from plugins.astrbot_plugin_hindsight_bridge.core.installer import installation, uninstallation
+from plugins.astrbot_plugin_hindsight_bridge.core.installer import POSTGRES_IMAGE, installation, uninstallation
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE = {
@@ -49,7 +49,11 @@ def install_environment(root):
     executable.write_text('''#!/bin/sh
 printf '%s\\n' "$*" >> "$TEST_LOG"
 case "$*" in
-  *"同版本修复仅支持1.2.0"*) [ "$TEST_FAIL_STAGE" != repair_version ] || exit 50; cat >/dev/null ;;
+  *"同版本修复仅支持1.2.0"*) case "$TEST_FAIL_STAGE" in repair_version|initial_retry) exit 50 ;; esac; cat >/dev/null ;;
+  *"不能续接旧版本或已配置的服务"*) [ "$TEST_FAIL_STAGE" != repair_version ] || exit 50; cat >/dev/null ;;
+  *"exec -T memory-db psql"*) [ "$TEST_FAIL_STAGE" != extensions ] || exit 54; printf '%s\\n' "${TEST_EXTENSIONS:-2}" ;;
+  *"up -d --no-build --wait --wait-timeout 180 memory-db"*) [ "$TEST_FAIL_STAGE" != database_start ] || exit 55 ;;
+  "image inspect "*) [ "$TEST_IMAGE_CACHE" != old ] || exit 1 ;;
   "pull ghcr.io/vectorize-io/hindsight:1.2.0-slim") [ "$TEST_FAIL_STAGE" != pull ] || exit 51 ;;
   *"exec -T memory-api python -c"*"models.json"*) printf '%s\n' '{"environment":{}}' ;;
   *"exec -T memory-api python -c"*) cat >/dev/null ;;
@@ -68,11 +72,54 @@ exit 0
     return {
         **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
         "HINDSIGHT_INSTALL_ROOT": str(root), "TEST_LOG": str(root / "calls"),
-        "TEST_OWNED_PORT": "", "HINDSIGHT_ASTRBOT_NETWORK": "",
+        "TEST_OWNED_PORT": "", "HINDSIGHT_ASTRBOT_NETWORK": "", "TEST_IMAGE_CACHE": "",
     }
 
 
 class InstallerTests(unittest.TestCase):
+    def test_first_start_failure_resumes_same_identity_and_checks_extensions_before_api(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = install_environment(root)
+            state = {**STATE, **free_ports()}
+            generated = script(installation(ROOT, state))
+            failed = subprocess.run(["bash"], input=generated, env={**env, "TEST_FAIL_STAGE": "database_start"},
+                                    text=True, capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("数据库启动失败", failed.stderr)
+            self.assertNotIn("安装完成", failed.stdout)
+            target = root / ("astrbot-memory-" + STATE["id"])
+            original = (target / ".env").read_bytes()
+            (root / "calls").write_text("")
+            resumed = subprocess.run(["bash"], input=generated, env={**env, "TEST_FAIL_STAGE": "initial_retry"},
+                                     text=True, capture_output=True)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual((target / ".env").read_bytes(), original)
+            self.assertEqual((target / "postgres/extensions.sql").stat().st_mode & 0o777, 0o644)
+            calls = (root / "calls").read_text()
+            self.assertIn("run --rm --no-deps --entrypoint python memory-api", calls)
+            self.assertLess(calls.index("exec -T memory-db psql"), calls.index("--wait-timeout 600"))
+            self.assertNotIn("down", calls)
+
+    def test_old_cache_does_not_skip_revised_build_and_bad_extensions_cannot_report_success(self):
+        for failure in ("", "extensions", "missing"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env = {**install_environment(root), "TEST_IMAGE_CACHE": "old", "TEST_FAIL_STAGE": failure,
+                       "TEST_EXTENSIONS": "1" if failure == "missing" else "2"}
+                result = subprocess.run(["bash"], input=script(installation(ROOT, {**STATE, **free_ports()})),
+                                        env=env, text=True, capture_output=True)
+                calls = (root / "calls").read_text()
+                self.assertIn("image inspect " + POSTGRES_IMAGE, calls)
+                self.assertIn("build memory-db", calls)
+                self.assertNotIn("build memory-api", calls)
+                if failure:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("安装完成", result.stdout)
+                    self.assertNotIn("--wait-timeout 600", calls)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_upgrade_waits_for_api_and_rejects_wrong_version_or_startup_timeout(self):
         from plugins.astrbot_plugin_hindsight_bridge.core.installer import UPGRADE_AFTER
 
@@ -193,9 +240,11 @@ class InstallerTests(unittest.TestCase):
         compose = assets(installation(ROOT, STATE))["compose.yaml"]
         self.assertEqual(compose.count("image: ghcr.io/vectorize-io/hindsight:1.2.0-slim"), 2)
         for material in (compose, (ROOT / "deploy/compose.yaml").read_text()):
+            self.assertIn("image: " + POSTGRES_IMAGE, material)
             grace = int(re.search(r"stop_grace_period: (\d+)s", material)[1])
             self.assertGreater(grace, 75)
         self.assertIn("docker stop --time 90", script(uninstallation(STATE)))
+        self.assertIn("COPY --chmod=0644 extensions.sql", (ROOT / "deploy/postgres/Dockerfile").read_text())
 
     def test_invalid_or_overlapping_ports_are_rejected_before_generating_commands(self):
         for value in (0, 65536, True, "9999:9999", "9999\n", 8888):

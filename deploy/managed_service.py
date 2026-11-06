@@ -59,6 +59,7 @@ class Runtime:
         self.lock = threading.Lock()
         self.process = self.transport = self.transport_thread = None
         self.active = None
+        self.applying_fingerprint = ""
         self.last_error = ""
         if embedding_fingerprint and not re.fullmatch(r"[0-9a-f]{64}", embedding_fingerprint):
             raise ConfigurationError("嵌入模型标识无效。")
@@ -75,10 +76,18 @@ class Runtime:
         return {
             "installation_id": self.identity, "protocol": 1,
             "configured": self.active is not None,
-            "ready": self.process is not None and self.process.poll() is None and self.healthy(),
+            "ready": not self.applying_fingerprint and self.process is not None
+            and self.process.poll() is None and self.healthy(),
             "embedding_fingerprint": self.active["embedding_fingerprint"] if self.active else "",
+            "configuration_fingerprint": self.fingerprint(self.active["environment"]) if self.active else "",
+            "applying": bool(self.applying_fingerprint),
+            "applying_fingerprint": self.applying_fingerprint,
             "error": self.last_error,
         }
+
+    def fingerprint(self, environment):
+        encoded = json.dumps(environment, sort_keys=True, separators=(",", ":")).encode()
+        return hmac.new(self.token.encode(), encoded, hashlib.sha256).hexdigest()
 
     @staticmethod
     def healthy():
@@ -147,10 +156,13 @@ class Runtime:
         if not self.lock.acquire(blocking=False):
             raise ConfigurationError("模型配置正在应用，请稍后刷新。")
         try:
+            if self.active and self.active["environment"] == candidate["environment"] and self.status()["ready"]:
+                return self.status()
             expected = self.active["embedding_fingerprint"] if self.active else self.initial_fingerprint
             if expected and expected != candidate["embedding_fingerprint"]:
                 raise ConfigurationError("嵌入模型或维数变化需要迁移已有向量数据。")
             previous = self.active
+            self.applying_fingerprint = self.fingerprint(candidate["environment"])
             self.stop()
             try:
                 values, descriptors = self.environment(candidate)
@@ -180,8 +192,10 @@ class Runtime:
                     self.start(previous)
                 self.last_error = "模型连接或应用失败，请检查所选模型的地址、密钥与网络。"
                 raise ConfigurationError(self.last_error) from None
+            self.applying_fingerprint = ""
             return self.status()
         finally:
+            self.applying_fingerprint = ""
             self.lock.release()
 
 
