@@ -433,7 +433,8 @@ class HindsightClient:
             result[key] = stamp
         return result
 
-    async def ensure_auth(self, force: bool = False, *, timeout: float | None = None) -> None:
+    async def ensure_auth(self, force: bool = False, *, timeout: float | None = None,
+                          _connection_sequence: int | None = None) -> None:
         if not force and time.monotonic() < self.auth_until:
             return
         previous_auth = self.auth_until
@@ -443,7 +444,7 @@ class HindsightClient:
             ):
                 return
             path = "/v1/default/banks"
-            sequence = self.next_connection_sequence()
+            sequence = _connection_sequence if _connection_sequence is not None else self.next_connection_sequence()
             try:
                 await self.request("GET", path, timeout=timeout, _connection_sequence=sequence)
                 for wrong_key in ("", "invalid-" + uuid.uuid4().hex):
@@ -462,11 +463,12 @@ class HindsightClient:
             self.connection_result(True, sequence=sequence)
 
     async def check_connection(self, *, timeout=10, force=False):
+        sequence = self.next_connection_sequence()
         try:
             async with asyncio.timeout(timeout):
-                await self.ensure_auth(force=force, timeout=timeout)
+                await self.ensure_auth(force=force, timeout=timeout, _connection_sequence=sequence)
         except TimeoutError:
-            self.connection_result(False, "auth_timeout")
+            self.connection_result(False, "auth_timeout", sequence=sequence)
             raise HindsightError("auth_timeout") from None
 
     async def create_bank(self, bank: str) -> None:

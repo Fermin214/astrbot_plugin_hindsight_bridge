@@ -100,8 +100,14 @@ class Managed(Acceptance):
                 await frame.locator("#chat-provider").select_option("delivery-chat")
                 await frame.locator("#embedding-provider").select_option("delivery-embedding")
                 await frame.locator("#rerank-provider").select_option("delivery-rerank")
+                installation_id = (await self.bootstrap()).get("installation_id")
                 async def models_ready():
-                    status = await self.http("GET", self.prefix + "/models/status")
+                    if self.settings.get("upgrade_from_1_1"):
+                        status = await self.http("GET", self.prefix + "/models/status")
+                    else:
+                        status = await self.http("POST", self.prefix + "/managed/status", payload={
+                            "mode": "managed", "installation_id": installation_id,
+                        })
                     if status.get("status") in {"failed", "interrupted"}:
                         raise RuntimeError("Actual wizard model validation failed: " + status.get("message", ""))
                     return status if status.get("status") == "succeeded" else None

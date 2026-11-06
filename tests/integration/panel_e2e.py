@@ -289,12 +289,16 @@ async def verify_panel(acceptance, page, context, frame, scope):
 
     # Connection drafts survive polling and config conflicts; reload fails without losing them.
     await frame.locator("#tab-setup").click()
+    managed = (await acceptance.bootstrap())["config"]["managed"]
     await frame.locator("#control-plane-url").fill("https://draft-panel.invalid")
-    await frame.locator("#api-key").fill("owned-unsaved-key")
+    if managed:
+        assert await frame.locator("#api-key").is_hidden()
+    else:
+        await frame.locator("#api-key").fill("owned-unsaved-key")
     await refresh()
     await page.wait_for_timeout(1500)
     assert await frame.locator("#control-plane-url").input_value() == "https://draft-panel.invalid"
-    assert await frame.locator("#api-key").input_value() == "owned-unsaved-key"
+    assert await frame.locator("#api-key").input_value() == ("" if managed else "owned-unsaved-key")
     stale_revision = (await acceptance.bootstrap())["config_revision"]
     await acceptance.config(control_plane_url="http://127.0.0.1:9988")
     await refresh()

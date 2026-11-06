@@ -263,6 +263,28 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertIn("记忆准备失败", req.extra_user_content_parts[0].text)
         self.assertEqual(self.requests, [])
 
+    async def test_chat_auth_timeout_does_not_overwrite_a_newer_successful_request(self):
+        self.config["recall_timeout"] = 0.2
+        client = self.plugin.client
+        client.auth_until = time.monotonic() + 60
+        entered = asyncio.Event()
+
+        async def stalled(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        client.ensure_auth = AsyncMock(side_effect=stalled)
+        reading = asyncio.create_task(self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp))
+        try:
+            await entered.wait()
+            await client.request("GET", "/v1/version")
+            with self.assertRaisesRegex(HindsightError, "auth_timeout"):
+                await reading
+            self.assertTrue(client.connection["connected"])
+        finally:
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+
     async def test_revocation_maintenance_and_erasure_discard_late_content(self):
         for change in ("permission", "maintenance", "forget"):
             with self.subTest(change=change):
@@ -464,6 +486,38 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
 
 
 class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
+    async def test_outer_probe_timeout_preserves_newer_evidence_and_records_its_own_failure(self):
+        for newer_status in (None, 200, 401):
+            with self.subTest(newer_status=newer_status):
+                entered = asyncio.Event()
+
+                async def service(request):
+                    if request.url.path == "/newer":
+                        return httpx.Response(newer_status, json={})
+                    if request.headers.get("Authorization") == "Bearer key":
+                        return httpx.Response(200, json={"banks": []})
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+                client.auth_until = time.monotonic() + 60
+                probe = asyncio.create_task(client.check_connection(force=True, timeout=0.05))
+                try:
+                    await entered.wait()
+                    if newer_status == 200:
+                        await client.request("GET", "/newer")
+                    elif newer_status == 401:
+                        with self.assertRaises(HindsightError):
+                            await client.request("GET", "/newer")
+                    with self.assertRaisesRegex(HindsightError, "auth_timeout"):
+                        await probe
+                    self.assertEqual(client.connection["connected"], newer_status == 200)
+                    self.assertEqual(client.connection["code"], "" if newer_status == 200 else "http_401" if newer_status else "auth_timeout")
+                finally:
+                    probe.cancel()
+                    await asyncio.gather(probe, return_exceptions=True)
+                    await client.close()
+
     async def test_late_success_cannot_erase_newer_connection_failure(self):
         entered, release = asyncio.Event(), asyncio.Event()
 
