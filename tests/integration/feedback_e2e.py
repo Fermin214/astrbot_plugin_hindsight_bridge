@@ -121,13 +121,14 @@ class Feedback(Acceptance):
                 assert database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key") == settings
                 assert legacy.stat().st_mode == mode
                 target = self.runtime.parent.parent / (NAME + "_control")
-                assert not target.exists()
+                assert not (target / "control.sqlite3").exists()
                 self.passed("native_026_upgrade_rejects_external_path_without_replacement_journal_or_external_mutation")
 
                 config_file = ROOT / "verification/data/config" / (NAME + "_config.json")
                 def migrate():
-                    shutil.copytree(legacy, target)
-                    value = json.loads(config_file.read_text())
+                    assert not list(target.iterdir())
+                    shutil.copytree(legacy, target, dirs_exist_ok=True)
+                    value = json.loads(config_file.read_text(encoding="utf-8-sig"))
                     value["control_state_dir"] = ""
                     config_file.write_text(json.dumps(value, indent=2))
                 await self.restart(migrate)
@@ -137,7 +138,7 @@ class Feedback(Acceptance):
                 latest = dict((row["key"], row["value"]) for row in database(target / "control.sqlite3", "SELECT key,value FROM settings"))
                 original = dict((row["key"], row["value"]) for row in settings)
                 assert all(latest[key] == original[key] for key in ("deployment_id", "control_id", "revision"))
-                self.passed("stopped_full_control_directory_copy_and_default_path_preserve_identity_revision_bank_mode_selection")
+                self.passed("stopped_full_control_copy_to_dedicated_mount_preserves_identity_revision_bank_mode_selection")
                 await self.action(identifier, "mode", mode="readonly")
                 await page.goto(self.dashboard + "/#/plugin-view/" + NAME + "/memory")
                 await self.dismiss_host_notice(page)

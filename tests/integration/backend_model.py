@@ -46,7 +46,9 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.headers.get("Authorization") != "Bearer " + self.server.token:
+        local_chat = (getattr(self.server, "local_chat", False) and self.path == "/v1/chat/completions"
+                      and self.headers.get("Authorization") is None)
+        if self.headers.get("Authorization") != "Bearer " + self.server.token and not local_chat:
             self.send_error(401)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -96,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
             elif "creates" in properties:
                 self.server.counts["consolidation"] += 1
                 content = '{"creates":[],"updates":[],"deletes":[]}'
-            elif body.get("tools"):
+            elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
                 choice = body.get("tool_choice")
                 name = choice.get("function", {}).get("name") if isinstance(choice, dict) else "done"
                 message = {"role": "assistant", "content": None, "tool_calls": [{

@@ -30,7 +30,11 @@ def main():
         args.model_environment.write_text(json.dumps({"ASTRBOT_MEMORY_MODEL_CONFIG": "{}"}))
         state = live.Environment(args)
         state.driver = "feedback_e2e.py"
+        control_volume = state.output / "control-volume"
+        control_volume.mkdir()
+        state.astrbot_mounts = ["-v", str(control_volume) + ":/delivery/verification/data/plugin_data/astrbot_plugin_hindsight_bridge_control"]
         model = Model(("127.0.0.1", 0), state.settings["chat_token"])
+        model.local_chat = True
         state.magpie = f"http://127.0.0.1:{model.server_port}/v1"
         state.models.update(
             HINDSIGHT_API_EMBEDDINGS_PROVIDER="openai",

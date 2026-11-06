@@ -56,6 +56,8 @@ class HindsightBridge(Star):
         self.warning_log = WarningLog(logger)
         self.recall_outcomes = {}
         self.background_outcomes = {}
+        self.background_sequence = 0
+        self.background_sequences = {}
         self.stopping = False
         self.permissions = None
         self.source_accounts = {}
@@ -162,6 +164,7 @@ class HindsightBridge(Star):
             self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer)
             self.recall_outcomes.clear()
             self.background_outcomes.clear()
+            self.background_sequences.clear()
             self.outbox = Outbox(
                 Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")),
                 service,
@@ -172,6 +175,7 @@ class HindsightBridge(Star):
                 max_tasks=int(self.config.get("queue_max_tasks", 10000)),
                 max_bytes=int(self.config.get("queue_max_mib", 64)) * 1024 * 1024,
                 control_directory=control_directory,
+                control_root=self.control_root(),
                 agent_id=str(self.config.get("agent_id", "default")),
             )
             self.refresh_permissions()
@@ -198,12 +202,15 @@ class HindsightBridge(Star):
             logger.error("Hindsight: %s", self.status)
             await self._close_resources()
 
-    def control_directory(self):
+    def control_root(self):
         # Derive the allocation before resolving links, so a redirected root is rejected.
-        root = (
+        return (
             Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")).parent
             / "astrbot_plugin_hindsight_bridge_control"
         )
+
+    def control_directory(self):
+        root = self.control_root()
         path = str(self.config.get("control_state_dir", "")).strip()
         directory = Path(path).expanduser() if path else root
         if not directory.is_absolute():
@@ -631,6 +638,10 @@ class HindsightBridge(Star):
             if not self.outbox.can_recall(scope):
                 self.record_recall(scope, "skipped", started)
                 return
+            self.background_sequence += 1
+            sequence = self.background_sequence
+            background_key = (self.outbox.connection_id, scope["owner_id"])
+            self.background_sequences[background_key] = sequence
             outcome = "error"
             try:
                 async with asyncio.timeout(2):
@@ -732,8 +743,11 @@ class HindsightBridge(Star):
                         if not content:
                             content = recall_notice(code)
                         req.extra_user_content_parts.append(TextPart(text=content).mark_as_temp())
-                        if read_guard is not None and read_guard.selection["enabled"]:
-                            self.background_outcomes[(self.outbox.connection_id, scope["owner_id"])] = {
+                        if (
+                            read_guard is not None and read_guard.selection["enabled"]
+                            and self.background_sequences.get(background_key) == sequence
+                        ):
+                            self.background_outcomes[background_key] = {
                                 "bank": scope["bank"], "revision": scope["revision"],
                                 "selection_revision": read_guard.selection["revision"],
                                 **(background_status or {"code": code, "used": False}),

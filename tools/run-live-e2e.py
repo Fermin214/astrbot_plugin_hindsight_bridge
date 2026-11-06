@@ -425,7 +425,7 @@ class Environment:
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
                   "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", "/tmp/hindsight-bridge-token-cache:/token-cache:ro"]
         self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
-        self.launch("astrbot", self.astrbot_image, "--memory", "1536m", *mounts)
+        self.launch("astrbot", self.astrbot_image, "--memory", "1536m", *mounts, *getattr(self, "astrbot_mounts", ()))
         dashboard = f'http://127.0.0.1:{self.settings["dashboard_port"]}'
         self.wait(lambda: self.ready_http(dashboard + "/api/v1/auth/setup-status"))
         print("Real AstrBot dashboard is ready", flush=True)

@@ -656,6 +656,19 @@ class MemoryPanel:
                         }
                 except QueueError as exc:
                     result[-1]["background"] = {"error": self.error_message(str(exc))}
+        changed_accounts = {
+            (row["platform_instance_id"], row["user_id"]) for row in result
+            if row.get("background", {}).get("invalidated")
+        }
+        for row in result:
+            if (
+                not row["historical"] and not row.get("background", {}).get("revision", 0)
+                and (row["platform_instance_id"], row["user_id"]) in changed_accounts
+            ):
+                row["background"] = {
+                    **row.get("background", {}), "enabled": False, "invalidated": True,
+                    "message": self.error_message("background_scope_changed"),
+                }
         return result
 
     async def bot_id(self, platform):

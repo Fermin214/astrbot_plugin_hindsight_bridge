@@ -60,6 +60,7 @@ class Outbox:
         max_tasks: int = 10000,
         max_bytes: int = 64 * 1024 * 1024,
         control_directory: Path | None = None,
+        control_root: Path | None = None,
         agent_id: str = "default",
     ):
         self.db = self.lock = self.control = None
@@ -86,6 +87,10 @@ class Outbox:
             control_directory
             or self.directory.with_name(self.directory.name + "-control")
         ).resolve()
+        if control_root is not None:
+            root = Path(control_root)
+            if root.resolve() != root or not control_directory.is_relative_to(root):
+                raise QueueError("control_directory_outside_plugin")
         runtime_directory = self.directory.resolve()
         if control_directory.is_relative_to(
             runtime_directory
@@ -109,7 +114,7 @@ class Outbox:
                 raise QueueError("unsupported_database_version")
             self._schema()
             deployment = self.setting("deployment_id")
-            self.control = Control(control_directory, deployment, required=version >= 2)
+            self.control = Control(control_directory, deployment, required=version >= 2, root=control_root)
             self.access = Access(self.control, self.connection_id)
             control_id = self.control.setting("control_id")
             if self.setting("control_id") not in ("", control_id):
