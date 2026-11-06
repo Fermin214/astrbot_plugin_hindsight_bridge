@@ -24,11 +24,14 @@ def reference(queue, scope):
             or type(stored.get("revision")) is not int or stored["revision"] < 1
             or type(stored.get("enabled")) is not bool
             or any(not isinstance(stored.get(k), str) for k in ("page_id", "mental_model_id"))
+            or ("invalidated" in stored and type(stored["invalidated"]) is not bool)
         ):
             raise ValueError
     except (ValueError, TypeError):
         raise QueueError("background_settings_invalid") from None
     default["revision"] = stored["revision"]
+    if stored.get("invalidated"):
+        return {**default, "invalidated": True}
     source = Scope(*json.loads(scope["identity_json"]))
     grant = queue.access.authorization(source.platform_instance_id, source.user_id)
     if (
@@ -37,6 +40,8 @@ def reference(queue, scope):
         or stored.get("source_id") != source.id or stored.get("bank") != scope["bank"]
         or stored.get("generation") != scope["generation"]
     ):
+        if stored["page_id"] or stored["mental_model_id"]:
+            default["invalidated"] = True
         return default
     return {k: stored[k] for k in default}
 

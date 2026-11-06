@@ -118,12 +118,16 @@ class HindsightBridge(Star):
             "background_index_too_large": "知识页目录超过读取限制，请联系管理员从官方面板整理目录",
             "background_settings_invalid": "知识页选择或使用开关无法读取，请管理员检查最新控制库；不要恢复旧控制快照",
             "background_changed": "知识页选择、使用开关或账号范围已变化，请刷新后重试",
+            "background_scope_changed": "身份或记忆库已变化，知识页选择已失效，请重新选择",
             "background_missing": "找不到所选知识页，请在官方面板确认后回到插件页重新选择",
             "background_empty": "知识页还没有正文，请等待官方生成完成；一直为空时请管理员检查已有记忆和标签筛选",
             "background_timeout": "读取知识页超时，请检查记忆服务后重试",
             "background_too_large": "知识页太长，该次聊天没有提供给机器人；请在官方面板调整为短页，记忆检索仍按所选记忆模式执行",
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
+            "control_directory_must_be_absolute": "控制目录须填写绝对路径，或留空使用默认目录",
+            "control_directory_outside_plugin": "控制目录须位于 AstrBot 的 data/plugin_data/astrbot_plugin_hindsight_bridge_control 内；旧外部目录请先按备份与恢复指南停机迁移，再修改配置并重载",
+            "control_directory_invalid": "控制目录路径无法解析，请检查路径和符号链接，按备份与恢复指南迁移后重载",
         }
         if not code:
             return "无"
@@ -142,6 +146,7 @@ class HindsightBridge(Star):
                 logger.warning("Hindsight: %s", self.status)
             return
         try:
+            control_directory = self.control_directory()
             timeout = recall_timeout(self.config)
             try:
                 accounts = configuration_accounts(self.config.get("allowed_accounts", []))
@@ -166,7 +171,7 @@ class HindsightBridge(Star):
                 zone=host_timezone(self.context),
                 max_tasks=int(self.config.get("queue_max_tasks", 10000)),
                 max_bytes=int(self.config.get("queue_max_mib", 64)) * 1024 * 1024,
-                control_directory=self.control_directory(),
+                control_directory=control_directory,
                 agent_id=str(self.config.get("agent_id", "default")),
             )
             self.refresh_permissions()
@@ -194,15 +199,22 @@ class HindsightBridge(Star):
             await self._close_resources()
 
     def control_directory(self):
+        # Derive the allocation before resolving links, so a redirected root is rejected.
+        root = (
+            Path(StarTools.get_data_dir("astrbot_plugin_hindsight_bridge")).parent
+            / "astrbot_plugin_hindsight_bridge_control"
+        )
         path = str(self.config.get("control_state_dir", "")).strip()
-        if not path:
-            return Path(
-                StarTools.get_data_dir("astrbot_plugin_hindsight_bridge_control")
-            )
-        directory = Path(path).expanduser()
+        directory = Path(path).expanduser() if path else root
         if not directory.is_absolute():
             raise QueueError("control_directory_must_be_absolute")
-        return directory
+        try:
+            resolved = directory.resolve()
+            if root.resolve() != root or not resolved.is_relative_to(root):
+                raise QueueError("control_directory_outside_plugin")
+        except (OSError, RuntimeError):
+            raise QueueError("control_directory_invalid") from None
+        return resolved
 
     def refresh_permissions(self):
         if self.outbox is not None:
@@ -423,7 +435,6 @@ class HindsightBridge(Star):
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         tasks = []
         stage = "auth"
-        self.background_outcomes.pop((guard.queue.connection_id, guard.scope["owner_id"]), None)
 
         async def read_page():
             try:
@@ -473,13 +484,7 @@ class HindsightBridge(Star):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
                     guard.queue.apply_control()
                     raise HindsightError("bank_missing")
-                self.background_outcomes[(guard.queue.connection_id, guard.scope["owner_id"])] = {
-                    "bank": guard.scope["bank"], "revision": guard.scope["revision"],
-                    "selection_revision": guard.selection["revision"], "code": page_code,
-                    "used": background_used,
-                    "checked_at": time.time(),
-                }
-                return block, recall_code, facts_used
+                return block, recall_code, facts_used, {"code": page_code, "used": background_used}
         except TimeoutError:
             raise HindsightError("auth_timeout" if stage == "auth" else "recall_timeout") from None
         finally:
@@ -617,6 +622,7 @@ class HindsightBridge(Star):
         code = ""
         content = ""
         read_guard = None
+        background_status = None
         started = time.monotonic()
         try:
             self.refresh_permissions()
@@ -682,7 +688,7 @@ class HindsightBridge(Star):
                     for m in capture.history
                 ] if capture else ()
             if read_guard.selection["enabled"]:
-                memory, code, has_facts = await self.recall_background(
+                memory, code, has_facts, background_status = await self.recall_background(
                     event, read_guard, incoming.text, history, timestamp=incoming.iso_timestamp,
                 )
                 outcome = "error" if code else "success" if has_facts else "empty"
@@ -726,6 +732,13 @@ class HindsightBridge(Star):
                         if not content:
                             content = recall_notice(code)
                         req.extra_user_content_parts.append(TextPart(text=content).mark_as_temp())
+                        if read_guard is not None and read_guard.selection["enabled"]:
+                            self.background_outcomes[(self.outbox.connection_id, scope["owner_id"])] = {
+                                "bank": scope["bank"], "revision": scope["revision"],
+                                "selection_revision": read_guard.selection["revision"],
+                                **(background_status or {"code": code, "used": False}),
+                                "checked_at": time.time(),
+                            }
             except Exception as exc:  # noqa: BLE001 -- diagnostics must preserve chat
                 self.warning("local_" + type(exc).__name__)
             if capture and capture.created and self.outbox is not None:

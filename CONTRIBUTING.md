@@ -33,6 +33,8 @@ CI 使用固定 Hindsight 1.1.0 / 1.2.0 镜像分别运行 `tools/check-model-pr
 
 ## 修改与反馈
 
+`python tools/run-feedback-e2e.py --output /tmp/新的测试目录` 使用独立的真实 AstrBot/Hindsight、原生 Dashboard 与合成平台/模型验证知识页反馈、0.2.6 升级、外部控制目录拒绝、停机迁移和旧业务快照恢复。支持 `--astrbot-version 4.29.1|4.29.4` 与 `--hindsight-version 1.1.0|1.2.0`，不调用外部模型，不使用真实 QQ 账号。需要 Docker、本地官方镜像及测试依赖；结束后清理自身容器和数据卷，证据保留在指定目录。
+
 提交问题时提供版本、复现步骤、预期、实际结果和脱敏日志。不要提交账号凭据、真实聊天记录、运行数据库或本地环境文件。
 
 恢复业务快照不得覆盖更新的独立控制记录。

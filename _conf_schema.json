@@ -34,7 +34,7 @@
     "description": "身份与删除记录存放目录",
     "type": "string",
     "default": "",
-    "hint": "留空时在 AstrBot 数据目录下创建 astrbot_plugin_hindsight_bridge_control。恢复备份时须保留此目录中的最新数据，以免重新上传已删除的记忆。"
+    "hint": "留空使用 data/plugin_data/astrbot_plugin_hindsight_bridge_control；自定义绝对路径只能位于此专属目录内，符号链接不能指向外部。旧外部目录须按备份与恢复指南停机迁移。恢复业务备份时保留最新控制数据。"
   },
   "agent_id": {
     "description": "记忆归属识别码（Agent ID）",

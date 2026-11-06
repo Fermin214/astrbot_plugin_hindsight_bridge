@@ -353,7 +353,8 @@ class Control:
             previous = self.setting(key)
             if previous:
                 try:
-                    revision = json.loads(previous)["revision"]
+                    previous = json.loads(previous)
+                    revision = previous["revision"]
                     if type(revision) is not int or revision < 1:
                         raise ValueError
                 except (ValueError, KeyError, TypeError):
@@ -361,6 +362,7 @@ class Control:
                 self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
                     "format": 1, "revision": revision + 1, "enabled": False,
                     "page_id": "", "mental_model_id": "",
+                    "invalidated": bool(previous.get("page_id") or previous.get("invalidated")),
                 }), key))
             self.bump()
         return self.db.execute(

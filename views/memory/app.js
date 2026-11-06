@@ -624,11 +624,14 @@ function renderBackground() {
   if (saved.page_id && !backgroundDraft.pages.some((page) => page.page_id === saved.page_id)) options.push(option(saved.page_id, saved.page_id, !!blocked));
   select.replaceChildren(...options);
   select.value = saved.enabled ? saved.page_id : "";
-  let status = saved.error || "";
-  if (!unavailable && scope.summary?.maintenance) status = "插件读写已暂停，知识页不会传入聊天。";
-  else if (!unavailable && scope.mode === "paused" && saved.enabled) status = "停用记忆模式下，知识页不会传入聊天。";
-  else if (!backgroundDraft.loaded && saved.status?.message) status = saved.status.message;
-  else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "这个记忆库还没有知识页，可在记忆面板中创建。";
+  const messages = [saved.error || saved.message || ""];
+  if (!unavailable && scope.summary?.maintenance) messages.push("插件读写已暂停，知识页不会传入聊天。");
+  else if (!unavailable && scope.mode === "paused" && saved.enabled) messages.push("停用记忆模式下，知识页不会传入聊天。");
+  if (saved.enabled && !saved.invalidated && !scope?.historical) {
+    messages.push(saved.status?.message || "已选择知识页，聊天使用结果将在读取后显示。");
+  }
+  if (backgroundDraft.loaded && !backgroundDraft.pages.length) messages.push("这个记忆库还没有知识页，可在记忆面板中创建。");
+  const status = messages.filter(Boolean).join(" ");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();

@@ -223,6 +223,9 @@ class References(unittest.TestCase):
         self.assertEqual(saved["revision"], 1)
         self.assertFalse(saved["enabled"])
         self.assertEqual(saved["page_id"], "")
+        self.assertTrue(saved["invalidated"])
+        self.select(revision=saved["revision"])
+        self.assertNotIn("invalidated", reference(self.queue, self.scope))
 
     def test_paused_manual_read_differs_from_automatic_and_maintenance_blocks_both(self):
         self.select()
@@ -245,7 +248,7 @@ class References(unittest.TestCase):
         self.scope = self.queue.scope(self.incoming)
         self.assertFalse(guard.valid(self.plugin))
         saved = reference(self.queue, self.scope)
-        self.assertEqual(saved, {"revision": 2, "enabled": False, "page_id": "", "mental_model_id": ""})
+        self.assertEqual(saved, {"revision": 2, "enabled": False, "page_id": "", "mental_model_id": "", "invalidated": True})
         self.queue.close()
         self.queue = Outbox(self.path / "runtime", "service", "http://memory.test", credential_fingerprint="key")
         self.assertEqual(reference(self.queue, self.queue.scope_owner(self.scope["scope_id"])), saved)

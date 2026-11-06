@@ -79,6 +79,10 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Native background marker.", row["payload"])
         self.assertEqual(row["state"], "ready")
         self.assertEqual(self.plugin.hooks, 0)
+        panel = self.panel(SimpleNamespace(method="GET", query={}, username="admin"))
+        status = (await panel.user_scopes())[0]["background"]["status"]
+        self.assertTrue(status["used"])
+        self.assertEqual(status["message"], "上次聊天已使用知识页。")
         await self.plugin.add_memory(event, req)
         self.assertEqual(len(req.extra_user_content_parts), 1)
 
@@ -100,6 +104,10 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Full surviving fact.", req.extra_user_content_parts[0].text)
         self.assertNotIn("Native background marker.", req.extra_user_content_parts[0].text)
         self.assertEqual(self.plugin.outbox.db.execute("SELECT state FROM outbox").fetchone()[0], "ready")
+        panel = self.panel(SimpleNamespace(method="GET", query={}, username="admin"))
+        status = (await panel.user_scopes())[0]["background"]["status"]
+        self.assertFalse(status["used"])
+        self.assertIn("读取知识页超时", status["message"])
 
     async def test_recall_timeout_preserves_completed_background_with_failure_status(self):
         self.select()
@@ -200,6 +208,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                 await task
                 self.assertEqual(req.extra_user_content_parts, [])
                 self.assertEqual(self.plugin.hooks, 0)
+                self.assertEqual(self.plugin.background_outcomes, {})
 
     async def test_authentication_delay_does_not_start_page_or_second_full_deadline(self):
         self.select()
@@ -211,6 +220,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         await self.plugin.add_memory(event, req)
         self.assertFalse(any("mental-models" in str(call.url) for call in self.requests))
         self.assertEqual(self.plugin.recall_status(self.scope())["code"], "auth_timeout")
+        self.assertEqual(next(iter(self.plugin.background_outcomes.values()))["code"], "auth_timeout")
 
     async def test_cancelled_parallel_read_leaves_no_running_tasks_or_notice(self):
         self.select()

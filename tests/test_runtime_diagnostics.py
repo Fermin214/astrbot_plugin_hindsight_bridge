@@ -160,7 +160,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin = bridge_class(self.directory, self.logger)(self.context, self.config)
         self.plugin.outbox = Outbox(
             self.directory / "runtime", "test-service", "http://memory.test",
-            credential_fingerprint=sha256("key"), control_directory=self.directory / "control",
+            credential_fingerprint=sha256("key"), control_directory=self.plugin.control_directory(),
         )
         self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
         self.results = []
@@ -346,6 +346,33 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.plugin.client)
             self.assertIsNone(self.plugin.outbox)
             self.assertNotIn("secret", str(self.logger.mock_calls))
+
+    async def test_control_paths_are_confined_before_initialization_opens_resources(self):
+        await self.plugin._close_resources()
+        root = self.plugin.control_directory()
+        self.config["control_state_dir"] = str(root / "nested" / ".." / "journal")
+        self.assertEqual(self.plugin.control_directory(), root / "journal")
+        self.assertFalse((root / "journal").exists())
+        outside = self.directory / "other-plugin"
+        outside.mkdir(mode=0o755)
+        (root / "escape").symlink_to(outside, target_is_directory=True)
+        (root / "inside").symlink_to(root, target_is_directory=True)
+        self.config["control_state_dir"] = str(root / "inside" / "journal")
+        self.assertEqual(self.plugin.control_directory(), root / "journal")
+        for path, code in (
+            ("relative", "control_directory_must_be_absolute"),
+            (str(outside), "control_directory_outside_plugin"),
+            (str(root / ".." / "other-plugin"), "control_directory_outside_plugin"),
+            (str(root) + "-suffix", "control_directory_outside_plugin"),
+            (str(root / "escape" / "new"), "control_directory_outside_plugin"),
+        ):
+            self.config["control_state_dir"] = path
+            await self.plugin.initialize()
+            self.assertIn(code, self.plugin.status)
+            self.assertIsNone(self.plugin.client)
+            self.assertIsNone(self.plugin.outbox)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
 
     async def test_background_probe_retries_then_cancels_without_leaking_resources(self):
         await self.plugin.client.close()
