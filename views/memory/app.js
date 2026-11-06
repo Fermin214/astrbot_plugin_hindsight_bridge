@@ -179,6 +179,7 @@ async function loadManagedSetup() {
     10000, "获取配套安装记录超时，请重试。");
   if (revision !== managedReadRevision || !managedMode()) return;
   managedSetup = response;
+  updateConnectionMode();
   $("api-url").value = response.api_url || "";
   for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, response.selection?.[`${kind}_provider_id`]);
   updateProviderHelp();
@@ -187,7 +188,8 @@ async function loadManagedSetup() {
 
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  $("setup-intro").hidden = data?.config.configured === true;
+  $("setup-intro").hidden = !managed || (data?.config.configured === true
+    && !!(managedSetup?.has_installation || data?.has_installation));
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;

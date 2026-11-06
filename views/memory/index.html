@@ -68,13 +68,13 @@
     <section id="panel-setup" class="page-content" role="tabpanel" aria-labelledby="tab-setup" hidden>
       <fieldset id="setup-fields" disabled>
         <legend class="sr-only">插件设置</legend>
-        <section id="setup-intro" class="surface" hidden>
-          <h2>连接 Hindsight</h2>
+        <section class="surface">
+          <h2>连接方式</h2>
           <fieldset class="connection-options"><legend class="sr-only">连接方式</legend>
             <label class="choice"><input type="radio" name="connection-mode" value="managed" checked>安装配套服务</label>
             <label class="choice"><input type="radio" name="connection-mode" value="existing">连接已有服务</label>
           </fieldset>
-          <div id="managed-settings"><button id="prepare" type="button" class="primary">生成安装命令</button></div>
+          <div id="setup-intro" hidden><div id="managed-settings"><button id="prepare" type="button" class="primary">生成安装命令</button></div></div>
         </section>
         <section id="models-settings" class="surface">
           <h2>模型配置</h2>

@@ -56,6 +56,15 @@ async def verify_panel(acceptance, page, context, frame, scope):
     save_button = "#save-access" if (await acceptance.bootstrap())["config"]["managed"] else "#save-settings"
     await frame.locator(save_button).click()
     await until(lambda: frame.locator(save_button).is_enabled(), timeout=30)
+    await frame.locator("#service-version-check").click()
+    await until(lambda: frame.locator("#service-version-check").is_enabled(), timeout=15)
+    version_result = await frame.locator("#version-check-result").inner_text()
+    assert acceptance.settings["hindsight_version"] in version_result
+    assert "插件支持的配套版本" in version_result
+    await refresh()
+    await page.wait_for_timeout(1500)
+    assert await frame.locator("#version-check-result").inner_text() == version_result
+    acceptance.passed("managed_manual_version_result_survives_real_bootstrap_refresh")
     assert (await acceptance.config())["allowed_accounts"] == configuration["allowed_accounts"]
     assert await frame.locator("#setup-intro").is_hidden()
     await frame.locator("#backup-guide").click()
@@ -388,6 +397,9 @@ async def verify_panel(acceptance, page, context, frame, scope):
                 assert await frame.locator("details").count() == 0
                 assert await frame.locator("body").evaluate("node => node.scrollWidth <= innerWidth + 1")
                 await page.screenshot(path=str(ROOT / ("panel-" + label + "-" + tab + "-" + theme + ".png")), full_page=True)
+                if tab == "memories":
+                    await frame.locator(".stats").scroll_into_view_if_needed()
+                    await page.screenshot(path=str(ROOT / ("panel-" + label + "-counts-" + theme + ".png")), full_page=True)
     await page.set_viewport_size({"width": 1280, "height": 900})
     await frame.locator("body").evaluate("() => document.documentElement.dataset.theme = 'light'")
     assert (await selected())["bank"] == scope["bank"]

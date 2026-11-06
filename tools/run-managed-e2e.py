@@ -167,8 +167,15 @@ def main():
                         help="install the previous native plugin/service, then use the current browser upgrade flow")
     parser.add_argument("--verify-panel", action="store_true",
                         help="verify panel layout, user lifecycle and pause recovery in the owned browser environment")
+    parser.add_argument("--scenario", choices=("full", "connection", "mode"), default="full",
+                        help="check active model edits and mode switching, or mode switching alone")
     args = parser.parse_args()
     state = Managed(args)
+    if args.scenario in {"connection", "mode"}:
+        state.driver = "connection_e2e.py"
+        state.settings["connection_check_mode"] = "managed"
+        state.settings["connection_check_step"] = args.scenario
+        live.private_json(state.output / "live-settings.json", state.settings)
     state.model_environment = args.model_environment
     try:
         state.prepare_network()
