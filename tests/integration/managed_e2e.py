@@ -100,8 +100,38 @@ class Managed(Acceptance):
                 await frame.locator("#chat-provider").select_option("delivery-chat")
                 await frame.locator("#embedding-provider").select_option("delivery-embedding")
                 await frame.locator("#rerank-provider").select_option("delivery-rerank")
+                installation_id = (await self.bootstrap()).get("installation_id")
+                interrupted_request = ""
+
+                async def lose_start_response(route):
+                    nonlocal interrupted_request
+                    response = await route.fetch()
+                    if response.status != 200 or interrupted_request:
+                        await route.fulfill(response=response)
+                        return
+                    interrupted_request = route.request.post_data_json["request_id"]
+
+                    async def applying():
+                        job = await self.http("POST", self.prefix + "/managed/status", payload={
+                            "mode": "managed", "installation_id": installation_id,
+                        })
+                        return job.get("stage") == "applying"
+
+                    await until(applying, timeout=60)
+                    await self.http("POST", "/api/v1/plugins/" + NAME + "/reload", payload={})
+                    await route.abort("failed")
+
+                connect_pattern = "**" + self.prefix + "/managed/connect"
+                if not self.settings.get("upgrade_from_1_1"):
+                    await page.route(connect_pattern, lose_start_response)
+
                 async def models_ready():
-                    status = await self.http("GET", self.prefix + "/models/status")
+                    if self.settings.get("upgrade_from_1_1"):
+                        status = await self.http("GET", self.prefix + "/models/status")
+                    else:
+                        status = await self.http("POST", self.prefix + "/managed/status", payload={
+                            "mode": "managed", "installation_id": installation_id,
+                        })
                     if status.get("status") in {"failed", "interrupted"}:
                         raise RuntimeError("Actual wizard model validation failed: " + status.get("message", ""))
                     return status if status.get("status") == "succeeded" else None
@@ -117,6 +147,8 @@ class Managed(Acceptance):
                         await until(lambda: frame.locator("#save-models").is_enabled(), timeout=30)
                         await asyncio.sleep(3)
                 await until(lambda: frame.locator("#save-models").is_enabled(), timeout=20)
+                if not self.settings.get("upgrade_from_1_1"):
+                    await page.unroute(connect_pattern, lose_start_response)
                 if self.settings.get("upgrade_from_1_1"):
                     if not await frame.locator(".account-user").count():
                         await frame.locator("#add-account").click()
@@ -133,8 +165,19 @@ class Managed(Acceptance):
                     await frame.locator("#authorization-dialog").wait_for(state="visible")
                     await frame.locator("#confirm-authorization").click()
                 else:
-                    await frame.locator("#save-settings").click()
-                    await until(lambda: frame.locator("#save-settings").is_enabled(), timeout=30)
+                    assert (await models_ready()).get("stage") == "complete"
+                    assert (await self.config())["api_url"].startswith("http://memory-")
+                    assert await frame.locator("#save-settings").is_hidden()
+                    self.passed("single_model_save_completes_and_persists_managed_plugin_connection")
+                    assert (await models_ready())["request_id"] == interrupted_request
+                    identity = (await self.config())["service_id"]
+                    await self.http("POST", "/api/v1/plugins/" + NAME + "/reload", payload={})
+                    await page.reload()
+                    await self.dismiss_host_notice(page)
+                    await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                    assert (await models_ready())["stage"] == "complete"
+                    assert (await self.config())["service_id"] == identity
+                    self.passed("real_model_request_response_loss_and_plugin_reload_preserve_persistent_connection_job")
                     await frame.locator("#tab-memories").click()
                     await frame.locator("#add-account").click()
                     await frame.locator("#account-platform").select_option("delivery-onebot")
@@ -155,6 +198,7 @@ class Managed(Acceptance):
                 await self.bot.chat(ALICE, "Remember: I prefer oolong tea and my managed-install notebook code is Hazel-63. Reply briefly.")
                 await self.drained()
                 scope = next(row for row in (await self.bootstrap())["scopes"] if row["user_id"] == str(ALICE))
+                assert scope["summary"]["saved_count"] > 0
                 assert "Hazel-63" in json.dumps(await self.memories(scope["bank"]))
                 await self.recall_notebook(
                     "Which tea do I prefer and what is my notebook code? Answer briefly.",

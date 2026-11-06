@@ -44,9 +44,6 @@ class Managed(live.Environment):
             with (self.output / "baseline-install.zip").open("wb") as file:
                 live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
                          "c2dec0e25ae8292e3dd01ecb6e326a87965d41ef", cwd=live.ROOT, stdout=file)
-        image = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6"
-        if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-            self.docker("tag", "hindsight-bridge-delivery-postgres:17", image)
         environment = json.loads(self.model_environment.read_text())
         models = json.loads(environment["ASTRBOT_MEMORY_MODEL_CONFIG"])
         live.private_json(self.output / "native-models.json", [
@@ -170,8 +167,15 @@ def main():
                         help="install the previous native plugin/service, then use the current browser upgrade flow")
     parser.add_argument("--verify-panel", action="store_true",
                         help="verify panel layout, user lifecycle and pause recovery in the owned browser environment")
+    parser.add_argument("--scenario", choices=("full", "connection", "mode"), default="full",
+                        help="check active model edits and mode switching, or mode switching alone")
     args = parser.parse_args()
     state = Managed(args)
+    if args.scenario in {"connection", "mode"}:
+        state.driver = "connection_e2e.py"
+        state.settings["connection_check_mode"] = "managed"
+        state.settings["connection_check_step"] = args.scenario
+        live.private_json(state.output / "live-settings.json", state.settings)
     state.model_environment = args.model_environment
     try:
         state.prepare_network()

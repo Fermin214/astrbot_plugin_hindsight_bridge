@@ -394,13 +394,15 @@ class HindsightBridge(Star):
             256, min(1200, int(self.config.get("recall_max_tokens", 1200)))
         )
         limit = max(256, min(4000, int(self.config.get("context_max_chars", 4000))))
+        client = self.client
+        sequence = client.next_connection_sequence()
         stage = "auth"
         try:
             async with asyncio.timeout(timeout):
-                query = recall_query(current, history, budget=budget, name=self.client.tokenizer)
-                await self.client.ensure_auth(timeout=timeout)
+                query = recall_query(current, history, budget=budget, name=client.tokenizer)
+                await client.ensure_auth(timeout=timeout, _connection_sequence=sequence)
                 stage = "recall"
-                results = await self.client.recall(
+                results = await client.recall(
                     bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
                 )
                 block = memory_block(results, limit=limit)
@@ -410,7 +412,7 @@ class HindsightBridge(Star):
         except TimeoutError:
             code = "auth_timeout" if stage == "auth" else "recall_timeout"
             if stage == "auth":
-                self.client.connection_result(False, code)
+                client.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
 
     async def recall_background(self, event, guard, current, history, *, timestamp):

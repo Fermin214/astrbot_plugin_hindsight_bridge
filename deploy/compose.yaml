@@ -3,7 +3,7 @@ name: astrbot-hindsight
 services:
   db:
     build: ./postgres
-    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6
+    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2
     restart: unless-stopped
     environment:
       POSTGRES_USER: hindsight

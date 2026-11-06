@@ -300,9 +300,16 @@ class Acceptance:
             await frame.locator("#tab-setup").click()
             await frame.locator('[name="connection-mode"][value="existing"]').check()
             assert await frame.locator("#models-settings").is_hidden()
+            assert await frame.locator("#maintenance").is_hidden()
+            await frame.locator("#service-version-check").click()
+            await until(lambda: frame.locator("#service-version-check").is_enabled(), timeout=15)
+            version = await frame.locator("#version-check-result").inner_text()
+            assert "检查完成" in version and self.settings["hindsight_version"] in version
+            assert "升级" not in version and "配套版本" not in version
+            self.passed("existing_service_version_check_is_visible_and_read_only")
             await frame.locator("#tab-memories").click()
             if failure_status:
-                assert "连续失败 2 次" in await frame.locator("#scope-statuses").inner_text()
+                assert "超时" in await frame.locator("#scope-recall-status").inner_text()
             await page.screenshot(path=str(ROOT / "desktop.png"), full_page=True)
             self.passed("real_dashboard_iframe_sdk_and_existing_service_form")
             await page.set_viewport_size({"width": 390, "height": 844})
@@ -348,6 +355,7 @@ class Acceptance:
             frame = page.frame_locator("iframe")
             try:
                 await frame.locator("#startup").wait_for(state="hidden", timeout=10000)
+                await frame.locator("#maintenance-view").click()
                 await until(lambda: self.maintenance_failed(frame), timeout=22)
                 self.passed("real_browser_first_screen_and_optional_maintenance_timeout")
             finally:
@@ -436,7 +444,7 @@ class Acceptance:
         self.passed("real_revoked_historical_admin_maintenance_and_forget_without_reauthorization")
 
     async def maintenance_failed(self, frame):
-        return "暂时无法确认保存进度" in await frame.locator("#maintenance-state").inner_text()
+        return "获取暂停进度超时" in await frame.locator("#maintenance-detail").inner_text()
 
     async def run(self):
         async with aiohttp.ClientSession() as session:

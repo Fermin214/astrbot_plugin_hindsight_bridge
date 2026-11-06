@@ -13,13 +13,14 @@ from urllib.parse import urlsplit
 
 HINDSIGHT_VERSION = "1.2.0"
 SUPPORTED_VERSIONS = ("1.1.0", HINDSIGHT_VERSION)
+POSTGRES_IMAGE = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2"
 
 
 COMPOSE = """\
 services:
   memory-db:
     build: ./postgres
-    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6
+    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2
     restart: unless-stopped
     environment:
       POSTGRES_USER: hindsight
@@ -184,20 +185,32 @@ done
 REDEPLOY_BEFORE
 UPGRADE_BEFORE
 printf '正在安装记忆服务。首次安装需要下载镜像和构建数据库，请保持终端打开。\n'
+service_changed=0
+if [ -f "$target/identity" ]; then
+  for file in managed_service.py model_probe.py model_transport.py; do
+    cmp -s "$stage/service/$file" "$target/service/$file" || service_changed=1
+  done
+fi
 cp -R "$stage/." "$target/"
 chmod 600 "$target/.env"
 chmod 755 "$target/service"
 chmod 644 "$target/service/managed_service.py" "$target/service/model_probe.py" "$target/service/model_transport.py"
+chmod 644 "$target/postgres/Dockerfile" "$target/postgres/extensions.sql"
 cd "$target"
 docker compose --project-name "$project" config --quiet
-if docker image inspect astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6 >/dev/null 2>&1; then
-  docker compose --project-name "$project" up -d --no-build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
-else
-  docker compose --project-name "$project" up -d --build || fail '启动失败；请检查镜像、网络和主机端口占用，配置与数据已保存在安装目录。'
+if ! docker image inspect POSTGRES_IMAGE_VALUE >/dev/null 2>&1; then
+  docker compose --project-name "$project" build memory-db || fail '数据库镜像构建失败，请检查镜像下载和构建日志后重新执行安装命令；原数据保留。'
 fi
-docker compose --project-name "$project" up -d --wait --wait-timeout 600
+docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 180 memory-db || fail '数据库启动失败，请检查数据库日志后重新执行安装命令；原数据保留。'
+extensions="$(docker compose --project-name "$project" exec -T memory-db psql -U hindsight -d hindsight -v ON_ERROR_STOP=1 -qAt -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgroonga; SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pgroonga');" < /dev/null)" || fail '数据库扩展初始化失败，请检查数据库日志与镜像后重新执行安装命令；原数据保留。'
+[ "$extensions" = 2 ] || fail '数据库扩展不完整，请检查 vector 与 pgroonga 安装结果后重新执行安装命令；原数据保留。'
+docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 600 || fail '配套组件启动超时或失败，请检查容器日志、网络和端口后重新执行安装命令；原配置与数据保留。'
+if [ "$service_changed" = 1 ]; then
+  docker compose --project-name "$project" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 600 memory-api || fail '配套管理组件更新失败，请检查容器日志后重新执行安装命令；原配置与数据保留。'
+fi
+docker compose --project-name "$project" exec -T memory-api python -c "import json,os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8766/status',headers={'Authorization':'Bearer '+os.environ['ASTRBOT_MEMORY_MANAGEMENT_KEY']}); s=json.load(urllib.request.urlopen(r,timeout=5)); assert s.get('installation_id')==os.environ['HINDSIGHT_SETUP_ID'] and s.get('protocol')==1, '配套管理接口身份不匹配'" < /dev/null || fail '配套管理接口检查失败，请检查安装身份与服务日志后重试。'
 UPGRADE_AFTER
-printf '\n安装完成。回到插件的「设置」选择模型，点击「验证并保存模型」。\n'
+printf '\n配套组件安装完成。回到插件的「设置」选择模型，点击「保存并连接」完成记忆服务接入。\n'
 printf '服务文件位置：%s\n' "$target"
 printf '官方面板：http://127.0.0.1:CP_PORT_VALUE（远程电脑需先建立 SSH 隧道，或配置域名反向代理）\n'
 printf '在此服务器执行下面的命令，获取面板登录密钥：\n'
@@ -230,7 +243,15 @@ chmod -R go-rwx "$backup"
 
 REDEPLOY_BEFORE = r"""if [ -f "$target/identity" ]; then
   cd "$target"
-  docker compose --project-name "$project" exec -T memory-api python -c "import json,urllib.request; v=json.load(urllib.request.urlopen('http://127.0.0.1:8888/v1/version',timeout=5))['api_version']; assert v=='1.2.0', '同版本修复仅支持1.2.0，实际为 '+str(v)" < /dev/null || fail '无法确认已有服务为 1.2.0；未替换文件。请恢复连接，1.1.0 使用升级入口，不能用修复命令绕过暂停保存、查询与备份。'
+  if ! docker compose --project-name "$project" exec -T memory-api python -c "import json,urllib.request; v=json.load(urllib.request.urlopen('http://127.0.0.1:8888/v1/version',timeout=5))['api_version']; assert v=='1.2.0', '同版本修复仅支持1.2.0，实际为 '+str(v)" < /dev/null; then
+    # Only a pinned, unconfigured installation can resume without a running API.
+    running="$(docker compose --project-name "$project" ps --status running -q memory-api)"
+    if [ -n "$running" ]; then
+      docker compose --project-name "$project" exec -T memory-api python -c "import json,os,urllib.request; from hindsight_api import __version__; assert __version__=='1.2.0'; r=urllib.request.Request('http://127.0.0.1:8766/status',headers={'Authorization':'Bearer '+os.environ['ASTRBOT_MEMORY_MANAGEMENT_KEY']}); s=json.load(urllib.request.urlopen(r,timeout=5)); assert s.get('installation_id')==os.environ['HINDSIGHT_SETUP_ID'] and s.get('protocol')==1 and s.get('configured') is False and not s.get('applying',False), '不能续接已配置或正在应用模型的服务'" < /dev/null || fail '无法确认配套服务可续接；已配置的服务须恢复连接，1.1.0 须使用升级入口。'
+    else
+      docker compose --project-name "$project" run --rm --no-deps --entrypoint python memory-api -c "import os; from pathlib import Path; from hindsight_api import __version__; assert __version__=='1.2.0' and not Path('/settings/models.json').exists() and os.environ['HINDSIGHT_SETUP_ID']=='ID_VALUE', '不能续接旧版本或已配置的服务'" < /dev/null || fail '无法确认首次安装状态；原配置与数据保留，1.1.0 须使用升级入口。'
+    fi
+  fi
 fi
 """
 
@@ -380,6 +401,7 @@ def installation(root, state, *, container_hostname="", control_plane_url="", up
         "UPGRADE_AFTER": UPGRADE_AFTER if upgrade else "",
         "PROJECT_VALUE": shlex.quote(project), "HOST_VALUE": shlex.quote(container_hostname),
         "NETWORK_VALUE": shlex.quote(network), "ALIAS_VALUE": alias,
+        "ID_VALUE": identifier, "POSTGRES_IMAGE_VALUE": POSTGRES_IMAGE,
         "HOST_PORTS": " ".join(str(ports[name]) for name in (
             ("control_plane_port",) if container_hostname else ports
         )),

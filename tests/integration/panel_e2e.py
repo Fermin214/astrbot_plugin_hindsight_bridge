@@ -53,8 +53,18 @@ async def verify_panel(acceptance, page, context, frame, scope):
     acceptance.passed("browser_mode_selection_saves_immediately_and_failed_save_keeps_server_mode")
 
     await frame.locator("#tab-setup").click()
-    await frame.locator("#save-settings").click()
-    await until(lambda: frame.locator("#save-settings").is_enabled(), timeout=30)
+    save_button = "#save-access" if (await acceptance.bootstrap())["config"]["managed"] else "#save-settings"
+    await frame.locator(save_button).click()
+    await until(lambda: frame.locator(save_button).is_enabled(), timeout=30)
+    await frame.locator("#service-version-check").click()
+    await until(lambda: frame.locator("#service-version-check").is_enabled(), timeout=15)
+    version_result = await frame.locator("#version-check-result").inner_text()
+    assert acceptance.settings["hindsight_version"] in version_result
+    assert "插件支持的配套版本" in version_result
+    await refresh()
+    await page.wait_for_timeout(1500)
+    assert await frame.locator("#version-check-result").inner_text() == version_result
+    acceptance.passed("managed_manual_version_result_survives_real_bootstrap_refresh")
     assert (await acceptance.config())["allowed_accounts"] == configuration["allowed_accounts"]
     assert await frame.locator("#setup-intro").is_hidden()
     await frame.locator("#backup-guide").click()
@@ -288,12 +298,16 @@ async def verify_panel(acceptance, page, context, frame, scope):
 
     # Connection drafts survive polling and config conflicts; reload fails without losing them.
     await frame.locator("#tab-setup").click()
+    managed = (await acceptance.bootstrap())["config"]["managed"]
     await frame.locator("#control-plane-url").fill("https://draft-panel.invalid")
-    await frame.locator("#api-key").fill("owned-unsaved-key")
+    if managed:
+        assert await frame.locator("#api-key").is_hidden()
+    else:
+        await frame.locator("#api-key").fill("owned-unsaved-key")
     await refresh()
     await page.wait_for_timeout(1500)
     assert await frame.locator("#control-plane-url").input_value() == "https://draft-panel.invalid"
-    assert await frame.locator("#api-key").input_value() == "owned-unsaved-key"
+    assert await frame.locator("#api-key").input_value() == ("" if managed else "owned-unsaved-key")
     stale_revision = (await acceptance.bootstrap())["config_revision"]
     await acceptance.config(control_plane_url="http://127.0.0.1:9988")
     await refresh()
@@ -377,9 +391,15 @@ async def verify_panel(acceptance, page, context, frame, scope):
             await frame.locator("body").evaluate("(_, theme) => document.documentElement.dataset.theme = theme", theme)
             for tab in ("memories", "setup"):
                 await frame.locator("#tab-" + tab).click()
+                if tab == "memories":
+                    expected = (await selected())["summary"]["saved_count"]
+                    assert await frame.locator("#saved-count").inner_text() == str(expected)
                 assert await frame.locator("details").count() == 0
                 assert await frame.locator("body").evaluate("node => node.scrollWidth <= innerWidth + 1")
                 await page.screenshot(path=str(ROOT / ("panel-" + label + "-" + tab + "-" + theme + ".png")), full_page=True)
+                if tab == "memories":
+                    await frame.locator(".stats").scroll_into_view_if_needed()
+                    await page.screenshot(path=str(ROOT / ("panel-" + label + "-counts-" + theme + ".png")), full_page=True)
     await page.set_viewport_size({"width": 1280, "height": 900})
     await frame.locator("body").evaluate("() => document.documentElement.dataset.theme = 'light'")
     assert (await selected())["bank"] == scope["bank"]

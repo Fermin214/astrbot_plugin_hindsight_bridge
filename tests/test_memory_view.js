@@ -32,7 +32,7 @@ function harness() {
     };
   }
   const context = vm.createContext({
-    console, Promise, Date, Error,
+    console, Promise, Date, Error, URL,
     setTimeout: (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 5),
     clearTimeout: (timer) => { if (timer?.callback) timer.cancelled = true; else clearTimeout(timer); },
     expiryTimers: [],
@@ -52,6 +52,8 @@ function harness() {
     maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "",
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
+    versionCheckRevision: 0, versionCheck: null,
+    managedSetup: null, managedReadRevision: 0,
     backgroundReadRevision: 0, backgroundDraft: null,
     renderBackground() {}, renderScope() {},
     clearCommands() {},
@@ -68,11 +70,68 @@ function harness() {
       context.$("startup").hidden = true;
     },
   });
-  for (const name of ["withTimeout", "errorMessage", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode", "accountKey", "accountScopes", "updateUserChoices", "maintenanceScope", "renderMaintenance"]) {
+  for (const name of ["withTimeout", "errorMessage", "managedMode", "versionCheckIdentity", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode", "accountKey", "accountScopes", "updateUserChoices", "maintenanceScope", "renderMaintenance"]) {
     vm.runInContext(declaration(name), context);
   }
   return context;
 }
+
+test("manual version feedback survives polling and rejects results from a changed connection", async () => {
+  const context = harness();
+  for (const name of ["renderServiceVersion", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  context.data = { config: { configured: true, connection_revision: "a", managed: true }, backend: {} };
+  let finish;
+  context.bridge = { apiGet: () => new Promise((resolve) => { finish = resolve; }) };
+  const checking = context.checkServiceVersion();
+  context.bootstrapReadRevision++;
+  context.renderServiceVersion();
+  assert.match(context.$("version-check-result").textContent, /正在检查/);
+  finish({ version: "1.2.0", target: "1.2.0", managed: true });
+  await checking;
+  assert.match(context.$("version-check-result").textContent, /已是插件支持的配套版本 1.2.0/);
+  const older = context.checkServiceVersion();
+  context.data.config.connection_revision = "b";
+  context.renderServiceVersion();
+  finish({ version: "1.1.0", managed: true, target: "1.2.0", upgrade_available: true });
+  await older;
+  assert.equal(context.$("version-check-result").hidden, true);
+  assert.equal(context.data.backend.version, "1.2.0");
+});
+
+test("manual version timeout is visible and higher versions never suggest downgrading", async () => {
+  const context = harness();
+  for (const name of ["renderServiceVersion", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  context.data = { config: { configured: false }, backend: {} };
+  context.bridge = { apiGet: () => new Promise(() => {}) };
+  await context.checkServiceVersion();
+  assert.match(context.$("version-check-result").textContent, /检查版本超时/);
+  assert.equal(context.$("service-version").hidden, false);
+  context.bridge.apiGet = async () => ({ version: "1.3.0", target: "1.2.0", managed: true });
+  await context.checkServiceVersion();
+  assert.match(context.$("version-check-result").textContent, /不执行降级/);
+});
+
+test("managed connection fields are readonly and saving the browser address cannot submit credentials", async () => {
+  const context = harness();
+  context.document.querySelector = () => ({ value: "managed" });
+  context.data = { config: { configured: true }, has_installation: true };
+  context.updateConnectionMode();
+  assert.equal(context.$("api-url").readOnly, true);
+  assert.equal(context.$("api-key-field").hidden, true);
+  assert.equal(context.$("save-settings").hidden, true);
+  assert.equal(context.$("save-access").hidden, false);
+  for (const name of ["perform", "controlPlaneUrl", "saveAccess"]) vm.runInContext(declaration(name), context);
+  context.$("control-plane-url").value = "https://memory.example.com";
+  context.$("api-url").value = "http://owned-service:8888";
+  context.$("api-key").value = "must-not-submit";
+  context.bridge = { apiPost: async (route, payload) => {
+    assert.equal(route, "access/save");
+    assert.deepEqual(Object.keys(payload).sort(), ["config_revision", "control_plane_url"]);
+    return { saved: true, config_revision: "saved", message: "管理地址已保存" };
+  } };
+  await context.saveAccess();
+  assert.equal(context.settingsRevision, "saved");
+});
 
 test("version notices show upgrades only for the connected managed service", () => {
   const context = harness();

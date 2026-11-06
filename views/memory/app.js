@@ -17,11 +17,15 @@ let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
 let bootstrapReadRevision = 0;
+let versionCheckRevision = 0;
+let versionCheck = null;
 let refreshTimer;
 let refreshRunning = false;
 let refreshFailures = 0;
 let modelRequestId = "";
 let modelWatch = null;
+let managedSetup = null;
+let managedReadRevision = 0;
 let statusSignature = "";
 const locks = new Set();
 let feedbackTimer;
@@ -139,7 +143,7 @@ function option(value, label, disabled = false) {
 function providerSelect(kind, selected) {
   const select = $(`${kind}-provider`);
   select.replaceChildren(option("", kind === "rerank" ? "不使用重排模型" : "请选择模型"));
-  const providers = data.providers?.[kind] || [];
+  const providers = (managedMode() && managedSetup ? managedSetup.providers : data.providers)?.[kind] || [];
   providers.forEach((provider) => {
     const label = [provider.name || provider.label || provider.id, provider.model].filter(Boolean).join(" / ");
     select.append(option(provider.id, provider.supported === false ? `${label}（${provider.reason || "暂不支持"}）` : label, provider.supported === false));
@@ -153,7 +157,7 @@ function updateProviderHelp() {
   if (!data) return;
   const missing = [];
   for (const [kind, name] of [["chat", "记忆处理"], ["embedding", "向量"]]) {
-    if (!(data.providers?.[kind] || []).some((provider) => provider.supported !== false)) missing.push(name);
+    if (!((managedMode() && managedSetup ? managedSetup.providers : data.providers)?.[kind] || []).some((provider) => provider.supported !== false)) missing.push(name);
   }
   $("provider-help").textContent = missing.length ? `缺少可用的${missing.join("、")}模型，请到 AstrBot「模型供应商」添加。` : "";
   $("provider-help").hidden = !missing.length;
@@ -165,24 +169,49 @@ function clearUninstall() {
   $("uninstall-command").value = "";
 }
 
+function managedMode() {
+  return document.querySelector('[name="connection-mode"]:checked')?.value === "managed";
+}
+
+async function loadManagedSetup() {
+  const revision = ++managedReadRevision;
+  const response = await withTimeout(bridge.apiPost("managed/options", { mode: "managed", config_revision: settingsRevision }),
+    10000, "获取配套安装记录超时，请重试。");
+  if (revision !== managedReadRevision || !managedMode()) return;
+  managedSetup = response;
+  updateConnectionMode();
+  $("api-url").value = response.api_url || "";
+  for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, response.selection?.[`${kind}_provider_id`]);
+  updateProviderHelp();
+  if (["running", "interrupted"].includes(response.job?.status) && !modelWatch) void watchModels(response.job.request_id, true);
+}
+
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  $("setup-intro").hidden = data?.config.configured === true;
+  $("setup-intro").hidden = !managed || (data?.config.configured === true
+    && !!(managedSetup?.has_installation || data?.has_installation));
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;
-  $("api-key-field").hidden = managed && !data?.config.configured;
-  $("api-url").readOnly = managed && !data?.config.configured;
-  $("check-connection").hidden = managed && !data?.config.configured;
+  $("api-key-field").hidden = managed;
+  $("api-url").readOnly = managed;
+  $("api-url").required = !managed;
+  $("save-settings").hidden = managed;
+  $("save-access").hidden = !managed;
+  $("check-connection").hidden = managed;
   $("deployment-capabilities").textContent = managed
-    ? "配套服务在插件中配置模型，并生成升级、重新部署和卸载命令。测试服务连接检查记忆 API 和认证。"
+    ? "选择模型后点击「保存并连接」完成接入。API 地址与密钥来自配套安装记录；官方管理地址可单独保存。"
     : "已有服务通过 API 使用插件记忆功能。测试服务连接检查记忆 API 和认证。";
 }
 
 function renderServiceVersion() {
   const backend = data?.backend || {};
-  $("service-version").hidden = !data?.config.configured;
+  $("service-version").hidden = !data;
   $("service-version-text").textContent = backend.version ? `Hindsight ${backend.version}` : "版本尚未确认";
+  if (versionCheck && versionCheck.identity !== versionCheckIdentity()) { versionCheckRevision++; versionCheck = null; }
+  $("version-check-result").hidden = !versionCheck;
+  $("version-check-result").textContent = versionCheck?.message || "";
+  $("version-check-result").classList.toggle("error", versionCheck?.error === true);
   const managed = data?.config.managed && backend.managed;
   const upgrading = managed && (!!backend.pending || !!backend.upgrade_paused);
   const available = managed && backend.upgrade_available === true;
@@ -205,6 +234,40 @@ function renderServiceVersion() {
   $("upgrade-resume").disabled = locks.has("setup") || backend.version !== backend.target || !backend.resume_available;
   for (const id of ["save-settings", "add-account", "save-account", "remove-account", "prepare-uninstall"]) $(id).disabled = upgrading || locks.has("setup");
   updateProviderHelp();
+}
+
+function versionCheckIdentity() {
+  return JSON.stringify([data?.config.connection_revision, $("api-url").value,
+    document.querySelector('[name="connection-mode"]:checked')?.value, data?.installation_api_url]);
+}
+
+async function checkServiceVersion() {
+  const revision = ++versionCheckRevision;
+  const identity = versionCheckIdentity();
+  versionCheck = { identity, message: "正在检查 Hindsight 版本…" };
+  renderServiceVersion();
+  try {
+    const request = managedMode() && managedSetup?.installation_id
+      ? bridge.apiPost("managed/version", { mode: "managed", installation_id: managedSetup.installation_id })
+      : bridge.apiGet("service/status");
+    const backend = await withTimeout(request, 10000, "检查版本超时，请重试。");
+    if (revision !== versionCheckRevision || identity !== versionCheckIdentity()) return;
+    let message = backend.message || "";
+    if (!message && !backend.version) message = "版本尚未确认，请先完成服务连接后重试。";
+    if (!message && backend.version) {
+      if (!backend.managed) message = `检查完成：Hindsight ${backend.version}${backend.supported === false ? "，插件未确认兼容此版本" : ""}。`;
+      else if (backend.version === backend.target) message = `已是插件支持的配套版本 ${backend.target}。`;
+      else if (backend.upgrade_available) message = `检查完成：可从 ${backend.version} 升级到插件支持的配套版本 ${backend.target}。`;
+      else message = `检查完成：Hindsight ${backend.version}，插件支持的配套版本为 ${backend.target}；此版本未确认兼容，不执行降级。`;
+    }
+    versionCheck = { identity, message, error: !!backend.message || !backend.version };
+    data.backend = backend;
+  } catch (error) {
+    if (revision !== versionCheckRevision || identity !== versionCheckIdentity()) return;
+    versionCheck = { identity, message: errorMessage(error), error: true };
+  } finally {
+    if (revision === versionCheckRevision) renderServiceVersion();
+  }
 }
 
 async function upgradeAction(action, button) {
@@ -266,6 +329,8 @@ function hydrateConfig() {
   $("connection-result").hidden = true;
   $("api-key").placeholder = config.has_api_key ? "留空沿用已保存的密钥" : "填写服务 API 密钥";
   document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
+  managedSetup = config.managed ? { installation_id: data.installation_id, api_url: data.installation_api_url,
+    providers: data.providers, has_installation: data.has_installation } : null;
   updateConnectionMode();
   for (const kind of ["chat", "embedding", "rerank"]) providerSelect(kind, config[`${kind}_provider_id`]);
   refreshAccountPlatforms();
@@ -333,7 +398,7 @@ function renderStatus() {
   const connected = status.connected;
   $("status-label").textContent = status.recovering ? "正在核对记忆数据" : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
-  let description = status.recovering ? "正在核对记忆库与保存任务。" : connected === false ? status.message || "请检查服务地址、密钥和服务运行状态。" : "";
+  let description = status.recovering ? "正在核对记忆库与保存任务。" : connected !== true ? status.message || "请检查服务地址、密钥和服务运行状态。" : "";
   if (data.config.managed && data.managed_service?.installed && !status.recovering && !data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
   $("status-description").textContent = description;
   $("status-description").hidden = !description;
@@ -365,6 +430,7 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   if (revision !== bootstrapReadRevision) return;
   if (settingsRevision && next.config_revision !== settingsRevision) clearCommands();
   data = next;
+  if (managedSetup?.installation_id && data.config.managed && data.installation_id === managedSetup.installation_id) managedSetup.providers = data.providers;
   if (hydrate) hydrateConfig();
   else if (!automatic || document.activeElement?.tagName !== "SELECT") {
     for (const kind of ["chat", "embedding", "rerank"]) {
@@ -391,7 +457,12 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   $("settings-conflict").hidden = !settingsRevision || data.config_revision === settingsRevision;
   $("startup").hidden = true;
   $("update-error").hidden = true;
-  if (data.model_job?.status === "running" && !modelWatch) void watchModels();
+  if (["running", "interrupted"].includes(data.connection_job?.status) && managedMode() && !modelWatch) void watchModels(data.connection_job.request_id, true);
+  else if (data.model_job?.status === "running" && !modelWatch) void watchModels();
+  else if (managedMode() && data.connection_job?.config_revision === data.config_revision && data.connection_job?.message) {
+    $("model-progress").hidden = false;
+    $("model-progress").textContent = data.connection_job.message;
+  }
 }
 
 function maintenanceDescription(summary = {}, state = null) {
@@ -509,6 +580,7 @@ function renderScope() {
   $("bank-state").textContent = scope?.bank_state === "new" ? "记忆库将在首次保存聊天时创建。" : "";
   $("bank-state").hidden = !$("bank-state").textContent;
   const counts = summary.counts || {};
+  $("saved-count").textContent = Number.isSafeInteger(summary.saved_count) && summary.saved_count >= 0 ? summary.saved_count : !scope || scope.pending ? "待开通" : "暂不可用";
   $("pending-count").textContent = ["ready", "submitting", "unknown", "tracking", "deferred", "reconcile_required", "held", "cancel_requested"].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
   $("failed-count").textContent = (Number(counts.failed) || 0) + (Number(counts.dead) || 0);
   $("queue-summary").textContent = counts.reconcile_required ? `有 ${counts.reconcile_required} 条记录需要确认保存结果。` : "";
@@ -555,7 +627,7 @@ function renderBackground() {
   let status = saved.error || "";
   if (!unavailable && scope.summary?.maintenance) status = "插件读写已暂停，知识页不会传入聊天。";
   else if (!unavailable && scope.mode === "paused" && saved.enabled) status = "停用记忆模式下，知识页不会传入聊天。";
-  else if (saved.status?.message) status = saved.status.message;
+  else if (!backgroundDraft.loaded && saved.status?.message) status = saved.status.message;
   else if (backgroundDraft.loaded && !backgroundDraft.pages.length) status = "这个记忆库还没有知识页，可在记忆面板中创建。";
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
@@ -575,9 +647,13 @@ async function loadBackground() {
     if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
     draft.loaded = true;
+    $("background-feedback").hidden = true;
     renderBackground();
   } catch (error) {
-    if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) notify(errorMessage(error), true, "background-feedback");
+    if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) {
+      notify(`知识页读取失败：${errorMessage(error)}`, true, "background-feedback");
+      await refreshBootstrap({ automatic: true, pollMaintenance: false }).catch(() => {});
+    }
   } finally {
     draft.loading = false;
     if (revision !== backgroundReadRevision) draft.attempted = false;
@@ -654,7 +730,8 @@ function connectionPayload() {
 }
 
 function settingsPayload() {
-  return { ...connectionPayload(), control_plane_url: controlPlaneUrl($("control-plane-url").value), config_revision: settingsRevision };
+  return { ...connectionPayload(), mode: managedMode() ? "managed" : "existing",
+    control_plane_url: controlPlaneUrl($("control-plane-url").value), config_revision: settingsRevision };
 }
 
 async function requestAuthorization(platform, user) {
@@ -691,24 +768,29 @@ async function checkConnection(payload, target = "connection-result") {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function watchModels(requestId = "") {
+function watchModels(requestId = "", managed = false) {
   if (modelWatch) return modelWatch;
   bootstrapReadRevision++;
   locks.add("setup");
   $("setup-fields").disabled = true;
   $("model-progress").hidden = false;
   modelWatch = (async () => {
+    let failures = 0;
     while (true) {
       let job;
       try {
-        job = await bridge.apiGet("models/status");
+        job = await withTimeout(managed
+          ? bridge.apiPost("managed/status", { mode: "managed", installation_id: managedSetup?.installation_id })
+          : bridge.apiGet("models/status"), 10000, "获取接入进度超时。");
+        failures = 0;
       } catch {
+        if (managed && ++failures >= 3) throw new Error("无法获取接入进度，请重新打开页面核对结果后重试。");
         $("model-progress").textContent = "暂时无法获取进度，正在重新获取进度，请勿重复提交。";
         await delay(5000);
         continue;
       }
       if (requestId && job.request_id !== requestId) {
-        $("model-progress").textContent = "模型保存请求未确认，请点击「保存模型」重试。";
+        $("model-progress").textContent = "请求未确认，请点击「保存并连接」重试。";
         if (job.status === "running") {
           requestId = job.request_id;
           continue;
@@ -722,12 +804,13 @@ function watchModels(requestId = "") {
       }
       if (job.status === "succeeded") {
         settingsRevision = job.config_revision;
-        $("model-progress").textContent = "模型已验证并保存，服务已启动。";
-        await refreshBootstrap();
-        notify("模型已验证并保存，服务已启动。");
+        $("model-progress").textContent = job.message || "模型已验证并保存，服务已启动。";
+        await refreshBootstrap({ hydrate: managed });
+        notify(job.message || "模型已验证并保存，服务已启动。");
       } else {
+        if (managed && job.config_revision) settingsRevision = job.config_revision;
         $("model-progress").textContent = job.status === "idle"
-          ? "模型检查已中断，请重新验证并保存。"
+          ? "接入检查已中断，请重新保存并连接。"
           : `${job.message || "模型验证或保存失败。"} 请修正问题后重试。`;
         await refreshBootstrap({ automatic: true });
       }
@@ -763,6 +846,7 @@ async function autoRefresh() {
     $("update-error").hidden = true;
   } catch {
     refreshFailures++;
+    if (data) { data.status = { connected: null, label: "连接状态无法确认", message: "无法获取插件状态，请检查 AstrBot 连接。" }; statusSignature = ""; renderStatus(); }
     $("update-error").hidden = false;
     $("update-error-message").textContent = "暂时无法获取最新数据，正在自动重试。";
   } finally {
@@ -817,6 +901,18 @@ async function saveSettings() {
     clearCommands();
     await refreshBootstrap({ hydrate: true });
     notify("连接与管理地址已保存。");
+  });
+}
+
+async function saveAccess() {
+  if (!$("settings-form").reportValidity()) return;
+  await perform($("save-access"), "setup", async () => {
+    const response = await bridge.apiPost("access/save", { config_revision: settingsRevision,
+      control_plane_url: controlPlaneUrl($("control-plane-url").value) });
+    if (!response.saved) throw new Error(response.message || "官方管理地址未保存，请重试。");
+    settingsRevision = response.config_revision;
+    notify(response.message, false, "connection-result");
+    await refreshBootstrap({ automatic: true });
   });
 }
 
@@ -888,6 +984,7 @@ async function prepareInstallation(button, redeploy = false) {
   await perform(button, "setup", async () => {
     const response = await bridge.apiPost("install/prepare", {
       config_revision: settingsRevision, repair: redeploy && !data?.backend?.version,
+      mode: "managed",
       control_plane_url: controlPlaneUrl($("control-plane-url").value),
     });
     if (!response.command) throw new Error("未生成部署命令，请稍后重试。");
@@ -896,6 +993,8 @@ async function prepareInstallation(button, redeploy = false) {
     $("installation").hidden = false;
     data.has_installation = true;
     data.installation_api_url = response.api_url;
+    managedSetup = { ...managedSetup, installation_id: response.installation_id, has_installation: true,
+      api_url: response.api_url, providers: managedSetup?.providers || data.providers };
     if (response.api_url) $("api-url").value = response.api_url;
     if (response.control_plane_url && !$("control-plane-url").value.trim()) $("control-plane-url").value = controlPlaneUrl(response.control_plane_url);
     updateConnectionMode();
@@ -904,7 +1003,7 @@ async function prepareInstallation(button, redeploy = false) {
     $("deployment-heading").textContent = redeploy ? "重新部署" : "安装配套服务";
     $("deployment-description").textContent = redeploy
       ? "在原服务器、原安装目录执行。已有记忆、模型和凭据继续使用；卸载已删除的数据不会因重装而恢复。"
-      : "在运行 AstrBot 的 Linux 主机执行命令，完成后配置模型并保存连接。";
+      : "在运行 AstrBot 的 Linux 主机执行命令，完成后选择模型并点击「保存并连接」。";
     $("deployment-feedback").hidden = true;
     if (!$("deployment-dialog").open) $("deployment-dialog").showModal();
   }, "deployment-feedback");
@@ -1007,7 +1106,7 @@ async function prepareForget(button, id) {
   }, button === $("maintenance-forget") ? "maintenance-feedback" : "feedback");
 }
 
-$("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void saveSettings().catch((error) => notify(errorMessage(error), true)); });
+$("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void (managedMode() ? saveAccess() : saveSettings()).catch((error) => notify(errorMessage(error), true)); });
 $("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
   await checkConnection(connectionPayload());
   await refreshBootstrap();
@@ -1032,7 +1131,12 @@ for (const radio of document.querySelectorAll('[name="connection-mode"]')) radio
   $("connection-result").hidden = true;
   $("api-url").value = radio.value === "managed" ? data.installation_api_url || "" : data.config.api_url || "";
   updateConnectionMode();
+  managedReadRevision++;
+  managedSetup = null;
+  if (radio.value === "managed") void loadManagedSetup().catch((error) => notify(errorMessage(error), true));
+  renderServiceVersion();
 });
+$("save-access").addEventListener("click", () => void saveAccess());
 $("prepare").addEventListener("click", () => void prepareInstallation($("prepare")));
 $("reinstall").addEventListener("click", () => {
   clearCommands();
@@ -1045,13 +1149,7 @@ $("reinstall").addEventListener("click", () => {
 });
 $("generate-deployment").addEventListener("click", () => void prepareInstallation($("generate-deployment"), true));
 $("check-deployment").addEventListener("click", () => void perform($("check-deployment"), "setup", () => checkConnection({}, "deployment-feedback"), "deployment-feedback"));
-$("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", async () => {
-  const revision = bootstrapReadRevision;
-  const backend = await bridge.apiGet("service/status");
-  if (revision !== bootstrapReadRevision) return;
-  data.backend = backend;
-  renderServiceVersion();
-}));
+$("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", checkServiceVersion));
 $("view-upgrade").addEventListener("click", openUpgrade);
 $("go-upgrade").addEventListener("click", openUpgrade);
 $("ignore-upgrade").addEventListener("click", () => void perform($("ignore-upgrade"), "setup", async () => {
@@ -1088,9 +1186,10 @@ $("generate-uninstall").addEventListener("click", () => void perform($("generate
 $("delete-memory-data").addEventListener("change", clearUninstall);
 $("copy-uninstall").addEventListener("click", () => void perform($("copy-uninstall"), "copy", () => copyCommand("uninstall-command", "uninstallation", "卸载命令已复制，请在服务器执行。")));
 $("save-models").addEventListener("click", () => void perform($("save-models"), "setup", async () => {
-  if (!data?.has_installation) throw new Error("请先生成并执行配套服务安装命令。");
+  if (!managedSetup?.has_installation && !data?.has_installation) throw new Error("请先生成并执行配套服务安装命令。");
+  if (!managedSetup?.installation_id) await loadManagedSetup();
   modelRequestId ||= globalThis.crypto?.randomUUID?.() || `model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const selection = { config_revision: settingsRevision, background: true, request_id: modelRequestId };
+  const selection = { config_revision: settingsRevision, mode: "managed", installation_id: managedSetup?.installation_id, request_id: modelRequestId };
   for (const kind of ["chat", "embedding", "rerank"]) {
     const select = $(`${kind}-provider`);
     if ((kind !== "rerank" && !select.value) || select.selectedOptions[0]?.disabled) throw new Error("请选择可用的记忆处理模型和向量模型。");
@@ -1099,14 +1198,14 @@ $("save-models").addEventListener("click", () => void perform($("save-models"), 
   $("model-progress").hidden = false;
   $("model-progress").textContent = "正在提交模型配置…";
   let response;
-  try { response = await bridge.apiPost("models/save", selection); }
+  try { response = await bridge.apiPost("managed/connect", selection); }
   catch (error) {
-    const status = await bridge.apiGet("models/status").catch(() => null);
-    if (!status) { $("model-progress").textContent = "正在确认处理结果…"; await watchModels(modelRequestId); return; }
+    const status = await bridge.apiPost("managed/status", { mode: "managed", installation_id: managedSetup?.installation_id }).catch(() => null);
+    if (!status) { $("model-progress").textContent = "正在确认处理结果…"; await watchModels(modelRequestId, true); return; }
     if (status.request_id !== modelRequestId && status.status !== "running") { modelRequestId = ""; throw error; }
     response = status;
   }
-  await watchModels(response.request_id);
+  await watchModels(response.request_id, true);
 }));
 $("refresh").addEventListener("click", () => void perform($("refresh"), "refresh", refreshView));
 $("reload-settings").addEventListener("click", () => void perform($("reload-settings"), "setup", reloadSettings));

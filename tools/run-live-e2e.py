@@ -459,10 +459,10 @@ def main():
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
-    parser.add_argument("--scenario", choices=("full", "accepted"), default="full")
+    parser.add_argument("--scenario", choices=("full", "accepted", "connection"), default="full")
     args = parser.parse_args()
     state = Environment(args)
-    state.driver = "accepted_e2e.py" if args.scenario == "accepted" else "live_e2e.py"
+    state.driver = {"accepted": "accepted_e2e.py", "connection": "connection_e2e.py", "full": "live_e2e.py"}[args.scenario]
     try:
         with serving(state.gateway), serving(state.transport):
             state.start()

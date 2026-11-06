@@ -52,7 +52,7 @@
         </section>
         <section class="content-section">
           <h3>记忆状态</h3>
-          <div class="stats"><div><span>待保存</span><strong id="pending-count">0</strong></div><div><span>保存失败</span><strong id="failed-count">0</strong></div></div>
+          <div class="stats"><div><span>已保存</span><strong id="saved-count">暂无数据</strong></div><div><span>待保存</span><strong id="pending-count">0</strong></div><div><span>保存失败</span><strong id="failed-count">0</strong></div></div>
           <p id="queue-summary" class="operation-status" hidden></p>
           <div id="scope-error" class="notice error" role="status" hidden></div>
           <button id="retry" type="button" hidden>重试保存</button>
@@ -68,28 +68,29 @@
     <section id="panel-setup" class="page-content" role="tabpanel" aria-labelledby="tab-setup" hidden>
       <fieldset id="setup-fields" disabled>
         <legend class="sr-only">插件设置</legend>
-        <section id="setup-intro" class="surface" hidden>
-          <h2>连接 Hindsight</h2>
+        <section class="surface">
+          <h2>连接方式</h2>
           <fieldset class="connection-options"><legend class="sr-only">连接方式</legend>
             <label class="choice"><input type="radio" name="connection-mode" value="managed" checked>安装配套服务</label>
             <label class="choice"><input type="radio" name="connection-mode" value="existing">连接已有服务</label>
           </fieldset>
-          <div id="managed-settings"><button id="prepare" type="button" class="primary">生成安装命令</button></div>
+          <div id="setup-intro" hidden><div id="managed-settings"><button id="prepare" type="button" class="primary">生成安装命令</button></div></div>
         </section>
         <section id="models-settings" class="surface">
           <h2>模型配置</h2>
           <div class="form-grid"><label>记忆处理模型<select id="chat-provider"></select></label><label>向量模型<select id="embedding-provider"></select></label><label class="full-width">重排模型<select id="rerank-provider"></select></label></div>
           <p id="provider-help" class="operation-status" role="status" hidden></p>
-          <div class="actions"><button id="save-models" type="button" class="primary">保存模型</button></div>
+          <div class="actions"><button id="save-models" type="button" class="primary">保存并连接</button></div>
           <p id="model-progress" class="operation-status" role="status" hidden></p>
         </section>
         <form id="settings-form" class="surface">
           <h2 id="connection-heading">连接与访问</h2>
           <div class="service-meta"><span id="service-version"><span id="service-version-text"></span></span><button id="service-version-check" type="button" class="text-button">检查版本</button></div>
+          <p id="version-check-result" class="operation-status" role="status" hidden></p>
           <div class="form-grid"><label class="full-width">API 地址<input id="api-url" type="url" required autocomplete="off"></label><label id="api-key-field" class="full-width">API 密钥<input id="api-key" type="password" placeholder="留空沿用已保存的密钥" autocomplete="new-password"></label><label class="full-width">Hindsight 管理地址<input id="control-plane-url" type="url" placeholder="https://memory.example.com" autocomplete="off"></label></div>
           <p id="deployment-capabilities" class="operation-status"></p>
           <p id="status-description" class="operation-status" role="status" hidden></p>
-          <div class="actions"><button id="save-settings" type="submit" class="primary">保存连接</button><button id="check-connection" type="button">测试服务连接</button></div>
+          <div class="actions"><button id="save-settings" type="submit" class="primary">保存连接</button><button id="save-access" type="button" class="primary" hidden>保存管理地址</button><button id="check-connection" type="button">测试服务连接</button></div>
           <p id="connection-result" class="operation-status" role="status" hidden></p>
         </form>
         <section id="maintenance" class="surface" hidden><h2>服务管理</h2><div class="service-ops"><button id="backup-guide" type="button" data-guide="backup-dialog">备份指南</button><button id="go-upgrade" type="button" hidden>升级服务</button><button id="reinstall" type="button">重新部署</button><button id="prepare-uninstall" type="button" class="danger-quiet">卸载服务</button></div></section>
