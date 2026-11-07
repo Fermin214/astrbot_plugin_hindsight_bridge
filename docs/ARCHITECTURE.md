@@ -141,7 +141,7 @@ Hindsight 1.2.0 可能将被其他整合任务替代的操作记为 `cancelled`�
 
 `config.control_plane_url` 保存浏览器可访问的「官方管理地址」，与 `api_url` 分开配置。管理员页面显示可选择复制的地址与「记忆库 ID」（Bank ID）；普通用户命令不输出 CP/API Key。官方 Control Plane 独立登录，采用独立 HTTPS 或 SSH 隧道，不依赖 iframe、SSO、一键外链或插件反代。
 
-配套安装器封装 Hindsight 原生启动与配置，不修改 AstrBot 或 Hindsight 的上游源代码。安装命令打包固定服务模板及服务自身凭据，在 Linux Docker 主机创建独立服务与数据卷，并交付匹配版本的官方 Control Plane；模型配置通过安装后的管理接口提交。容器部署按 AstrBot hostname 识别已有网络，只将配套服务接入该网络。`setup.json` 保存安装标识、服务连接、独立管理密钥和供应商选择。CP 的数据 API Key 与页面访问 Key 分别配置，主机端口仅绑定环回地址，访问步骤见 [部署说明](../deploy/README.md)。
+配套安装器封装 Hindsight 原生启动与配置，不修改 AstrBot 或 Hindsight 的上游源代码。安装命令打包固定服务模板及服务自身凭据，在 Linux Docker 主机创建独立服务与数据卷，并交付匹配版本的官方 Control Plane；模型配置通过安装后的管理接口提交。容器部署通过 hostname、插件数据路径及安装标识定位 AstrBot，支持自定义 bridge、默认 bridge 与 host 网络，只调整配套资源。安装器将实际地址原子写入插件专属的 `managed-network.json`；插件通过随机挑战与管理密钥的 HMAC 核对服务身份，再发送管理凭据，并在接入任务锁内保存地址、推进配置修订。同一配套安装更换网络地址时保持服务身份。`setup.json` 保存安装标识、服务连接、独立管理密钥和供应商选择。CP 的数据 API Key 与页面访问 Key 分别配置，主机端口仅绑定环回地址，访问步骤见 [部署说明](../deploy/README.md)。
 
 配套「保存并连接」通过显式安装 ID 选择目标资源，不使用浏览器提交的 API 地址或凭据。`setup.json.connection_job` 保存一项接入记录，模型应用、连接配置及插件初始化分阶段核对；任务进度不参与业务配置修订，业务提交后推进预期修订。服务侧完整模型配置指纹使用连接密钥和规范化参数计算 HMAC，识别模型与凭据变化，避免重复应用；不返回完整模型配置。旧模型保存和连接保存接口保持原语义。
 

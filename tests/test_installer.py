@@ -62,8 +62,12 @@ case "$*" in
   "ps -q") printf '%s\\n' astrbot ;;
   "ps -q --filter"*) [ -z "$TEST_OWNED_PORT" ] || printf '%s\\n' owned ;;
   "inspect --format {{.Config.Hostname}}"*) printf '%s\\n' astrbot-host ;;
-  'inspect --format {{range $k,$v := .NetworkSettings.Networks}}'*) printf '%s\\n' first second ;;
+  'inspect --format {{range $k,$v := .NetworkSettings.Networks}}'*) printf '%s\\n' "${TEST_NETWORKS:-first second}" ;;
+  "inspect --format {{.HostConfig.NetworkMode}}"*) printf '%s\\n' "${TEST_NETWORK_MODE:-default}" ;;
+  'inspect --format {{with index .NetworkSettings.Networks "bridge"}}'*) printf '%s\\n' "${TEST_BRIDGE_ADDRESS:-172.17.0.5}" ;;
+  *"ps -q memory-api") printf '%s\\n' memory-api ;;
   "inspect --format {{range .NetworkSettings.Ports}}"*) printf '127.0.0.1 %s\\n' "$TEST_OWNED_PORT" ;;
+  "network inspect --format {{.Driver}} {{.Internal}} host") printf '%s\\n' 'host false' ;;
   "network inspect"*) printf '%s\\n' 'bridge false' ;;
 esac
 exit 0
@@ -77,6 +81,32 @@ exit 0
 
 
 class InstallerTests(unittest.TestCase):
+    def test_host_and_default_bridge_preserve_astrbot_network_and_limit_host_ports(self):
+        for mode in ("host", "bridge"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env = {**install_environment(root), "TEST_NETWORKS": mode, "TEST_NETWORK_MODE": mode}
+                state = {**STATE, **free_ports()}
+                generated = installation(ROOT, state, container_hostname="astrbot-host", setup_path="/plugin/setup.json")
+                completed = subprocess.run(["bash"], input=script(generated), env=env, text=True, capture_output=True)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                target = root / ("astrbot-memory-" + STATE["id"])
+                compose = (target / "compose.yaml").read_text()
+                calls = (root / "calls").read_text()
+                self.assertNotIn("0.0.0.0", compose)
+                self.assertFalse((target / "compose.override.yaml").exists())
+                if mode == "host":
+                    self.assertIn(f"127.0.0.1:{state['api_port']}:8888", compose)
+                    self.assertIn(f"127.0.0.1:{state['management_port']}:8766", compose)
+                    self.assertNotIn("network connect", calls)
+                else:
+                    self.assertNotIn(":8888\"", compose)
+                    self.assertNotIn(":8766\"", compose)
+                    self.assertIn("http://172.17.0.5:8888", calls)
+                self.assertIn("managed-network.json", calls)
+                self.assertNotIn("network connect bridge astrbot", calls)
+                self.assertNotIn("network disconnect", calls)
+
     def test_first_start_failure_resumes_same_identity_and_checks_extensions_before_api(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

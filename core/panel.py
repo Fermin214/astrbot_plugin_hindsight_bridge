@@ -553,6 +553,7 @@ class MemoryPanel:
             recheck()
             result = installation(Path(__file__).resolve().parent.parent, state,
                                   container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
+                                  setup_path=str(self.directory() / "setup.json"),
                                   upgrade=True)
             state["upgrade_check"] = {"banks": banks, "verified": False, "from": "1.1.0", "to": HINDSIGHT_VERSION,
                                       "connection_id": queue.connection_id,
@@ -886,6 +887,7 @@ class MemoryPanel:
         state = self.state()
         if state.get("management_url") and self.managed_connection(state, api_url=url, api_key=key):
             status = await self.managed_request(state)
+            url = state["api_url"]
             if not status["ready"]:
                 return {"ok": True, "ready": False, "message": "配套服务已安装，请选择模型并保存。"}
         client = HindsightClient(url, key)
@@ -897,8 +899,31 @@ class MemoryPanel:
         self.connection_ready(client.url, key)
         return {"ok": True, "ready": True, "message": "服务连接与 API 认证通过。"}
 
+    def network_endpoints(self, state):
+        path = self.directory() / "managed-network.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if value.get("installation_id") != state.get("id"):
+                return None
+            endpoints = {name: value[name] for name in ("api_url", "management_url")}
+            addresses = [urlsplit(url) for url in endpoints.values()]
+            if any(
+                address.scheme != "http" or not address.hostname or address.username is not None
+                or address.password is not None or address.path or address.query or address.fragment
+                for address in addresses
+            ) or addresses[0].hostname != addresses[1].hostname:
+                raise ValueError()
+            return endpoints
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise PanelError("配套网络记录损坏，请重新执行安装命令。") from None
+
     async def managed_request(self, state, environment=None):
+        endpoints = self.network_endpoints(state)
         url, key = state.get("management_url"), state.get("management_key")
+        if endpoints:
+            url = endpoints["management_url"]
         if not url or not key:
             raise PanelError("请先生成并执行配套服务安装命令。")
         try:
@@ -906,6 +931,19 @@ class MemoryPanel:
                 trust_env=False, follow_redirects=False, timeout=360 if environment is not None else 3,
             ) as http:
                 headers = {"Authorization": "Bearer " + key}
+                if endpoints:
+                    # Prove ownership before sending credentials to a Docker-assigned address.
+                    challenge = secrets.token_hex(32)
+                    response = await http.get(url + "/identity/" + challenge)
+                    response.raise_for_status()
+                    proof = response.json()
+                    expected = hmac.new(key.encode(), (
+                        "astrbot-memory-identity:" + state["id"] + ":" + challenge
+                    ).encode(), hashlib.sha256).hexdigest()
+                    if (proof.get("installation_id") != state["id"]
+                            or not isinstance(proof.get("signature"), str)
+                            or not hmac.compare_digest(proof["signature"], expected)):
+                        raise PanelError("配套服务标识不匹配，请重新执行安装命令。")
                 response = await http.get(url + "/status", headers=headers)
                 response.raise_for_status()
                 status = response.json()
@@ -919,6 +957,8 @@ class MemoryPanel:
                     status = response.json()
                     if status.get("installation_id") != state.get("id") or status.get("protocol") != 1:
                         raise PanelError("配套服务标识不匹配，请检查安装记录。")
+                if endpoints:
+                    state.update(endpoints)
                 return {
                     "installed": True, "configured": status.get("configured") is True,
                     "ready": status.get("ready") is True,
@@ -954,9 +994,10 @@ class MemoryPanel:
             result = installation(
                 Path(__file__).resolve().parent.parent, state,
                 container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
+                setup_path=str(self.directory() / "setup.json"),
             )
-            state["api_url"] = result["api_url"]
-            state["management_url"] = result["management_url"]
+            state.setdefault("api_url", result["api_url"])
+            state.setdefault("management_url", result["management_url"])
             control_plane_url = self.control_plane_url(result.get("control_plane_url", ""))
             if control_plane_url:
                 state["control_plane_url"] = control_plane_url
@@ -1095,7 +1136,15 @@ class MemoryPanel:
         try:
             async with self.lock:
                 state = self.check_connection_job(job)
+                previous_url = state["api_url"]
+                previous_service = self.plugin.config.get("service_id") if self.managed_connection(state) else None
                 status = await self.managed_request(state)
+                if state["api_url"] != previous_url or state.get("management_url") != self.state().get("management_url"):
+                    self.store_state(state)
+                    self.persist_connection_job(
+                        job, expected_revision=self.config_revision(),
+                        managed_service_id=previous_service or job.get("managed_service_id", ""),
+                    )
                 if status.get("configuration_fingerprint") is None:
                     raise PanelError("配套组件不支持接入结果核对，请先重新部署配套服务文件，再保存并连接。")
                 deadline = time.monotonic() + 360
@@ -1439,7 +1488,13 @@ class MemoryPanel:
         if old_url and old_service:
             connections[old_url] = old_service
         service = connections.get(client.url)
-        if not service or (client.url != old_url and service == old_service):
+        same_managed_service = (
+            mode == "managed" and job is not None and job.get("managed_service_id") == old_service
+            and old_service and key == state.get("api_key") and client.url == self.connection_url(state.get("api_url", ""))
+        )
+        if same_managed_service:
+            service = old_service
+        elif not service or (client.url != old_url and service == old_service):
             service = "memory-" + secrets.token_hex(6)
         connections[client.url] = service
         if mode is not None:
