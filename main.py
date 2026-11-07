@@ -585,8 +585,13 @@ class HindsightBridge(Star):
             self.worker.wake.set()
         return True
 
+    @filter.on_agent_begin()
+    async def bind_memory_tools(self, event, run_context):
+        self.read_tools.begin(event, run_context)
+
     @filter.on_agent_done()
     async def remember_assistant(self, event, run_context, response):
+        self.read_tools.finish(event, run_context)
         turn = self.turns.pop(event, None)
         if (
             turn is None

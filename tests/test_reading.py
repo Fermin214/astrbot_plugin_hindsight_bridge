@@ -71,6 +71,10 @@ class RunContext:
     pass
 
 
+class ToolRequest:
+    pass
+
+
 class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = runtime.RuntimeDiagnostics.asyncTearDown
     turn = runtime.RuntimeDiagnostics.turn
@@ -87,6 +91,8 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
 
     async def ready(self):
         event, request = self.turn()
+        request = self.request = ToolRequest()
+        request.model = None
         scope = self.scope()
         save_options(self.plugin.outbox, scope, revision=0, mode="tools")
         request.func_tool = SimpleNamespace(tools=list(self.tools.owned.values()))
@@ -96,6 +102,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(request.func_tool.tools), len(NAMES))
         context = RunContext()
         context.context = SimpleNamespace(context=self.context, event=event)
+        await self.plugin.bind_memory_tools(event, context)
         return event, context
 
     async def test_parallel_calls_share_one_ledger_and_only_filter_owned_entries(self):
@@ -107,11 +114,62 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.func_tool.tools, [foreign])
         self.assertEqual(len(original.tools), len(NAMES) + 1)
         with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "external_data": True, "items": []})) as read:
+            turn = self.tools.turns[event]
             results = await asyncio.gather(*(self.tools.execute(context, "recall", {"query": "q"}) for _ in range(9)))
         self.assertEqual(read.await_count, 4)
-        self.assertEqual(self.tools.turns[event].calls, 4)
+        self.assertEqual(turn.calls, 4)
         self.assertTrue(any("tool_budget_exhausted" in (item or "") for item in results))
-        self.assertLessEqual(self.tools.turns[event].output_tokens, 2 * self.tools.turns[event].tokens)
+        self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
+        self.assertEqual(self.request.func_tool.tools, [])
+        self.assertNotIn(event, self.tools.turns)
+
+    async def test_only_agent_begin_binds_context_and_agent_done_retires_unused_turn(self):
+        event, context = await self.ready()
+        foreign = RunContext()
+        foreign.context = context.context
+        turn = self.tools.turns[event]
+        turn.context_ref = None
+        with patch.object(self.tools, "read", AsyncMock()) as read:
+            self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
+            self.tools.begin(event, context)
+            self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
+            self.tools.finish(event, foreign)
+            self.assertIn(event, self.tools.turns)
+            self.tools.finish(event, context)
+            self.assertNotIn(event, self.tools.turns)
+            self.assertIn("tool_context_unavailable", await self.tools.execute(context, "recall", {"query": "q"}))
+            read.assert_not_awaited()
+
+    async def test_live_request_model_change_and_unverifiable_fallback_disable_reading(self):
+        event, context = await self.ready()
+        with patch.object(self.tools, "read", AsyncMock()) as read:
+            self.request.model = "later-hook-model"
+            self.assertIn("reading_changed", await self.tools.execute(context, "recall", {"query": "q"}))
+            self.assertFalse(self.tools.public(self.scope())["observed_available"])
+            self.request.model = None
+            self.context.get_config = lambda *args: {"agent_runner": {
+                "runner_type": "local", "config": {"model": {"fallback_provider_ids": ["other"]}},
+            }}
+            self.assertFalse((await self.tools.provider_state(event.unified_msg_origin))[1])
+            self.assertFalse(await self.tools.availability(self.scope()))
+            self.assertIn("tool_context_unavailable", await self.tools.execute(context, "recall", {"query": "q"}))
+            read.assert_not_awaited()
+        self.request.func_tool.tools = list(self.tools.owned.values())
+        await self.tools.prepare(event, self.request, self.incoming, self.scope(), self.request.func_tool)
+        self.assertFalse(self.tools.public(self.scope())["observed_available"])
+        self.assertNotIn(event, self.tools.turns)
+
+    async def test_output_exhaustion_returns_a_notice_and_never_ends_host_chat_with_none(self):
+        event, context = await self.ready()
+        turn = self.tools.turns[event]
+        turn.tokens = 256
+        with patch.object(self.tools, "read", AsyncMock(return_value={"content": "word " * 245})):
+            results = [await self.tools.execute(context, "recall", {"query": "q"}) for _ in range(2)]
+        self.assertTrue(all(isinstance(value, str) and value for value in results))
+        self.assertIn("tool_budget_exhausted", results[-1])
+        self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
+        self.assertLessEqual(turn.output_bytes, 16 * 1024)
+        self.assertEqual(self.request.func_tool.tools, [])
 
     async def test_tool_result_drops_after_model_change_and_arguments_cannot_select_bank(self):
         event, context = await self.ready()

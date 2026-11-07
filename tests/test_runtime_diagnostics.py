@@ -77,7 +77,7 @@ def bridge_class(directory, logger):
         "prepare_command", "apply_command", "mode", "memory_forget", "memory_retry",
         "memory_cancel",
         "readable", "unavailable_message", "memory_recall", "memory_show", "memory_view",
-        "memory_background",
+        "memory_background", "bind_memory_tools",
     }
     bridge.body = [node for node in bridge.body if node.name in selected]
     for method in bridge.body:

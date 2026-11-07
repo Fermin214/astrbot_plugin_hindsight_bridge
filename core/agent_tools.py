@@ -32,6 +32,8 @@ SCHEMAS = {
 NAMES = frozenset(PREFIX + name for name in SCHEMAS)
 MAX_CALLS = 4
 MAX_BYTES = 16 * 1024
+NOTICE_TOKENS = 32
+NOTICE_BYTES = 128
 
 
 def options_key(queue, scope):
@@ -115,7 +117,10 @@ class ToolTurn:
     calls: int = 0
     output_tokens: int = 0
     output_bytes: int = 0
+    request_ref: object = None
+    event_ref: object = None
     context_ref: object = None
+    selected_provider: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -191,6 +196,12 @@ class MemoryTools:
             self.manager.get_func(name) is tool and tool.active for name, tool in self.owned.items()
         ))
 
+    def eligible_tools(self, toolset):
+        tools = getattr(toolset, "tools", [])
+        provided = {tool.name for tool in tools if self.own_entry(tool) and getattr(tool, "active", False)}
+        handoff = any(getattr(tool, "agent", None) is not None or tool.name.startswith("transfer_to_") for tool in tools)
+        return bool(self.active() and provided == NAMES and not handoff)
+
     def filter_request(self, event, request, original=None, *, enable=False):
         original = original if original is not None else getattr(request, "func_tool", None)
         if original is None:
@@ -208,21 +219,58 @@ class MemoryTools:
         request.func_tool = selected
         return original
 
-    async def provider_state(self, umo, model=None):
+    async def provider_state(self, umo, model=None, selected_provider=None):
         getter = getattr(self.plugin.context, "get_using_provider_async", None)
         if getter is None:
             return "", False
-        provider = await getter(umo)
+        provider = (self.plugin.context.get_provider_by_id(selected_provider)
+                    if selected_provider else await getter(umo))
         if provider is None:
             return "", False
         config = provider.provider_config
         modalities = config.get("modalities")
         compatible = not modalities or (isinstance(modalities, list) and "tool_use" in modalities)
-        runner = self.plugin.context.get_config(umo).get("subagent_orchestrator", {})
-        if runner.get("main_enable", False):
+        host = self.plugin.context.get_config(umo)
+        orchestrator = host.get("subagent_orchestrator", {})
+        runner = host.get("agent_runner", {}).get("config", {}).get("model", {})
+        # Public Agent hooks expose the context, but not a fallback's executing provider.
+        if orchestrator.get("main_enable", False) or runner.get("fallback_provider_ids"):
             compatible = False
-        fingerprint = sha256(canonical([config, provider.get_model(), model]))
+        fingerprint = sha256(canonical([config, provider.get_model(), model, selected_provider, runner]))
         return fingerprint, compatible
+
+    @staticmethod
+    def selected_provider(event):
+        getter = getattr(event, "get_extra", None)
+        return getter("selected_provider") if getter else None
+
+    def begin(self, event, context):
+        turn = self.turns.get(event)
+        if turn is None:
+            return
+        actual = getattr(context, "context", None)
+        if getattr(actual, "context", None) is not self.plugin.context or getattr(actual, "event", None) is not event:
+            return
+        if turn.context_ref is not None:
+            return
+        if not self.valid(turn, event):
+            self.record(turn, "unavailable", "reading_changed")
+            self.retire(turn)
+            return
+        turn.context_ref = weakref.ref(context)
+
+    def finish(self, event, context):
+        turn = self.turns.get(event)
+        if turn and turn.context_ref and turn.context_ref() is context:
+            self.retire(turn)
+
+    def retire(self, turn):
+        event, request = turn.event_ref(), turn.request_ref()
+        turn.expires = 0
+        if event is not None and self.turns.get(event) is turn:
+            self.turns.pop(event)
+            if request is not None:
+                self.filter_request(event, request)
 
     async def prepare(self, event, request, incoming, scope, original):
         guard = ReadGuard.freeze(self.plugin, scope)
@@ -232,15 +280,12 @@ class MemoryTools:
         sequence = self.sequence
         available, fingerprint = False, ""
         model = getattr(request, "model", None)
+        selected_provider = self.selected_provider(event)
         try:
             async with asyncio.timeout(1):
-                fingerprint, supported = await self.provider_state(event.unified_msg_origin, model)
-            provided = {
-                tool.name for tool in getattr(original, "tools", [])
-                if self.own_entry(tool) and getattr(tool, "active", False)
-            }
-            handoff = any(getattr(tool, "agent", None) is not None for tool in getattr(original, "tools", []))
-            available = bool(supported and self.active() and provided == NAMES and not handoff)
+                fingerprint, supported = await self.provider_state(event.unified_msg_origin, model, selected_provider)
+            request_ref = weakref.ref(request)
+            available = bool(supported and self.eligible_tools(original))
         except Exception:  # Capability discovery must not interrupt the existing automatic path.
             pass
         if not guard.valid(self.plugin, event):
@@ -249,6 +294,7 @@ class MemoryTools:
             "bank": scope["bank"], "generation": scope["generation"], "source_id": incoming.scope(guard.queue.deployment_id).id,
             "authorization_revision": guard.queue.access.authorization(incoming.platform_instance_id, incoming.user_id)["revision"],
             "umo": event.unified_msg_origin, "provider": fingerprint, "model": model,
+            "selected_provider": selected_provider,
             "available": available, "sequence": sequence,
         }
         self.outcomes[key] = {
@@ -261,16 +307,23 @@ class MemoryTools:
                 guard, options, incoming_digest(incoming, guard.queue.deployment_id), incoming.iso_timestamp,
                 event.unified_msg_origin, fingerprint, model, sequence, time.monotonic() + 120,
                 limits["tokens"], limits["chars"],
+                request_ref=request_ref, event_ref=weakref.ref(event),
+                selected_provider=selected_provider,
             )
             self.filter_request(event, request, original, enable=True)
         return options
 
     def valid(self, turn, event):
         plugin = self.plugin
+        request = turn.request_ref()
         if (
             self.closed or time.monotonic() >= turn.expires or not self.active()
+            or request is None or getattr(request, "model", None) != turn.model
+            or self.selected_provider(event) != turn.selected_provider
+            or not self.eligible_tools(getattr(request, "func_tool", None))
             or not turn.guard.valid(plugin, event)
             or not local_runner(plugin.context.get_config(turn.umo))
+            or plugin.context.get_config(turn.umo).get("agent_runner", {}).get("config", {}).get("model", {}).get("fallback_provider_ids")
             or read_options(turn.guard.queue, turn.guard.scope) != turn.options
             or turn.options["mode"] != "tools"
         ):
@@ -291,7 +344,9 @@ class MemoryTools:
         ):
             return False
         try:
-            fingerprint, supported = await self.provider_state(observation["umo"], observation.get("model"))
+            fingerprint, supported = await self.provider_state(
+                observation["umo"], observation.get("model"), observation.get("selected_provider"),
+            )
         except Exception:
             return False
         return bool(
@@ -323,11 +378,13 @@ class MemoryTools:
         value = self.public(scope)
         if value["observed_available"]:
             return "Hindsight 细节记忆由按需工具读取；本轮尚未调用，不能据此判断没有相关记忆。"
-        return "Hindsight 按需工具未提供，请管理员检查模型的工具支持和会话工具列表，或切回自动召回。"
+        return "Hindsight 按需工具未提供，请管理员检查模型工具支持、会话工具列表和回退模型/子代理交接设置，或切回自动召回。"
 
     def record(self, turn, state, code=""):
         key = (turn.guard.queue.connection_id, turn.guard.scope["owner_id"])
         if self.observed.get(key, {}).get("sequence") == turn.sequence:
+            if code == "reading_changed":
+                self.observed[key]["available"] = False
             self.outcomes[key] = {
                 "bank": turn.guard.scope["bank"], "revision": turn.options["revision"],
                 "sequence": turn.sequence, "state": state, "calls": turn.calls, "code": code,
@@ -336,13 +393,21 @@ class MemoryTools:
     def deliver(self, turn, value):
         text = canonical(value)
         count, length = reading.token_count(text, turn.guard.client.tokenizer), len(text.encode("utf-8"))
+        exhausted = value.get("error") == "tool_budget_exhausted"
         if (
-            turn.output_tokens + count > 2 * turn.tokens
-            or turn.output_bytes + length > MAX_BYTES
+            turn.output_tokens + count > 2 * turn.tokens - NOTICE_TOKENS
+            or turn.output_bytes + length > MAX_BYTES - NOTICE_BYTES
         ):
-            return None
+            text = canonical({"error": "tool_budget_exhausted"})
+            count, length = reading.token_count(text, turn.guard.client.tokenizer), len(text.encode("utf-8"))
+            exhausted = True
         turn.output_tokens += count
         turn.output_bytes += length
+        if exhausted:
+            self.record(turn, "budget", "tool_budget_exhausted")
+            self.retire(turn)
+        elif value.get("error") == "reading_changed":
+            self.retire(turn)
         return text
 
     async def execute(self, context, kind, arguments):
@@ -366,7 +431,10 @@ class MemoryTools:
             turn = self.turns.get(event) if event is not None else None
         except TypeError:
             turn = None
-        if turn is None or getattr(actual, "context", None) is not self.plugin.context:
+        if (
+            turn is None or getattr(actual, "context", None) is not self.plugin.context
+            or turn.context_ref is None or turn.context_ref() is not context
+        ):
             return canonical({"error": "tool_context_unavailable"})
         try:
             async with (
@@ -374,16 +442,14 @@ class MemoryTools:
                 asyncio.timeout(min(3, recall_timeout(self.plugin.config))),
                 turn.lock,
             ):
-                if turn.context_ref is None:
-                    try:
-                        turn.context_ref = weakref.ref(context)
-                    except TypeError:
-                        return self.deliver(turn, {"error": "tool_context_unavailable"})
+                if self.turns.get(event) is not turn or turn.context_ref is None:
+                    return canonical({"error": "tool_context_unavailable"})
                 if turn.context_ref() is not context or not self.valid(turn, event):
+                    self.record(turn, "unavailable", "reading_changed")
                     return self.deliver(turn, {"error": "reading_changed"})
                 if (
-                    turn.calls >= MAX_CALLS or 2 * turn.tokens - turn.output_tokens < 32
-                    or MAX_BYTES - turn.output_bytes < 128
+                    turn.calls >= MAX_CALLS or 2 * turn.tokens - turn.output_tokens <= NOTICE_TOKENS
+                    or MAX_BYTES - turn.output_bytes <= NOTICE_BYTES
                 ):
                     self.record(turn, "budget", "tool_budget_exhausted")
                     return self.deliver(turn, {"error": "tool_budget_exhausted"})
@@ -393,7 +459,10 @@ class MemoryTools:
                     await self.plugin.prepare_sources()
                     if not self.valid(turn, event):
                         raise QueueError("reading_changed")
-                    fingerprint, supported = await self.provider_state(turn.umo, turn.model)
+                    request = turn.request_ref()
+                    fingerprint, supported = await self.provider_state(
+                        turn.umo, getattr(request, "model", None), self.selected_provider(event),
+                    )
                     if not supported or fingerprint != turn.provider or not self.valid(turn, event):
                         raise QueueError("reading_changed")
 
@@ -424,8 +493,12 @@ class MemoryTools:
                     self.record(turn, "error", "tool_read_failed")
                     return self.deliver(turn, {"error": "tool_read_failed"})
         except QueueError as exc:
+            if self.turns.get(event) is not turn:
+                return canonical({"error": "tool_context_unavailable"})
             return self.deliver(turn, {"error": str(exc)})
         except TimeoutError:
+            if self.turns.get(event) is not turn:
+                return canonical({"error": "tool_context_unavailable"})
             self.record(turn, "error", "tool_read_timeout")
             return self.deliver(turn, {"error": "tool_read_timeout"})
 
@@ -437,8 +510,8 @@ class MemoryTools:
             raise HindsightError("invalid_tool_arguments", permanent=True)
         client, bank = turn.guard.client, turn.guard.scope["bank"]
         limits = {
-            "tokens": min(turn.tokens, 2 * turn.tokens - turn.output_tokens),
-            "chars": turn.chars, "bytes_limit": min(8192, MAX_BYTES - turn.output_bytes),
+            "tokens": min(turn.tokens, 2 * turn.tokens - turn.output_tokens - NOTICE_TOKENS),
+            "chars": turn.chars, "bytes_limit": min(8192, MAX_BYTES - turn.output_bytes - NOTICE_BYTES),
             "tokenizer": client.tokenizer,
         }
         base = {"kind": kind, "external_data": True}

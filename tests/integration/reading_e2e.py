@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from pathlib import Path
+import zipfile
 
 from live_e2e import ALICE, BOB, NAME, ROOT, database, jsonl, until
 
@@ -116,10 +118,45 @@ async def verify(acceptance, page, frame, bank):
     assert "previous_reflect_response" not in json.dumps(history) and "error_message" not in json.dumps(history)
     acceptance.passed("agent_reads_native_sources_and_bounded_history_with_explicit_scope_and_no_raw_failure_payload")
 
-    await chat("HB-TOOLS-QUOTA")
+    quota = await chat("HB-TOOLS-QUOTA")
     status = (await acceptance.scope())["reading"]["status"]
     assert status["state"] == "budget" and status["calls"] <= 4, status
+    assert any(value.get("error") == "tool_budget_exhausted" for value in results(quota))
+    assert not any(tool["function"]["name"].startswith(PREFIX) for tool in quota[-1].get("tools", []))
     acceptance.passed("all_native_tools_share_the_original_inbound_call_quota")
+
+    probe_name = "astrbot_plugin_bridge_reading_guard_probe"
+    with zipfile.ZipFile(ROOT / "reading-guard-probe.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(probe_name + "/main.py", Path(__file__).with_name("reading_probe.py").read_bytes())
+        archive.writestr(probe_name + "/metadata.yaml", "name: " + probe_name + "\ndesc: Native reading boundary probe\nversion: 1.0.0\nauthor: fixture\n")
+    await acceptance.install("reading-guard-probe.zip")
+    try:
+        boundary_recalls = len(jsonl("recall-trace"))
+        guarded = await chat("HB-TOOLS-GUARDS")
+        guard_results = results(guarded)
+        assert any(value.get("error") == "tool_context_unavailable" for value in guard_results)
+        assert any(value.get("kind") == "page" for value in guard_results)
+        assert len(jsonl("recall-trace")) == boundary_recalls + 1
+        probe = json.loads((ROOT / "reading-guard-probe.json").read_text())
+        assert probe["secondary_agent_cannot_claim_or_consume_main_ledger"]
+        assert probe["finished_agent_cannot_reuse_ledger"]
+        await chat("HB-TOOLS-IDLE")
+        probe = json.loads((ROOT / "reading-guard-probe.json").read_text())
+        assert probe["unused_agent_ledger_is_closed_by_host_completion"]
+        assert (await acceptance.scope())["reading"]["status"]["calls"] == 0
+        assert len(jsonl("recall-trace")) == boundary_recalls + 1
+        acceptance.passed("native_secondary_agent_cannot_claim_main_ledger_and_finished_agent_cannot_reuse_it")
+
+        boundary_recalls = len(jsonl("recall-trace"))
+        changed = await chat("HB-TOOLS-REQUEST-MODEL")
+        assert changed[-1]["model"] == "fixture-late-request-model"
+        assert not any(tool["function"]["name"].startswith(PREFIX) for tool in changed[-1].get("tools", []))
+        assert len(jsonl("recall-trace")) == boundary_recalls
+        assert (await acceptance.scope())["reading"]["status"]["code"] == "reading_changed"
+        assert not (await acceptance.scope())["reading"]["observed_available"]
+        acceptance.passed("late_native_request_hook_model_change_revokes_tools_without_memory_delivery")
+    finally:
+        await acceptance.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + probe_name)
 
     await acceptance.bot.chat(BOB, "A synthetic second user remains in automatic mode.")
     assert not any(tool["function"]["name"].startswith(PREFIX) for tool in acceptance.requests()[-1].get("tools", []))

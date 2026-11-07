@@ -46,7 +46,7 @@ def bridge_tool_reply(body):
     history = [tool_value(message) for message in messages if message.get("role") == "tool"]
     page = next((value for value in reversed(history) if isinstance(value, dict) and value.get("kind") == "page"), {})
     kind, params = "", {}
-    if "HB-TOOLS-FLOW" in query:
+    if "HB-TOOLS-FLOW" in query or "HB-TOOLS-GUARDS" in query:
         if not current:
             kind, params = "search_pages", {"query": "HB-TOOLS-PAGE"}
         elif len(current) == 1:
@@ -63,8 +63,12 @@ def bridge_tool_reply(body):
     elif "HB-TOOLS-STALE" in query and not current and page.get("next_line"):
         kind, params = "read_page", {"page_id": page["page_id"], "start_line": page["next_line"], "version": page["version"]}
     elif "HB-TOOLS-QUOTA" in query and len(current) < 6:
+        kind, params = "recall", {"query": "Cedar-120 quota " + str(len(current))}
+    elif "HB-TOOLS-PROBE-BACKGROUND" in query and not current:
         kind, params = "recall", {"query": "Cedar-120"}
     if not kind:
+        return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
+    if not any(tool.get("function", {}).get("name") == "hindsight_bridge_" + kind for tool in body.get("tools", [])):
         return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
     return {"role": "assistant", "content": None, "tool_calls": [{
         "id": "bridge-fixture-" + str(len(current)), "type": "function",
@@ -153,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
                 content = '{"creates":[],"updates":[],"deletes":[]}'
             elif (
                 getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512
-                and any(tool.get("function", {}).get("name", "").startswith("hindsight_bridge_") for tool in body.get("tools", []))
+                and "HB-TOOLS-" in str(body.get("messages", []))
             ):
                 message, finish = bridge_tool_reply(body)
             elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
