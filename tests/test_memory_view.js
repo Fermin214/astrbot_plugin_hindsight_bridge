@@ -787,6 +787,37 @@ test("background polling retains an unsaved choice and clears references after B
   assert.equal(context.$("background-page").value, "");
 });
 
+test("returning to the browser tab preserves unsaved page additions, ordering, removal and disabling", () => {
+  const context = backgroundHarness();
+  let resume;
+  context.document.addEventListener = (name, callback) => { resume = callback; };
+  context.document.hidden = false;
+  context.refreshTimer = null;
+  context.scheduleRefresh = () => {};
+  const begin = source.lastIndexOf('document.addEventListener("visibilitychange", () => {');
+  vm.runInContext(source.slice(begin, source.indexOf("\n});", begin) + 4), context);
+  const check = (ids, enabled) => {
+    const draft = context.backgroundDraft;
+    resume();
+    assert.equal(context.backgroundDraft, draft);
+    assert.equal(JSON.stringify(draft.selected.map(page => page.page_id)), JSON.stringify(ids));
+    assert.equal(draft.enabled, enabled);
+    assert.equal(draft.dirty, true);
+    assert.equal(context.$("background-save").disabled, false);
+    assert.equal(context.data.scopes[0].background.page_id, "kp-1");
+  };
+  context.$("background-page").value = "kp-2";
+  context.changeBackground();
+  check(["kp-1", "kp-2"], true);
+  context.$("background-selected").children[1].children.at(-1).children[0].listeners.click();
+  check(["kp-2", "kp-1"], true);
+  context.$("background-selected").children[1].children.at(-1).children[2].listeners.click();
+  check(["kp-2"], true);
+  context.$("background-page").value = "";
+  context.changeBackground();
+  check(["kp-2"], false);
+});
+
 test("per-page usage and failures remain visible after index loading and polling", async () => {
   const context = backgroundHarness();
   const saved = context.data.scopes[0].background;

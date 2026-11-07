@@ -1588,8 +1588,12 @@ async function start() {
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
   if (!document.hidden) {
-    backgroundReadRevision++;
-    backgroundDraft = null;
+    if (backgroundDraft?.dirty) {
+      if (!backgroundDraft.loading) backgroundDraft.attempted = false;
+    } else {
+      backgroundReadRevision++;
+      backgroundDraft = null;
+    }
     if (data) renderScope();
     scheduleRefresh(0);
   }
