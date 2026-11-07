@@ -9,6 +9,31 @@ from .diagnostics import ConfigurationError
 from .identity import Scope, canonical, sha256
 from .materials import memory_block, token_count
 
+MAX_BACKGROUND_PAGES = 8
+
+
+def page_references(pages):
+    """Validate bounded, ordered native IDs before storing a reference."""
+    from .client import HindsightError, native_page_id
+
+    if not isinstance(pages, list) or len(pages) > MAX_BACKGROUND_PAGES:
+        raise QueueError("background_settings_invalid")
+    clean, ids, models = [], set(), set()
+    try:
+        for page in pages:
+            if not isinstance(page, dict) or set(page) != {"page_id", "mental_model_id"}:
+                raise ValueError
+            identity = native_page_id(page["page_id"])
+            model = native_page_id(page["mental_model_id"])
+            if identity in ids or model in models:
+                raise ValueError
+            ids.add(identity)
+            models.add(model)
+            clean.append({"page_id": identity, "mental_model_id": model})
+    except (ValueError, HindsightError):
+        raise QueueError("background_settings_invalid") from None
+    return clean
+
 
 def context_limits(config):
     """Shared ceilings keep their old defaults; page limits are independent."""
@@ -53,7 +78,8 @@ def check_page(page, *, tokens, chars, page_tokens, tokenizer):
         exceeded.append("共享 token 上限")
     if len(block) > chars:
         exceeded.append("共享字符上限")
-    return {"tokens": count, "chars": len(block), "code": code, "exceeded": exceeded}
+    return {"tokens": count, "chars": len(block), "code": code, "exceeded": exceeded,
+            "limits": {"tokens": min(page_tokens, tokens), "chars": chars}}
 
 
 def reference_key(connection, owner):
@@ -62,18 +88,25 @@ def reference_key(connection, owner):
 
 def reference(queue, scope):
     value = queue.control.setting(reference_key(queue.connection_id, scope["owner_id"]))
-    default = {"revision": 0, "enabled": False, "page_id": "", "mental_model_id": ""}
+    default = {"revision": 0, "enabled": False, "page_id": "", "mental_model_id": "", "pages": []}
     if not value:
         return default
     try:
         stored = json.loads(value)
         if (
-            not isinstance(stored, dict) or type(stored.get("format")) is not int or stored["format"] != 1
+            not isinstance(stored, dict) or type(stored.get("format")) is not int or stored["format"] not in {1, 2}
             or type(stored.get("revision")) is not int or stored["revision"] < 1
             or type(stored.get("enabled")) is not bool
             or any(not isinstance(stored.get(k), str) for k in ("page_id", "mental_model_id"))
             or ("invalidated" in stored and type(stored["invalidated"]) is not bool)
         ):
+            raise ValueError
+        pages = page_references(stored.get("pages")) if stored["format"] == 2 else page_references(
+            [{"page_id": stored["page_id"], "mental_model_id": stored["mental_model_id"]}]
+            if stored["page_id"] or stored["mental_model_id"] else []
+        )
+        first = pages[0] if pages else {"page_id": "", "mental_model_id": ""}
+        if any(stored[key] != first[key] for key in first) or (stored["enabled"] and not pages):
             raise ValueError
     except (ValueError, TypeError):
         raise QueueError("background_settings_invalid") from None
@@ -91,12 +124,18 @@ def reference(queue, scope):
         if stored["page_id"] or stored["mental_model_id"]:
             default["invalidated"] = True
         return default
-    return {k: stored[k] for k in default}
+    return {**{k: stored[k] for k in default if k != "pages"}, "pages": pages}
 
 
-def save_reference(queue, scope, *, revision, page_id, model_id, enabled):
+def save_reference(queue, scope, *, revision, enabled, page_id="", model_id="", pages=None):
     if type(revision) is not int or type(enabled) is not bool:
         raise QueueError("background_settings_invalid")
+    selected = page_references(pages if pages is not None else (
+        [{"page_id": page_id, "mental_model_id": model_id}] if page_id or model_id else []
+    ))
+    if enabled and not selected:
+        raise QueueError("background_settings_invalid")
+    first = selected[0] if selected else {"page_id": "", "mental_model_id": ""}
     with queue.control.transaction():
         if reference(queue, scope)["revision"] != revision:
             raise QueueError("background_changed")
@@ -112,8 +151,8 @@ def save_reference(queue, scope, *, revision, page_id, model_id, enabled):
         if not grant or not queue.access.permitted(source):
             raise QueueError("authorization_changed")
         stored = {
-            "format": 1, "revision": revision + 1, "enabled": enabled,
-            "page_id": page_id, "mental_model_id": model_id,
+            "format": 2, "revision": revision + 1, "enabled": enabled,
+            **first, "pages": selected,
             "source_id": source.id, "bank": scope["bank"], "generation": scope["generation"],
             "authorization_revision": grant["revision"],
         }
@@ -134,12 +173,16 @@ class ReadGuard:
     connection: tuple
     selection: dict
     manual: bool = False
+    reading_setting: str | None = None
 
     @classmethod
     def freeze(cls, plugin, scope, *, manual=False):
         return cls(
             plugin.outbox, plugin.client, dict(scope), plugin.permission_revision,
             cls.connection_state(plugin), reference(plugin.outbox, scope), manual,
+            plugin.outbox.control.setting("reading:" + sha256(canonical([
+                plugin.outbox.connection_id, scope["owner_id"],
+            ]))),
         )
 
     @staticmethod
@@ -167,21 +210,24 @@ class ReadGuard:
                 and owner["bank"] == self.scope["bank"] and owner["revision"] == self.scope["revision"]
             ))
             and reference(self.queue, self.scope) == self.selection
+            and self.queue.control.setting("reading:" + sha256(canonical([
+                self.queue.connection_id, self.scope["owner_id"],
+            ]))) == self.reading_setting
         )
 
 
-def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None):
+def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None, on_demand=False, prefix=""):
     """Keep whole native facts and a whole short page inside one shared budget."""
     diagnostics = {} if diagnostics is None else diagnostics
 
     def fits(value):
-        return len(value) <= chars and token_count(value, tokenizer) <= tokens
+        return len(prefix + value) <= chars and token_count(prefix + value, tokenizer) <= tokens
 
     def overflow(value):
         exceeded = diagnostics.setdefault("exceeded", [])
         for name, over in (
-            ("共享 token 上限", token_count(value, tokenizer) > tokens),
-            ("共享字符上限", len(value) > chars),
+            ("共享 token 上限", token_count(prefix + value, tokenizer) > tokens),
+            ("共享字符上限", len(prefix + value) > chars),
         ):
             if over and name not in exceeded:
                 exceeded.append(name)
@@ -201,7 +247,9 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
     status = []
     if page_code:
         status.append("未使用知识页：" + page_code)
-    if recall_code:
+    if on_demand:
+        status.append("细节记忆由按需工具读取，本轮未自动检索。")
+    elif recall_code:
         status.append("本轮细节检索失败（" + recall_code + "）。")
     elif not results:
         status.append("本轮细节检索未匹配到相关记忆。")
@@ -212,6 +260,7 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
             return compose_background(
                 None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
                 page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
+                on_demand=on_demand, prefix=prefix,
             )
     selected = []
     previous_block = ""
@@ -230,8 +279,92 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
         return compose_background(
             None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
             page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
+            on_demand=on_demand, prefix=prefix,
         )
     if fits(result):
         return result.strip(), page_code, bool(block), bool(background)
     fallback = "Hindsight 本轮记忆参考不可用。"
     return (fallback if fits(fallback) else ""), page_code or "background_too_large", False, False
+
+
+def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", on_demand=False, prefix=""):
+    """Fit complete pages in selection order, then complete native recall items."""
+    outcomes = [{
+        **read["reference"], "code": read["code"], "used": False, "exceeded": [],
+    } for read in reads]
+    if len(reads) == 1:
+        diagnostics = {}
+        block, code, facts_used, used = compose_background(
+            reads[0]["page"], results, tokens=tokens, chars=chars, tokenizer=tokenizer,
+            page_tokens=page_tokens, recall_code=recall_code, page_code=reads[0]["code"],
+            diagnostics=diagnostics,
+            on_demand=on_demand, prefix=prefix,
+        )
+        outcomes[0].update(code=code, used=used, exceeded=diagnostics.get("exceeded", []))
+        return block, facts_used, outcomes
+
+    def fits(text):
+        return len(prefix + text) <= chars and token_count(prefix + text, tokenizer) <= tokens
+
+    def exceeded(text):
+        return [label for label, over in (
+            ("共享 token 上限", token_count(prefix + text, tokenizer) > tokens),
+            ("共享字符上限", len(prefix + text) > chars),
+        ) if over]
+
+    candidates = {}
+    for index, read in enumerate(reads):
+        if read["code"]:
+            continue
+        if read["page"] is None:
+            outcomes[index]["code"] = "background_missing"
+            continue
+        check = check_page(
+            read["page"], tokens=tokens, chars=chars, page_tokens=page_tokens, tokenizer=tokenizer,
+        )
+        if check["code"]:
+            outcomes[index].update(code=check["code"], exceeded=check["exceeded"])
+        else:
+            candidates[index] = page_block(read["page"])
+
+    def suffix(*, no_facts=False):
+        messages = []
+        if any(not item["used"] for item in outcomes):
+            messages.append("部分知识页未使用，原因见插件面板。")
+        if on_demand:
+            messages.append("细节记忆由按需工具读取，本轮未自动检索。")
+        elif recall_code:
+            messages.append("本轮细节检索失败（" + recall_code + "）。")
+        elif not results:
+            messages.append("本轮细节检索未匹配到相关记忆。")
+        elif no_facts:
+            messages.append("本轮细节检索结果超出参考预算（recall_content_unavailable）。")
+        return "\n" + " ".join(messages) if messages else ""
+
+    selected_pages = []
+    for index, block in candidates.items():
+        outcomes[index]["used"] = True
+        candidate = "\n\n".join(candidates[i] for i in [*selected_pages, index]) + suffix()
+        if fits(candidate):
+            selected_pages.append(index)
+        else:
+            outcomes[index].update(used=False, code="background_too_large", exceeded=exceeded(candidate))
+
+    # A failure notice also consumes budget; remove only trailing accepted pages.
+    while True:
+        background = "\n\n".join(candidates[i] for i in selected_pages)
+        selected, facts = [], ""
+        for item in results[:12]:
+            block = memory_block([*selected, item], limit=chars)
+            candidate = "\n\n".join(filter(None, (background, block))) + suffix()
+            if block and block != facts and fits(candidate):
+                selected.append(item)
+                facts = block
+        text = "\n\n".join(filter(None, (background, facts))) + suffix(no_facts=bool(results and not facts))
+        if fits(text):
+            return text.strip(), bool(facts), outcomes
+        if not selected_pages:
+            fallback = "Hindsight 本轮记忆参考不可用。"
+            return fallback if fits(fallback) else "", False, outcomes
+        index = selected_pages.pop()
+        outcomes[index].update(used=False, code="background_too_large", exceeded=exceeded(text))

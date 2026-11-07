@@ -311,12 +311,17 @@ class HindsightClient:
             self.connection_result(True, sequence=sequence)
         return value
 
-    async def read_bounded(self, path, *, max_bytes=BACKGROUND_MAX_BYTES):
+    async def read_bounded(
+        self, path, *, max_bytes=BACKGROUND_MAX_BYTES, method="GET", body=None,
+        expected=dict, timeout=None,
+    ):
         """Bound decoded response bytes while streaming, not after buffering JSON."""
         sequence = self.next_connection_sequence()
         try:
             async with self.http.stream(
-                "GET", self.url + path, headers={"Authorization": "Bearer " + self.api_key},
+                method, self.url + path, json=body,
+                headers={"Authorization": "Bearer " + self.api_key},
+                **({"timeout": timeout} if timeout is not None else {}),
             ) as response:
                 if not response.is_success:
                     if response.status_code in {401, 403}:
@@ -327,13 +332,13 @@ class HindsightClient:
                         and response.status_code not in {408, 429},
                         retry_after=retry_after(response.headers.get("Retry-After")),
                     )
-                body = bytearray()
+                data = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=8192):
-                    if len(body) + len(chunk) > max_bytes:
+                    if len(data) + len(chunk) > max_bytes:
                         raise HindsightError("background_response_too_large")
-                    body.extend(chunk)
-            value = json.loads(body)
-            if not isinstance(value, dict):
+                    data.extend(chunk)
+            value = json.loads(data)
+            if not isinstance(value, expected):
                 raise ValueError
             if time.monotonic() < self.auth_until:
                 self.connection_result(True, sequence=sequence)
@@ -347,9 +352,51 @@ class HindsightClient:
             self.connection_result(False, "connection_error", sequence=sequence)
             raise HindsightError("connection_error") from None
 
-    async def _background_read(self, bank, suffix):
+    async def reflect(self, bank, query, *, max_tokens, settled):
+        sequence = self.next_connection_sequence()
         try:
-            return await self.read_bounded(self.bank_path(bank) + suffix)
+            async with self.http.stream(
+                "POST", self.url + self.bank_path(bank) + "/reflect",
+                json={"query": query, "budget": "low", "max_tokens": max_tokens, "include": {"facts": {}}},
+                headers={"Authorization": "Bearer " + self.api_key},
+                timeout=httpx.Timeout(120, connect=3),
+            ) as response:
+                if not response.is_success:
+                    if response.status_code in {401, 403}:
+                        self.connection_result(False, f"http_{response.status_code}", sequence=sequence)
+                    raise HindsightError(f"http_{response.status_code}")
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    if len(data) + len(chunk) > BACKGROUND_MAX_BYTES:
+                        raise HindsightError("reflect_response_too_large")
+                    data.extend(chunk)
+            value = json.loads(data)
+            if (
+                not isinstance(value, dict) or not isinstance(value.get("text"), str)
+                or value.get("based_on") is not None and not isinstance(value["based_on"], dict)
+                or value.get("usage") is not None and not isinstance(value["usage"], dict)
+            ):
+                raise ValueError
+            settled()
+            if time.monotonic() < self.auth_until:
+                self.connection_result(True, sequence=sequence)
+            return value
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError):
+            settled()
+            self.connection_result(False, "connection_error", sequence=sequence)
+            raise HindsightError("connection_error") from None
+        except httpx.TimeoutException:
+            self.connection_result(False, "reflect_transport_timeout", sequence=sequence)
+            raise HindsightError("reflect_transport_timeout") from None
+        except httpx.HTTPError:
+            self.connection_result(False, "connection_error", sequence=sequence)
+            raise HindsightError("connection_error") from None
+        except (ValueError, RecursionError):
+            raise HindsightError("invalid_reflect_response") from None
+
+    async def _background_read(self, bank, suffix, *, expected=dict):
+        try:
+            return await self.read_bounded(self.bank_path(bank) + suffix, expected=expected)
         except HindsightError as exc:
             if exc.code != "http_404":
                 raise
@@ -409,7 +456,13 @@ class HindsightClient:
             or (value.get("body") is not None and not isinstance(value["body"], str))
         ):
             raise HindsightError("invalid_background_response")
-        return {"id": page_id, "name": value["name"], "body": value.get("body") or ""}
+        result = {"id": page_id, "name": value["name"], "body": value.get("body") or ""}
+        for key in ("timestamp", "description"):
+            if key in value:
+                if value[key] is not None and not isinstance(value[key], str):
+                    raise HindsightError("invalid_background_response")
+                result[key] = value[key]
+        return result
 
     async def background_page(self, bank, model_id):
         value = await self._background_read(
@@ -484,31 +537,31 @@ class HindsightClient:
         *,
         timestamp: str,
         timeout: float | None = None,
+        bounded: bool = False,
     ) -> list[dict]:
         if not query.strip() or token_count(query, self.tokenizer) > 400:
             raise HindsightError("invalid_query_budget", permanent=True)
         await self.ensure_auth(timeout=timeout)
         try:
-            result = await self.request(
-                "POST",
-                self.bank_path(bank) + "/memories/recall",
+            options = dict(
                 body={
-                    "query": query,
-                    "budget": "mid",
-                    "max_tokens": max_tokens,
+                    "query": query, "budget": "mid", "max_tokens": max_tokens,
                     "query_timestamp": timestamp,
                     "types": ["world", "experience", "observation"],
-                    "include": {
-                        "source_facts": {
-                            "max_tokens": 256,
-                            "max_tokens_per_observation": 64,
-                        }
-                    },
-                },
-                timeout=timeout,
+                    "include": {"source_facts": {"max_tokens": 256, "max_tokens_per_observation": 64}},
+                }, timeout=timeout,
+            )
+            result = await self.read_bounded(
+                self.bank_path(bank) + "/memories/recall", method="POST", **options,
+            ) if bounded else await self.request(
+                "POST",
+                self.bank_path(bank) + "/memories/recall",
+                **options,
             )
         except HindsightError as exc:
             if exc.code == "http_404":
+                if bounded:
+                    raise HindsightError("bank_missing") from None
                 return []
             raise
         rows = result.get("results")

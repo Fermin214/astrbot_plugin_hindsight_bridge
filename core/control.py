@@ -45,7 +45,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -100,6 +100,13 @@ class Control:
                     accepted INTEGER NOT NULL DEFAULT 0,
                     cancel_intent INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS reflection_requests(
+                    request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')),
+                    created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '',
+                    UNIQUE(connection_id,bank)
+                );
                 CREATE TABLE IF NOT EXISTS maintenance(
                     connection_id TEXT NOT NULL, bank TEXT NOT NULL,
                     started_at REAL NOT NULL, discard_pending INTEGER NOT NULL DEFAULT 0,
@@ -143,7 +150,9 @@ class Control:
                 "ON erasure_refs(forget_id,kind,checked_pass,ref)"
             )
             with self.transaction():
-                self.db.execute("PRAGMA user_version=5")
+                self.db.execute("PRAGMA user_version=6")
+                self.db.execute("DELETE FROM reflection_requests WHERE state='prepared'")
+                self.db.execute("UPDATE reflection_requests SET state='unknown',error_code='reflect_execution_unknown' WHERE state='dispatched'")
                 if version < 4:
                     self.db.execute(
                         "UPDATE owners SET command_from=MAX(accept_from,?)",
@@ -368,9 +377,36 @@ class Control:
                 except (ValueError, KeyError, TypeError):
                     raise QueueError("background_settings_invalid") from None
                 self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
+                    "format": 2, "revision": revision + 1, "enabled": False,
+                    "page_id": "", "mental_model_id": "", "pages": [],
+                    "invalidated": bool(previous.get("page_id") or previous.get("pages") or previous.get("invalidated")),
+                }), key))
+            key = "reading:" + sha256(canonical([connection, owner_id]))
+            previous = self.setting(key)
+            if previous:
+                try:
+                    previous = json.loads(previous)
+                    revision = previous["revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError):
+                    raise QueueError("reading_settings_invalid") from None
+                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
+                    "format": 1, "revision": revision + 1, "mode": "automatic", "invalidated": True,
+                }), key))
+            key = "reflect:" + sha256(canonical([connection, owner_id]))
+            previous = self.setting(key)
+            if previous:
+                try:
+                    previous = json.loads(previous)
+                    revision = previous["revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError):
+                    raise QueueError("reflect_settings_invalid") from None
+                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
                     "format": 1, "revision": revision + 1, "enabled": False,
-                    "page_id": "", "mental_model_id": "",
-                    "invalidated": bool(previous.get("page_id") or previous.get("invalidated")),
+                    "timeout": 12, "invalidated": True,
                 }), key))
             self.bump()
         return self.db.execute(
@@ -542,6 +578,13 @@ class Control:
         return self.db.execute(
             "SELECT * FROM requests WHERE operation_id=?", (operation_id,)
         ).fetchone()
+
+    def reflection_pending(self, connection, *, bank=None, owner_id=None):
+        return self.db.execute(
+            "SELECT * FROM reflection_requests WHERE connection_id=? "
+            "AND (? IS NULL OR bank=?) AND (? IS NULL OR owner_id=?) ORDER BY created_at",
+            (connection, bank, bank, owner_id, owner_id),
+        ).fetchall()
 
     def record_request(
         self, row, owner_id, *, dispatched=False, accepted=False, cancel=False

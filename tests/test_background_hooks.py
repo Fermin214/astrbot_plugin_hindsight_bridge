@@ -401,6 +401,38 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response["selection"]["enabled"])
         self.assertEqual(self.requests, [])
 
+    async def test_multiple_deleted_pages_can_be_removed_without_reviving_or_dropping_other_references(self):
+        queue, scope = self.plugin.outbox, self.scope()
+        saved = save_reference(queue, scope, revision=0, enabled=True, pages=[
+            {"page_id": "kp-1", "mental_model_id": "mm-1"},
+            {"page_id": "kp-2", "mental_model_id": "mm-2"},
+        ])
+        panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
+        panel.body = AsyncMock(return_value={
+            "page_ids": ["kp-2"], "enabled": True, "revision": saved["revision"],
+            "scope_revision": scope["revision"], "config_revision": panel.config_revision(),
+        })
+        with patch.object(self.plugin.client, "knowledge_pages", AsyncMock(return_value=[])):
+            result = await panel.background(scope["scope_id"])
+            self.assertEqual(result["selection"]["pages"], [saved["pages"][1]])
+            self.assertEqual(result["checks"][0]["code"], "background_missing")
+            panel.body.return_value.update(page_ids=["unknown-page"], revision=result["selection"]["revision"])
+            with self.assertRaisesRegex(QueueError, "background_missing"):
+                await panel.background(scope["scope_id"])
+        panel.body.return_value["page_ids"] = ["kp-2"]
+        with (
+            patch.object(self.plugin.client, "knowledge_pages", AsyncMock(return_value=[
+                {"page_id": "kp-2", "mental_model_id": "unconfirmed-model"},
+            ])),
+            patch.object(self.plugin.client, "knowledge_page", AsyncMock(
+                side_effect=runtime.HindsightError("background_missing"),
+            )),
+        ):
+            with self.assertRaisesRegex(runtime.HindsightError, "background_missing"):
+                await panel.background(scope["scope_id"])
+        self.assertEqual(reference(queue, scope), result["selection"])
+        self.assertFalse(any("/mental-models/" in str(call.url) or call.method != "GET" for call in self.requests))
+
     async def test_admin_mapping_changes_or_revocation_during_save_do_not_commit(self):
         for change in ("mapping", "revoke"):
             with self.subTest(change=change):

@@ -134,6 +134,16 @@ class Feedback(Acceptance):
         from parameter_panel import save_parameters
 
         async def configure(**updates):
+            if "context_max_chars" in updates:
+                state = await self.bootstrap()
+                await self.http("POST", self.prefix + "/parameters/save", payload={
+                    "config_revision": state["config_revision"],
+                    "parameters": {**state["parameters"]["values"], **updates},
+                })
+                await page.reload()
+                await self.dismiss_host_notice(page)
+                await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                return
             return await save_parameters(self, frame, **updates)
 
         async def selected_check():
@@ -267,7 +277,8 @@ class Feedback(Acceptance):
                 core = ROOT / "verification/data/cmd_config.json"
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
                 full = not self.settings.get("feedback_only")
-                await self.install("baseline-install.zip" if full or self.settings.get("single_page") else "candidate-install.zip")
+                upgrading = full or self.settings.get("single_page") or self.settings.get("multi_page") or self.settings.get("read_tools") or self.settings.get("reflect")
+                await self.install("baseline-install.zip" if upgrading else "candidate-install.zip")
                 legacy = ROOT / "verification/legacy-control"
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
                                   service_id=self.settings["owner"], control_state_dir=str(legacy) if full else "", allowed_accounts=[
@@ -284,7 +295,7 @@ class Feedback(Acceptance):
                 bank, identifier = scope["bank"], scope["scope_id"]
                 short = await self.page(bank, "Short background")
                 await self.select(short)
-                if self.settings.get("single_page"):
+                if self.settings.get("single_page") or self.settings.get("multi_page") or self.settings.get("read_tools") or self.settings.get("reflect"):
                     await self.install("candidate-upgrade.zip")
                     await self.usable()
                     assert (await self.scope())["bank"] == bank
@@ -320,6 +331,36 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("reflect"):
+                    from reflection_e2e import verify
+
+                    await verify(self, page, frame, bank)
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(complete=True, acceptance_scope="native Reflect tools, independent settings, erasure barriers and uncertain execution recovery")
+                    self.save()
+                    return
+                if self.settings.get("read_tools"):
+                    from reading_e2e import verify
+
+                    await verify(self, page, frame, bank)
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(complete=True, acceptance_scope="native Agent read tools, page versions, mode settings, quotas and host history")
+                    self.save()
+                    return
+                if self.settings.get("multi_page"):
+                    from multiple_pages import verify, verify_recovery
+
+                    recovery_only = self.settings.get("multi_page_recovery_only")
+                    await (verify_recovery(self, page, frame, bank, short) if recovery_only
+                           else verify(self, page, frame, bank, short))
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(
+                        complete=True,
+                        acceptance_scope="native recovery of multiple deleted page references" if recovery_only
+                        else "0.2.8 upgrade, native ordered pages, shared budget, lifecycle and erasure",
+                    )
+                    self.save()
+                    return
                 if self.settings.get("parameters_only"):
                     from parameter_panel import verify_advanced
 
@@ -445,7 +486,7 @@ async def main():
     try:
         await acceptance.run()
     except Exception as error:
-        acceptance.report.update(failure_type=type(error).__name__, failure=str(error)[:300])
+        acceptance.report.update(complete=False, failure_type=type(error).__name__, failure=str(error)[:300])
         acceptance.save()
         raise
 

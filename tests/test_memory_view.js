@@ -22,13 +22,14 @@ function harness() {
       get options() { return this.children; },
       querySelector() { return node(); }, closest() { return null; },
       append(...children) { this.children.push(...children); },
+      prepend(...children) { this.children.unshift(...children); },
       replaceChildren(...children) { this.children = children; },
       attributes: {},
       addEventListener(name, handler) { this.listeners[name] = handler; },
       setAttribute(name, value) { this.attributes[name] = value; },
       removeAttribute(name) { delete this[name === "maxlength" ? "maxLength" : name]; },
       showModal() { this.open = true; }, close() { this.open = false; },
-      focus() {}, select() {}, reset() {}, reportValidity() { return true; },
+      focus() {}, select() {}, reset() {}, checkValidity() { return true; }, reportValidity() { return true; },
     };
   }
   const context = vm.createContext({
@@ -51,15 +52,15 @@ function harness() {
     maintenanceIdentity: "", maintenanceCheckedAt: 0,
     maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "", parameterDraft: null,
-    parameterKeys: ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+    parameterKeys: ["background_max_tokens", "recall_max_tokens",
       "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
       "queue_max_tasks", "queue_max_mib", "command_prefixes"],
     renderParameters() {},
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
-    backgroundReadRevision: 0, backgroundDraft: null,
-    renderBackground() {}, renderScope() {},
+    backgroundReadRevision: 0, backgroundDraft: null, readingDraft: null, reflectDraft: null,
+    renderBackground() {}, renderReading() {}, renderReflect() {}, renderScope() {},
     clearCommands() {},
     renderServiceVersion() {},
     clearUpgrade() {},
@@ -99,18 +100,24 @@ function parameterHarness() {
 
 test("memory settings polling retains drafts and exposes conflicts without changing saved values", () => {
   const context = parameterHarness();
+  assert.equal(context.$("save-parameters").disabled, true);
   context.$("memory-background_max_tokens").value = "4096";
   context.parameterDraft.dirty = true;
   context.renderParameters();
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.$("parameters-conflict").hidden, true);
+  assert.equal(context.$("save-parameters").disabled, false);
+  context.$("parameters-form").checkValidity = () => false;
+  context.renderParameters();
+  assert.equal(context.$("save-parameters").disabled, true);
+  context.$("parameters-form").checkValidity = () => true;
   context.data.config_revision = "b";
   context.data.parameters.values = { ...context.data.parameters.values, background_max_tokens: 2000 };
   context.renderParameters();
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.parameterDraft.revision, "a");
   assert.equal(context.$("parameters-conflict").hidden, false);
-  assert.match(context.$("effective-background_max_tokens").textContent, /已保存：2000/);
+  assert.equal(context.$("save-parameters").disabled, true);
   context.renderParameters({ discard: true });
   assert.equal(context.$("memory-background_max_tokens").value, "2000");
   assert.equal(context.parameterDraft.revision, "b");
@@ -120,13 +127,14 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   const context = parameterHarness();
   context.$("api-url").value = "http://unsaved-connection";
   context.$("memory-background_max_tokens").value = "4096";
-  context.$("memory-command_prefixes").value = "!\n#\n";
+  context.$("memory-command_prefixes").value = " !, ，# , ";
   context.parameterDraft.dirty = true;
   context.bridge = { apiPost: async (route, payload) => {
     assert.equal(route, "parameters/save");
     assert.deepEqual(Object.keys(payload).sort(), ["config_revision", "parameters"]);
     assert.equal(payload.config_revision, "a");
     assert.equal(payload.parameters.background_max_tokens, 4096);
+    assert.equal("context_max_chars" in payload.parameters, false);
     assert.equal(JSON.stringify(payload.parameters.command_prefixes), '["!","#"]');
     return { saved: true, config_revision: "b", message: "已保存并生效",
       parameters: { ...context.data.parameters, values: payload.parameters, effective: payload.parameters } };
@@ -136,18 +144,22 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   assert.equal(context.settingsRevision, "b");
   assert.equal(context.parameterDraft.revision, "b");
   assert.equal(context.parameterDraft.dirty, false);
-  assert.match(context.$("effective-background_max_tokens").textContent, /生效值：4096/);
-  assert.match(context.$("parameters-feedback").textContent, /已保存并生效/);
+  assert.equal(context.$("save-parameters").disabled, true);
+  assert.equal(context.data.parameters.effective.background_max_tokens, 4096);
+  assert.equal(context.$("memory-command_prefixes").value, "!, #");
+  context.$("memory-command_prefixes").value = "";
+  assert.equal(JSON.stringify(context.parameterPayload().parameters.command_prefixes), "[]");
+  assert.match(context.$("parameters-feedback").textContent, /已保存/);
   assert.equal(context.locks.size, 0);
 });
 
 test("failed parameter saves retain input and revision and reject invalid numeric serialization", async () => {
   const context = parameterHarness();
-  context.$("memory-context_max_chars").value = "24000";
+  context.$("memory-recall_max_tokens").value = "6000";
   context.parameterDraft.dirty = true;
   context.bridge = { apiPost: async () => { throw new Error("配置已被更新"); } };
   await context.saveParameters();
-  assert.equal(context.$("memory-context_max_chars").value, "24000");
+  assert.equal(context.$("memory-recall_max_tokens").value, "6000");
   assert.equal(context.parameterDraft.revision, "a");
   assert.equal(context.parameterDraft.dirty, true);
   assert.match(context.$("parameters-feedback").textContent, /配置已被更新/);
@@ -173,7 +185,7 @@ test("a late parameter save response cannot overwrite newer bootstrap values", a
   assert.equal(context.data.parameters.values.background_max_tokens, 3000);
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.parameterDraft.dirty, true);
-  assert.match(context.$("parameters-feedback").textContent, /设置又有更新/);
+  assert.match(context.$("parameters-feedback").textContent, /设置已更新/);
 });
 
 test("manual version feedback survives polling and rejects results from a changed connection", async () => {
@@ -734,7 +746,7 @@ test("connected service does not hide the user's recall failure", () => {
   context.scopeId = "one";
   context.renderStatus();
   context.renderScope();
-  assert.equal(context.$("status-label").textContent, "服务已连接");
+  assert.equal(context.$("status-label").textContent, "已连接");
   const text = context.$("scope-recall-status").textContent;
   assert.match(text, /超时/);
   assert.match(text, /增加召回等待时间/);
@@ -752,7 +764,7 @@ test("connection errors retain specific guidance and existing services hide mode
 
 function backgroundHarness() {
   const context = harness();
-  for (const name of ["backgroundSnapshot", "renderBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
+  for (const name of ["backgroundSnapshot", "backgroundPages", "renderBackground", "changeBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
     vm.runInContext(declaration(name), context);
   }
   context.renderScope = context.renderBackground;
@@ -769,43 +781,78 @@ function backgroundHarness() {
   return context;
 }
 
-test("background polling retains saved selection and clears references after Bank rotation", () => {
+test("background polling retains an unsaved choice and clears references after Bank rotation", () => {
   const context = backgroundHarness();
-  context.backgroundDraft.page_id = "unsaved-page";
-  context.backgroundDraft.enabled = false;
+  context.$("background-page").value = "";
+  context.changeBackground();
   context.renderBackground();
-  assert.equal(context.$("background-page").value, "kp-1");
+  assert.equal(context.$("background-page").value, "");
+  assert.equal(context.data.scopes[0].background.enabled, true);
+  context.data.config_revision = "config-2";
+  context.renderBackground();
+  assert.equal(context.$("background-page").value, "");
+  assert.match(context.$("background-status").textContent, /设置已更新/);
+  assert.equal(context.$("background-save").disabled, true);
   context.data.scopes[0].bank = "new-bank";
   context.data.scopes[0].background = { revision: 2, scope_revision: 3, enabled: false, page_id: "" };
   context.renderBackground();
   assert.equal(context.$("background-page").value, "");
 });
 
-test("chat usage and failures remain visible after index loading and polling", async () => {
+test("returning to the browser tab preserves unsaved page additions, ordering, removal and disabling", () => {
+  const context = backgroundHarness();
+  let resume;
+  context.document.addEventListener = (name, callback) => { resume = callback; };
+  context.document.hidden = false;
+  context.refreshTimer = null;
+  context.scheduleRefresh = () => {};
+  const begin = source.lastIndexOf('document.addEventListener("visibilitychange", () => {');
+  vm.runInContext(source.slice(begin, source.indexOf("\n});", begin) + 4), context);
+  const check = (ids, enabled) => {
+    const draft = context.backgroundDraft;
+    resume();
+    assert.equal(context.backgroundDraft, draft);
+    assert.equal(JSON.stringify(draft.selected.map(page => page.page_id)), JSON.stringify(ids));
+    assert.equal(draft.enabled, enabled);
+    assert.equal(draft.dirty, true);
+    assert.equal(context.$("background-save").disabled, false);
+    assert.equal(context.data.scopes[0].background.page_id, "kp-1");
+  };
+  context.$("background-page").value = "kp-2";
+  context.changeBackground();
+  check(["kp-1", "kp-2"], true);
+  context.$("background-selected").children[1].children.at(-1).children[0].listeners.click();
+  check(["kp-2", "kp-1"], true);
+  context.$("background-selected").children[1].children.at(-1).children[2].listeners.click();
+  check(["kp-2"], true);
+  context.$("background-page").value = "";
+  context.changeBackground();
+  check(["kp-2"], false);
+});
+
+test("per-page usage and failures remain visible after index loading and polling", async () => {
   const context = backgroundHarness();
   const saved = context.data.scopes[0].background;
+  const content = () => context.$("background-selected").children.flatMap(row => row.children).map(row => row.textContent).join(" ");
   context.bridge = { apiGet: async () => ({ pages: [{ page_id: "kp-1", path: "Page" }],
     selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1" }) };
-  for (const message of ["上次聊天已使用知识页。", "上次聊天未使用知识页：知识页太长。",
-    "上次聊天未使用知识页：读取知识页超时。", "上次聊天未使用知识页：知识页还没有正文。",
-    "上次聊天未使用知识页：找不到所选知识页。"]) {
-    saved.status = { message };
+  for (const message of ["已使用", "知识页太长", "读取超时", "正文为空", "页面不存在"]) {
+    saved.status = { pages: [{ page_id: "kp-1", used: message === "已使用", message }] };
     context.renderBackground();
-    assert.equal(context.$("background-status").textContent, message);
+    assert.ok(content().includes(message));
     await context.loadBackground();
     context.renderBackground();
-    assert.equal(context.$("background-status").textContent, message);
-    assert.equal(context.$("background-status").hidden, false);
+    assert.ok(content().includes(message));
   }
   context.scopeId = "two";
   context.data.scopes.push({ scope_id: "two", bank: "bank-2", summary: {}, background: { revision: 0, enabled: false } });
   context.renderBackground();
-  assert.equal(context.$("background-status").textContent, "");
+  assert.equal(content(), "");
   context.scopeId = "one";
   saved.invalidated = true;
   saved.enabled = false;
   saved.page_id = "";
-  saved.message = "身份或记忆库已变化，知识页选择已失效，请重新选择。";
+  saved.message = "知识页选择已失效，请重新选择。";
   context.renderBackground();
   assert.equal(context.$("background-page").value, "");
   assert.equal(context.$("background-status").textContent, saved.message);
@@ -822,24 +869,43 @@ test("historical and maintenance scopes never offer page reads; maintenance perm
   assert.equal(context.$("background-page").disabled, true);
 });
 
-test("page length and index checks stay separate from chat usage and clear on scope change", async () => {
+test("page rows show length and actual stale state without repeating routine status", async () => {
   const context = backgroundHarness();
-  context.data.scopes[0].background.status = { message: "上次聊天已使用知识页。" };
-  for (const [stale, label] of [[true, "有新记忆待刷新"], [false, "未标记待刷新"], [null, "更新状态未知"]]) {
+  context.data.scopes[0].background.status = { pages: [{ page_id: "kp-1", used: true }] };
+  const content = () => context.$("background-selected").children.flatMap(row => row.children).map(row => row.textContent).join(" ");
+  for (const stale of [true, false, null]) {
     context.bridge = { apiGet: async () => ({
       pages: [{ page_id: "kp-1", path: "Page", index_stale: stale }],
       selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1",
-      check: { message: "含说明与元数据：1800 token、4000 字符。知识页太长。" },
+      checks: [{ page_id: "kp-1", tokens: 653, chars: 1068, limits: { tokens: 400, chars: 4000 },
+        exceeded: ["知识页 token 上限"], code: "background_too_large" }],
     }) };
     await context.loadBackground();
-    assert.match(context.$("background-index").textContent, new RegExp(label));
-    assert.match(context.$("background-check").textContent, /1800 token/);
-    assert.equal(context.$("background-status").textContent, "上次聊天已使用知识页。");
+    assert.match(content(), /653 \/ 400 token（超限）/);
+    assert.doesNotMatch(content(), /1068|字符/);
+    assert.match(content(), /已使用/);
+    assert.equal(content().includes("有新记忆待刷新"), stale === true);
+    assert.equal(context.$("background-status").hidden, true);
   }
   context.data.scopes[0].background.enabled = false;
+  context.data.scopes[0].background.revision++;
   context.renderBackground();
-  assert.equal(context.$("background-check").hidden, true);
-  assert.equal(context.$("background-index").hidden, true);
+  assert.doesNotMatch(content(), /653|已使用|有新记忆待刷新/);
+});
+
+test("manual refresh reports the page count while automatic loads stay quiet", async () => {
+  const context = backgroundHarness();
+  let pages = [];
+  context.bridge = { apiGet: async () => ({ pages,
+    selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1" }) };
+  context.$("background-feedback").hidden = true;
+  await context.loadBackground();
+  assert.equal(context.$("background-feedback").hidden, true);
+  await context.loadBackground({ manual: true });
+  assert.equal(context.$("background-feedback").textContent, "暂无知识页");
+  pages = [{ page_id: "kp-1", path: "Page" }];
+  await context.loadBackground({ manual: true });
+  assert.equal(context.$("background-feedback").textContent, "已刷新 1 篇");
 });
 
 test("late background index cannot overwrite another user's draft", async () => {
@@ -877,14 +943,19 @@ test("background save carries original revisions and closing does not delete a p
   const calls = [];
   context.bridge = { apiPost: async (endpoint, payload) => { calls.push({ endpoint, payload }); return { message: "saved" }; } };
   context.$("background-page").value = "kp-2";
+  context.changeBackground();
+  context.renderBackground();
+  assert.equal(calls.length, 0);
+  assert.equal(context.$("background-save").disabled, false);
   context.data.config_revision = "new-config";
   await context.saveBackground();
   assert.equal(calls[0].payload.config_revision, "config-1");
-  assert.equal(calls[0].payload.page_id, "kp-2");
+  assert.equal(JSON.stringify(calls[0].payload.page_ids), '["kp-1","kp-2"]');
   context.$("background-page").value = "";
+  context.changeBackground();
   await context.saveBackground();
   assert.equal(calls[1].payload.enabled, false);
-  assert.equal(calls[1].payload.page_id, "kp-1");
+  assert.equal(JSON.stringify(calls[1].payload.page_ids), '["kp-1"]');
   assert.equal(calls[1].endpoint, "scopes/one/background");
   assert.equal("bank" in calls[1].payload, false);
 });
@@ -909,7 +980,7 @@ test("settings refresh invalidates old drafts and allows closing during maintena
     apiPost: async (route, payload) => {
       assert.equal(route, "scopes/one/background");
       assert.equal(payload.config_revision, "config-2");
-      assert.equal(payload.page_id, "kp-1");
+      assert.equal(JSON.stringify(payload.page_ids), '["kp-1"]');
       assert.equal(payload.enabled, false);
       next.scopes[0].background = { ...next.scopes[0].background, enabled: false, revision: 2 };
       return { message: "saved" };
@@ -923,6 +994,7 @@ test("settings refresh invalidates old drafts and allows closing during maintena
   await context.refreshBootstrap({ pollMaintenance: false });
   assert.equal(context.backgroundDraft.config_revision, "config-2");
   context.$("background-page").value = "";
+  context.changeBackground();
   await context.saveBackground();
   assert.equal(context.data.scopes[0].background.enabled, false);
   assert.ok(calls.length >= 3);
@@ -942,6 +1014,145 @@ test("configuration change drops a pending old page list and unsaved choice rath
   assert.equal(context.backgroundDraft.page_id, "kp-1");
   assert.equal(context.backgroundDraft.pages.length, 0);
   assert.equal(context.$("background-page").value, "kp-1");
+});
+
+test("multiple pages render usage per page and persist ordering and removal", async () => {
+  const context = backgroundHarness();
+  const saved = context.data.scopes[0].background;
+  saved.pages = [{ page_id: "kp-1" }, { page_id: "kp-2" }];
+  saved.revision++;
+  context.renderBackground();
+  saved.status = { message: "上次聊天使用 1/2 篇知识页。", pages: [
+    { page_id: "kp-1", message: "上次聊天已使用。" },
+    { page_id: "kp-2", message: "知识页太长。" },
+  ] };
+  context.backgroundDraft.pages = [
+    { page_id: "kp-1", path: "First", index_stale: false },
+    { page_id: "kp-2", path: "<b>Second</b>", index_stale: true },
+  ];
+  context.renderBackground();
+  let rows = context.$("background-selected").children;
+  assert.equal(rows[1].children[0].textContent, "2. <b>Second</b>");
+  assert.equal(rows[1].children[0].innerHTML, undefined);
+  assert.equal(rows[1].children[1].textContent, "知识页太长。");
+  assert.equal(rows[0].children.at(-1).children[0].disabled, true);
+  assert.equal(rows[1].children.at(-1).children[1].disabled, true);
+  const writes = [];
+  context.bridge = { apiPost: async (route, payload) => { writes.push(payload); return {}; } };
+  rows[1].children.at(-1).children[0].listeners.click();
+  assert.equal(writes.length, 0);
+  await context.saveBackground();
+  assert.equal(JSON.stringify(writes[0].page_ids), '["kp-2","kp-1"]');
+  rows = context.$("background-selected").children;
+  rows[1].children.at(-1).children[2].listeners.click();
+  assert.equal(writes.length, 1);
+  await context.saveBackground();
+  assert.equal(JSON.stringify(writes[1].page_ids), '["kp-2"]');
+  assert.equal(writes[1].enabled, true);
+});
+
+test("reading mode preserves original revisions and drops feedback after user changes", async () => {
+  const context = harness();
+  for (const name of ["renderReading", "saveReading", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  context.$("reading-mode").replaceChildren(context.option("automatic", "auto"), context.option("tools", "tools"));
+  context.data = { config_revision: "config-1", status: {}, scopes: [{
+    scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
+    reading: { revision: 2, scope_revision: 3, mode: "automatic", observed_available: false },
+  }] };
+  context.scopeId = "one";
+  context.renderReading();
+  assert.equal(context.$("reading-mode").options[1].disabled, false);
+  context.data.scopes[0].reading.observed_available = true;
+  context.renderReading();
+  assert.equal(context.$("reading-mode").options[1].disabled, false);
+  context.$("reading-mode").value = "tools";
+  context.readingDraft.dirty = true;
+  context.renderReading();
+  assert.equal(context.$("reading-mode").value, "tools");
+  assert.equal(context.data.scopes[0].reading.mode, "automatic");
+  let release;
+  context.bridge = { apiPost: (route, payload) => {
+    assert.equal(route, "scopes/one/reading");
+    assert.equal(payload.revision, 2);
+    assert.equal(payload.scope_revision, 3);
+    assert.equal(payload.config_revision, "config-1");
+    return new Promise((resolve) => { release = resolve; });
+  } };
+  const saving = context.saveReading();
+  context.scopeId = "two";
+  context.data.scopes.push({ scope_id: "two", bank: "bank-two", summary: {},
+    reading: { revision: 0, scope_revision: 1, mode: "automatic" } });
+  context.renderReading();
+  release({ message: "saved-other-user" });
+  await saving;
+  assert.equal(context.$("reading-mode").value, "automatic");
+  assert.doesNotMatch(context.$("reading-feedback").textContent, /saved-other-user/);
+});
+
+test("Reflect keeps dirty values across polling, detects conflicts and ignores a former user's save", async () => {
+  const context = harness();
+  for (const name of ["renderReflect", "saveReflect", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  context.data = { config_revision: "config-1", status: {}, scopes: [{
+    scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
+    reflect: { revision: 2, scope_revision: 3, enabled: false, timeout: 12, observed_available: false },
+  }] };
+  context.scopeId = "one";
+  context.renderReflect();
+  assert.equal(context.$("reflect-enabled").disabled, false);
+  context.$("reflect-enabled").checked = true;
+  context.$("reflect-timeout").value = "20";
+  context.reflectDraft.dirty = true;
+  context.renderReflect();
+  assert.equal(context.$("reflect-timeout").value, "20");
+  context.data.scopes[0].reflect.revision = 3;
+  context.renderReflect();
+  assert.equal(context.$("reflect-conflict").hidden, false);
+  assert.equal(context.$("reflect-save").disabled, true);
+  assert.equal(context.$("reflect-timeout").value, "20");
+  context.renderReflect({ discard: true });
+  assert.equal(context.$("reflect-timeout").value, "12");
+  context.$("reflect-enabled").checked = true;
+  context.reflectDraft.dirty = true;
+  let release;
+  context.bridge = { apiPost: (route, payload) => {
+    assert.equal(route, "scopes/one/reflect");
+    assert.equal(payload.enabled, true);
+    assert.equal(payload.timeout, 12);
+    assert.equal(payload.revision, 3);
+    return new Promise((resolve) => { release = resolve; });
+  } };
+  const saving = context.saveReflect();
+  context.scopeId = "two";
+  context.data.scopes.push({ scope_id: "two", bank: "bank-two", summary: {},
+    reflect: { revision: 0, scope_revision: 1, enabled: false, timeout: 12 } });
+  context.renderReflect();
+  release({ message: "saved-former-user" });
+  await saving;
+  assert.equal(context.$("reflect-enabled").checked, false);
+  assert.doesNotMatch(context.$("reflect-feedback").textContent, /saved-former-user/);
+});
+
+test("an enabled Reflect shows detected model unavailability and still allows disabling", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderReflect"), context);
+  const reflect = { revision: 1, scope_revision: 1, enabled: true, timeout: 12,
+    observed_available: true, status: { state: "success" } };
+  context.data = { config_revision: "one", status: {}, scopes: [
+    { scope_id: "one", bank: "bank", mode: "active", summary: {}, reflect },
+  ] };
+  context.scopeId = "one";
+  context.renderReflect();
+  assert.equal(context.$("reflect-status").hidden, true);
+  reflect.observed_available = false;
+  reflect.status = { state: "unavailable" };
+  context.renderReflect();
+  assert.equal(context.$("reflect-enabled").checked, true);
+  assert.equal(context.$("reflect-enabled").disabled, false);
+  assert.equal(context.$("reflect-status").hidden, false);
+  assert.match(context.$("reflect-status").textContent, /此会话暂不支持 Reflect/);
+  reflect.enabled = false;
+  context.renderReflect();
+  assert.equal(context.$("reflect-status").hidden, true);
 });
 
 test("removed accounts stay out of user choices even while their Banks are retained", () => {

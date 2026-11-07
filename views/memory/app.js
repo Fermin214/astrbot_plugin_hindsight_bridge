@@ -4,7 +4,7 @@ const modeLabels = { active: "读写记忆", readonly: "只读记忆", paused: "
 let data = null;
 let settingsRevision = "";
 let parameterDraft = null;
-const parameterKeys = ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+const parameterKeys = ["background_max_tokens", "recall_max_tokens",
   "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
   "queue_max_tasks", "queue_max_mib", "command_prefixes"];
 let scopeId = "";
@@ -20,6 +20,8 @@ let maintenanceExpiryTimer;
 let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
+let readingDraft = null;
+let reflectDraft = null;
 let bootstrapReadRevision = 0;
 let versionCheckRevision = 0;
 let versionCheck = null;
@@ -106,6 +108,7 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
     }
     if (group === "setup") renderServiceVersion();
     if (group === "memory") renderScope();
+    if (group === "parameters") renderParameters();
   }
 }
 
@@ -192,8 +195,7 @@ async function loadManagedSetup() {
 
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  $("setup-intro").hidden = !managed || (data?.config.configured === true
-    && !!(managedSetup?.has_installation || data?.has_installation));
+  $("setup-intro").hidden = !managed || (data?.config.managed === true && data?.config.configured === true);
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;
@@ -203,9 +205,6 @@ function updateConnectionMode() {
   $("save-settings").hidden = managed;
   $("save-access").hidden = !managed;
   $("check-connection").hidden = managed;
-  $("deployment-capabilities").textContent = managed
-    ? "选择模型后点击「保存并连接」完成接入。API 地址与密钥来自配套安装记录；官方管理地址可单独保存。"
-    : "已有服务通过 API 使用插件记忆功能。测试服务连接检查记忆 API 和认证。";
 }
 
 function renderServiceVersion() {
@@ -341,6 +340,7 @@ function hydrateConfig() {
   updateProviderHelp();
 }
 
+
 function renderParameters({ discard = false } = {}) {
   const snapshot = data?.parameters;
   if (!snapshot) return;
@@ -348,16 +348,13 @@ function renderParameters({ discard = false } = {}) {
     parameterDraft = { revision: data.config_revision, dirty: false };
     for (const key of parameterKeys) {
       $("memory-" + key).value = key === "command_prefixes"
-        ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join("\n") : "") : String(snapshot.values[key] ?? "");
+        ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join(", ") : "") : String(snapshot.values[key] ?? "");
     }
   }
   $("parameters-fields").disabled = locks.has("parameters");
   $("parameters-conflict").hidden = parameterDraft.revision === data.config_revision;
-  for (const key of parameterKeys) {
-    const display = (value) => Array.isArray(value) ? value.join("、") || "无" : text(value);
-    $("effective-" + key).textContent = `已保存：${display(snapshot.values[key])}；`
-      + (snapshot.running ? `生效值：${display(snapshot.effective[key])}` : "连接服务后生效");
-  }
+  $("save-parameters").disabled = locks.has("parameters") || !parameterDraft.dirty
+    || parameterDraft.revision !== data.config_revision || !$("parameters-form").checkValidity();
   const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
     service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
   $("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
@@ -372,8 +369,8 @@ function renderParameterLimits() {
   const seconds = Number($("memory-background_timeout").value);
   const total = Number($("memory-recall_timeout").value);
   const messages = [];
-  if (page > shared) messages.push("知识页仍受较小的共享 token 上限约束。");
-  if (seconds > total / 4) messages.push(`知识页实际读取等待小于 ${total / 4} 秒，并随认证耗时缩短。`);
+  if (page > shared) messages.push("知识页长度超过记忆参考长度。");
+  if (seconds > total / 4) messages.push(`知识页有效超时 ≤ ${total / 4} 秒。`);
   $("parameters-limits").textContent = messages.join(" ");
   $("parameters-limits").hidden = !messages.length;
 }
@@ -382,7 +379,7 @@ function parameterPayload() {
   const parameters = {};
   for (const key of parameterKeys) {
     const raw = $("memory-" + key).value;
-    if (key === "command_prefixes") parameters[key] = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (key === "command_prefixes") parameters[key] = raw.split(/[,，\r\n]+/).map((prefix) => prefix.trim()).filter(Boolean);
     else if (key === "query_tokenizer") parameters[key] = raw.trim();
     else {
       const value = Number(raw);
@@ -400,26 +397,20 @@ async function saveParameters() {
   const payload = parameterPayload();
   await perform($("save-parameters"), "parameters", async () => {
     const response = await withTimeout(bridge.apiPost("parameters/save", payload), 25000,
-      "保存记忆设置超时，请重新获取状态并检查已保存值后重试。");
+      "保存超时，请刷新后确认结果。");
     if (!response.saved || !response.parameters || !response.config_revision) throw new Error(response.message || "记忆设置未保存，请重试。");
     if (data.config_revision !== payload.config_revision && data.config_revision !== response.config_revision) {
       await refreshBootstrap({ automatic: true, pollMaintenance: false });
-      throw new Error("保存完成后设置又有更新，草稿保留。请重新加载记忆设置并核对已保存值。");
+      throw new Error("设置已更新，请刷新页面。");
     }
     if (settingsRevision === payload.config_revision) settingsRevision = response.config_revision;
     data.parameters = response.parameters;
     data.config_revision = response.config_revision;
     renderParameters({ discard: true });
-    backgroundDraft = null;
-    notify(response.message, false, "parameters-feedback");
+    if (!backgroundDraft?.dirty) backgroundDraft = null;
+    notify("已保存", false, "parameters-feedback");
     await refreshBootstrap({ automatic: true, pollMaintenance: false });
   }, "parameters-feedback");
-}
-
-async function reloadParameters() {
-  await refreshBootstrap({ automatic: true, pollMaintenance: false });
-  renderParameters({ discard: true });
-  notify("记忆设置已重新加载。", false, "parameters-feedback");
 }
 
 function accountKey(account) {
@@ -481,12 +472,20 @@ function countDescription(counts) {
 function renderStatus() {
   const status = data.status || {};
   const connected = status.connected;
-  $("status-label").textContent = status.recovering ? "正在核对记忆数据" : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
+  $("status-label").textContent = status.recovering ? "恢复中" : connected === true ? "已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
   let description = status.recovering ? "正在核对记忆库与保存任务。" : connected !== true ? status.message || "请检查服务地址、密钥和服务运行状态。" : "";
   if (data.config.managed && data.managed_service?.installed && !status.recovering && !data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
   $("status-description").textContent = description;
   $("status-description").hidden = !description;
+  const setup = $("panel-setup");
+  const connection = $("setup-fields");
+  if (connected === true || data.config.configured) {
+    const deployment = $("deployment-info");
+    if (setup.lastElementChild !== deployment || deployment.previousElementSibling !== connection) {
+      setup.append(connection, deployment);
+    }
+  } else if (setup.firstElementChild !== connection) setup.prepend(connection);
   const attention = !!status.recovering || !data.config.configured || connected !== true;
   $("service-alert").hidden = !attention;
   $("service-alert-message").textContent = attention ? description || $("status-label").textContent : "";
@@ -494,7 +493,7 @@ function renderStatus() {
 
 function recallDescription(recall) {
   if (!recall) return "尚未检索";
-  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过" };
+  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过", on_demand: "按需读取" };
   const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome] || "结果未知";
   let result = `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}`;
   if (recall.error_message) result += `：${recall.error_message}`;
@@ -642,9 +641,6 @@ function renderScope() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const summary = scope?.summary || {};
   const account = (data?.config.allowed_accounts || []).find((item) => accountKey(item) === selectedAccount);
-  const platform = data?.platforms?.find((item) => item.id === scope?.platform_instance_id);
-  $("user-name").textContent = account?.user_id || scope?.user_id || "";
-  $("user-platform").textContent = platform?.name || scope?.platform_instance_id || "";
   $("user-bot").textContent = scope?.bot_id ? `机器人 ${scope.bot_id}` : "";
   $("user-availability").textContent = { historical: "旧记忆库", disconnected: "机器人未连接", confirmation: "身份待确认" }[scope?.availability] || "";
   $("pending-account").hidden = !scope?.pending;
@@ -663,7 +659,7 @@ function renderScope() {
   $("remove-account").disabled = !account || locks.has("setup") || !!data?.backend?.pending || !!data?.backend?.upgrade_paused;
   $("scope-bank").value = scope?.bank || "";
   $("copy-bank").disabled = !scope?.bank;
-  $("bank-state").textContent = scope?.bank_state === "new" ? "记忆库将在首次保存聊天时创建。" : "";
+  $("bank-state").textContent = scope?.bank_state === "new" ? "等待首次保存" : "";
   $("bank-state").hidden = !$("bank-state").textContent;
   const counts = summary.counts || {};
   $("saved-count").textContent = Number.isSafeInteger(summary.saved_count) && summary.saved_count >= 0 ? summary.saved_count : !scope || scope.pending ? "待开通" : "暂不可用";
@@ -680,6 +676,101 @@ function renderScope() {
   $("maintenance-state").hidden = !$("maintenance-state").textContent;
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
   renderBackground();
+  renderReading();
+  renderReflect();
+}
+
+function renderReading() {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const saved = scope?.reading || { revision: 0, mode: "automatic" };
+  const snapshot = JSON.stringify([scopeId, scope?.bank, saved.revision, saved.scope_revision, data?.config_revision]);
+  if (!readingDraft || readingDraft.id !== scopeId || readingDraft.bank !== scope?.bank || !readingDraft.dirty) {
+    if (!readingDraft || readingDraft.id !== scopeId || readingDraft.bank !== scope?.bank) $("reading-feedback").hidden = true;
+    readingDraft = { snapshot, id: scopeId, bank: scope?.bank, revision: saved.revision,
+      scope_revision: saved.scope_revision, config_revision: data?.config_revision, dirty: false };
+    $("reading-mode").value = saved.mode || "automatic";
+  }
+  const select = $("reading-mode");
+  select.disabled = !scope || !!scope.pending || !!scope.historical || !!data?.status?.recovering
+    || !!saved.error || locks.has("memory");
+  const conflict = readingDraft.snapshot !== snapshot;
+  $("reading-save").disabled = select.disabled || conflict || !readingDraft.dirty;
+  const status = saved.status || {};
+  const messages = [];
+  if (conflict) messages.push("设置已更新，请刷新页面。");
+  else if (saved.error) messages.push(saved.error);
+  else if (saved.invalidated) messages.push("记忆库已变化，已切回自动召回。");
+  else if (saved.mode === "tools") {
+    if (status.state === "error") messages.push(status.message || "工具读取失败");
+    else if (status.state === "budget") messages.push("本条消息的工具额度已用完");
+    else if (status.state === "unavailable") messages.push("此会话暂不支持按需工具");
+  }
+  $("reading-status").textContent = messages.join(" ");
+  $("reading-status").hidden = !messages.length;
+}
+
+async function saveReading() {
+  const draft = readingDraft;
+  if (!draft) return;
+  let saved = false;
+  const payload = { mode: $("reading-mode").value, revision: draft.revision,
+    scope_revision: draft.scope_revision, config_revision: draft.config_revision };
+  await perform($("reading-save"), "memory", async () => {
+    const response = await bridge.apiPost(endpoint("reading", draft.id), payload);
+    if (readingDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
+    await refreshBootstrap();
+    saved = true;
+  }, "reading-feedback");
+  if (saved && scopeId === draft.id) notify("已保存", false, "reading-feedback");
+}
+
+function renderReflect({ discard = false } = {}) {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const saved = scope?.reflect || { revision: 0, enabled: false, timeout: 12 };
+  const snapshot = JSON.stringify([scopeId, scope?.bank, saved.revision, saved.scope_revision, data?.config_revision]);
+  const changedScope = !reflectDraft || reflectDraft.id !== scopeId || reflectDraft.bank !== scope?.bank;
+  if (discard || changedScope || !reflectDraft.dirty) {
+    reflectDraft = { snapshot, id: scopeId, bank: scope?.bank, revision: saved.revision,
+      scope_revision: saved.scope_revision, config_revision: data?.config_revision, dirty: false };
+    $("reflect-enabled").checked = !!saved.enabled;
+    $("reflect-timeout").value = String(saved.timeout ?? 12);
+    if (discard || changedScope) $("reflect-feedback").hidden = true;
+  }
+  const conflict = reflectDraft.snapshot !== snapshot;
+  const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error || locks.has("memory");
+  $("reflect-enabled").disabled = !!unavailable || (!saved.enabled && !!scope?.summary?.maintenance);
+  $("reflect-timeout").disabled = !!unavailable;
+  $("reflect-save").disabled = !!unavailable || conflict || !reflectDraft.dirty;
+  $("reflect-conflict").hidden = !conflict;
+  const unsupported = saved.enabled && saved.status?.state === "unavailable";
+  const messages = [];
+  if (saved.error) messages.push("Reflect 设置读取失败");
+  else if (saved.invalidated) messages.push("记忆库已变化，Reflect 已关闭。");
+  if (saved.unknown) messages.push("请求状态待确认，暂时无法清空记忆。");
+  else if (saved.pending) messages.push("Reflect 处理中…");
+  else if (unsupported) messages.push("此会话暂不支持 Reflect");
+  else if (saved.enabled && ["error", "budget"].includes(saved.status?.state)) {
+    messages.push(saved.status.message || "Reflect 调用失败");
+  }
+  $("reflect-status").textContent = messages.join(" ");
+  $("reflect-status").hidden = !messages.length;
+}
+
+async function saveReflect() {
+  const draft = reflectDraft;
+  if (!draft) return;
+  await perform($("reflect-save"), "memory", async () => {
+    const timeout = Number($("reflect-timeout").value);
+    if (!Number.isSafeInteger(timeout) || timeout < 3 || timeout > 30) throw new Error("Reflect 等待须为 3 到 30 秒的整数。");
+    const payload = { enabled: $("reflect-enabled").checked, timeout, revision: draft.revision,
+      scope_revision: draft.scope_revision, config_revision: draft.config_revision };
+    const response = await bridge.apiPost(endpoint("reflect", draft.id), payload);
+    if (reflectDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
+    await refreshBootstrap();
+    if (scopeId === draft.id) notify("已保存", false, "reflect-feedback");
+  }, "reflect-feedback");
 }
 
 function backgroundSnapshot(scope) {
@@ -690,56 +781,92 @@ function backgroundSnapshot(scope) {
   ]);
 }
 
+function backgroundPages(selection) {
+  return selection?.pages || (selection?.page_id ? [{ page_id: selection.page_id }] : []);
+}
+
 function renderBackground() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
   const snapshot = backgroundSnapshot(scope);
-  if (!backgroundDraft || backgroundDraft.snapshot !== snapshot) {
+  const changedScope = !backgroundDraft || backgroundDraft.id !== scopeId || backgroundDraft.bank !== scope?.bank;
+  if (changedScope || (!backgroundDraft.dirty && backgroundDraft.snapshot !== snapshot)) {
     backgroundReadRevision++;
-    backgroundDraft = { snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
+    backgroundDraft = { snapshot, id: scopeId, bank: scope?.bank, page_id: saved.page_id || "", enabled: saved.enabled === true,
       revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
-      pages: [], check: null, loaded: false, loading: false, attempted: false };
+      selected: backgroundPages(saved).map((page) => ({ ...page })), dirty: false,
+      pages: [], check: null, checks: [], loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
   const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
   const select = $("background-page");
+  const draft = backgroundDraft;
+  const conflict = draft.snapshot !== snapshot;
+  const selected = draft.selected;
   select.disabled = !!unavailable || locks.has("memory") || (blocked && !saved.enabled);
   const options = [option("", "不使用知识页")];
   backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path, !!blocked)));
-  if (saved.page_id && !backgroundDraft.pages.some((page) => page.page_id === saved.page_id)) options.push(option(saved.page_id, saved.page_id, !!blocked));
+  if (draft.page_id && !draft.pages.some((page) => page.page_id === draft.page_id)) options.push(option(draft.page_id, draft.page_id, !!blocked));
   select.replaceChildren(...options);
-  select.value = saved.enabled ? saved.page_id : "";
-  const messages = [saved.error || saved.message || ""];
-  if (!unavailable && scope.summary?.maintenance) messages.push("插件读写已暂停，知识页不会传入聊天。");
-  else if (!unavailable && scope.mode === "paused" && saved.enabled) messages.push("停用记忆模式下，知识页不会传入聊天。");
-  if (saved.enabled && !saved.invalidated && !scope?.historical) {
-    messages.push(saved.status?.message || "已选择知识页，聊天使用结果将在读取后显示。");
-  }
-  if (backgroundDraft.loaded && !backgroundDraft.pages.length) messages.push("这个记忆库还没有知识页，可在记忆面板中创建。");
-  const status = messages.filter(Boolean).join(" ");
+  select.value = draft.enabled ? draft.page_id : "";
+  const rows = selected.map((page, index) => {
+    const row = el("li", "knowledge-page");
+    const native = draft.pages.find((item) => item.page_id === page.page_id);
+    row.append(el("div", "knowledge-page-title", `${index + 1}. ${native?.path || page.page_id}`));
+    const check = draft.enabled ? draft.checks.find((item) => item.page_id === page.page_id) : null;
+    const usage = saved.status?.pages?.find((item) => item.page_id === page.page_id);
+    if (check?.tokens != null) {
+      const limit = check.limits?.tokens;
+      const exceeded = limit != null && check.tokens > limit;
+      row.append(el("span", `page-metrics${exceeded ? " error" : ""}`, limit == null
+        ? `${check.tokens} token` : `${check.tokens} / ${limit} token${exceeded ? "（超限）" : ""}`));
+      if (check.limits?.chars != null && check.chars > check.limits.chars) {
+        row.append(el("span", "page-metrics error", `${check.chars} / ${check.limits.chars} 字符（超限）`));
+      }
+    }
+    if (check?.code && check.code !== "background_too_large") row.append(el("p", "operation-status error", check.message));
+    if (!draft.dirty && saved.enabled && usage) row.append(el("span", "page-status", usage.used ? "已使用" : usage.message));
+    if (native?.index_stale === true && draft.enabled) row.append(el("span", "page-status", "有新记忆待刷新"));
+    const actions = el("div", "knowledge-page-actions");
+    for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
+      const button = el("button", "", label);
+      button.type = "button";
+      button.setAttribute("aria-label", `${label}第 ${index + 1} 篇知识页`);
+      button.disabled = !!blocked || locks.has("memory") || (direction === -1 && index === 0)
+        || (direction === 1 && index === selected.length - 1);
+      button.addEventListener("click", () => {
+        if (backgroundDraft !== draft) return;
+        if (direction === 0) draft.selected.splice(index, 1);
+        else [draft.selected[index], draft.selected[index + direction]] = [draft.selected[index + direction], draft.selected[index]];
+        draft.page_id = draft.selected[0]?.page_id || "";
+        draft.enabled = draft.enabled && draft.selected.length > 0;
+        draft.dirty = true;
+        $("background-feedback").hidden = true;
+        renderBackground();
+      });
+      actions.append(button);
+    }
+    row.append(actions);
+    return row;
+  });
+  $("background-selected").replaceChildren(...rows);
+  const status = conflict ? "设置已更新，请刷新页面。" : saved.error || (saved.invalidated ? saved.message || "知识页选择已失效" : "");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
-  const check = saved.enabled && !saved.invalidated ? backgroundDraft.check?.message || "" : "";
-  $("background-check").textContent = check;
-  $("background-check").hidden = !check;
-  const indexed = saved.enabled && !saved.invalidated
-    ? backgroundDraft.pages.find((page) => page.page_id === saved.page_id) : null;
-  const index = indexed ? (indexed.index_stale === true ? "目录标记：有新记忆待刷新。"
-    : indexed.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。")
-    + "目录标记不保证正文已包含全部记忆；刷新请在官方面板操作。" : "";
-  $("background-index").textContent = index;
-  $("background-index").hidden = !index;
   $("background-recheck").disabled = !!blocked || backgroundDraft.loading || locks.has("memory");
+  $("background-recheck").textContent = draft.loading ? "刷新中…" : "刷新知识页";
+  $("background-save").disabled = !!unavailable || locks.has("memory") || conflict || !draft.dirty;
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
 
-async function loadBackground() {
+async function loadBackground({ manual = false } = {}) {
   const draft = backgroundDraft;
   if (!draft || draft.loading) return;
   const revision = ++backgroundReadRevision;
   draft.loading = true;
   draft.attempted = true;
+  renderBackground();
   try {
     const response = await withTimeout(bridge.apiGet(endpoint("background", draft.id)), 8500, "获取知识页列表超时，请刷新页面重试。");
     if (revision !== backgroundReadRevision || backgroundDraft !== draft || scopeId !== draft.id) return;
@@ -747,9 +874,10 @@ async function loadBackground() {
     if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
     draft.check = response.check || null;
+    draft.checks = response.checks || [];
     draft.loaded = true;
-    $("background-feedback").hidden = true;
     renderBackground();
+    if (manual) notify(response.pages.length ? `已刷新 ${response.pages.length} 篇` : "暂无知识页", false, "background-feedback");
   } catch (error) {
     if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) {
       notify(`知识页读取失败：${errorMessage(error)}`, true, "background-feedback");
@@ -762,23 +890,45 @@ async function loadBackground() {
   }
 }
 
+function changeBackground() {
+  const draft = backgroundDraft;
+  if (!draft) return;
+  const pageId = $("background-page").value;
+  if (pageId && !draft.selected.some((page) => page.page_id === pageId)) {
+    if (draft.selected.length >= 8) {
+      notify("最多选择 8 篇知识页", true, "background-feedback");
+      renderBackground();
+      return;
+    }
+    draft.selected.push({ page_id: pageId });
+  }
+  draft.enabled = !!pageId;
+  draft.page_id = draft.selected[0]?.page_id || "";
+  draft.dirty = true;
+  $("background-feedback").hidden = true;
+  renderBackground();
+}
+
 async function saveBackground() {
   const draft = backgroundDraft;
   if (!draft) return;
-  const saved = data.scopes.find((scope) => scope.scope_id === draft.id)?.background;
-  const selected = $("background-page").value;
-  const payload = { page_id: selected || saved?.page_id || "", enabled: !!selected,
+  let saved = false;
+  const payload = { page_ids: draft.selected.map((page) => page.page_id), enabled: draft.enabled,
     revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision };
-  await perform(null, "memory", async () => {
+  await perform($("background-save"), "memory", async () => {
     const response = await bridge.apiPost(endpoint("background", draft.id), payload);
     if (backgroundDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
     await refreshBootstrap();
+    renderBackground();
     if (backgroundDraft?.id === draft.id && response.selection?.revision === backgroundDraft.revision) {
       backgroundDraft.check = response.check || null;
+      backgroundDraft.checks = response.checks || [];
       renderBackground();
     }
-    notify(response.message || "知识页选择已保存。", false, "background-feedback");
+    saved = true;
   }, "background-feedback");
+  if (saved && scopeId === draft.id) notify("已保存", false, "background-feedback");
 }
 
 function pendingScopeHelp(scope) {
@@ -843,7 +993,7 @@ async function requestAuthorization(platform, user) {
   const payload = { action: "prepare", platform_instance_id: platform, user_id: user, config_revision: settingsRevision };
   const response = await bridge.apiPost("accounts/authorize", payload);
   authorizationState = { ...payload, action: "confirm", confirmation: response.confirmation };
-  $("authorization-description").textContent = `为用户 ${user} 开通机器人 ${response.bot_id} 的记忆访问。从确认之后的新消息开始记录。`;
+  $("authorization-description").textContent = `用户 ${user} / 机器人 ${response.bot_id}`;
   $("authorization-dialog").showModal();
 }
 
@@ -890,7 +1040,7 @@ function watchModels(requestId = "", managed = false) {
         failures = 0;
       } catch {
         if (managed && ++failures >= 3) throw new Error("无法获取接入进度，请重新打开页面核对结果后重试。");
-        $("model-progress").textContent = "暂时无法获取进度，正在重新获取进度，请勿重复提交。";
+        $("model-progress").textContent = "正在重新获取进度…";
         await delay(5000);
         continue;
       }
@@ -1103,12 +1253,14 @@ async function prepareInstallation(button, redeploy = false) {
     if (response.api_url) $("api-url").value = response.api_url;
     if (response.control_plane_url && !$("control-plane-url").value.trim()) $("control-plane-url").value = controlPlaneUrl(response.control_plane_url);
     updateConnectionMode();
-    $("generate-deployment").hidden = !redeploy;
+    $("generate-deployment").hidden = false;
+    $("generate-deployment").textContent = "重新生成命令";
+    $("deployment-dialog").dataset.redeploy = String(redeploy);
     $("check-deployment").hidden = !redeploy;
     $("deployment-heading").textContent = redeploy ? "重新部署" : "安装配套服务";
     $("deployment-description").textContent = redeploy
-      ? "在原服务器、原安装目录执行。已有记忆、模型和凭据继续使用；卸载已删除的数据不会因重装而恢复。"
-      : "在运行 AstrBot 的 Linux 主机执行命令，完成后选择模型并点击「保存并连接」。";
+      ? "在原服务器、原安装目录执行。"
+      : "在 AstrBot 所在主机执行，再选择模型连接。";
     $("deployment-feedback").hidden = true;
     if (!$("deployment-dialog").open) $("deployment-dialog").showModal();
   }, "deployment-feedback");
@@ -1202,7 +1354,7 @@ async function prepareForget(button, id) {
     if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
     forgetState = { id, confirmation: response.confirmation };
     $("forget-user").textContent = scopeName(data.scopes.find((item) => item.scope_id === id));
-    $("forget-message").textContent = response.message || "";
+    $("forget-message").textContent = "清空后暂停记忆，完成后可切回读写模式。";
     $("forget-feedback").textContent = "";
     $("forget-agree").checked = false;
     $("forget-agree").disabled = false;
@@ -1215,14 +1367,14 @@ $("settings-form").addEventListener("submit", (event) => { event.preventDefault(
 $("parameters-form").addEventListener("input", () => {
   if (parameterDraft) parameterDraft.dirty = true;
   $("parameters-feedback").hidden = true;
-  renderParameterLimits();
+  renderParameters();
 });
 $("parameters-form").addEventListener("submit", (event) => {
   event.preventDefault();
   void saveParameters().catch((error) => notify(errorMessage(error), true, "parameters-feedback"));
 });
-$("reload-parameters").addEventListener("click", () => void perform($("reload-parameters"), "parameters", reloadParameters, "parameters-feedback"));
-$("background-recheck").addEventListener("click", () => void loadBackground());
+$("background-recheck").addEventListener("click", () => void loadBackground({ manual: true }));
+$("background-save").addEventListener("click", () => void saveBackground());
 $("background-settings").addEventListener("click", () => {
   activateTab("setup");
   $("memory-background_max_tokens").focus();
@@ -1261,13 +1413,17 @@ $("prepare").addEventListener("click", () => void prepareInstallation($("prepare
 $("reinstall").addEventListener("click", () => {
   clearCommands();
   $("deployment-heading").textContent = "重新部署";
-  $("deployment-description").textContent = "重新应用配套部署文件，已有数据、模型和凭据继续使用。卸载已删除的数据不会因重装而恢复。";
+  $("deployment-description").textContent = "在原服务器、原安装目录执行。";
   $("generate-deployment").hidden = false;
+  $("generate-deployment").textContent = "生成部署命令";
+  $("deployment-dialog").dataset.redeploy = "true";
   $("check-deployment").hidden = true;
   $("deployment-feedback").hidden = true;
   $("deployment-dialog").showModal();
 });
-$("generate-deployment").addEventListener("click", () => void prepareInstallation($("generate-deployment"), true));
+$("generate-deployment").addEventListener("click", () => void prepareInstallation(
+  $("generate-deployment"), $("deployment-dialog").dataset.redeploy === "true",
+));
 $("check-deployment").addEventListener("click", () => void perform($("check-deployment"), "setup", () => checkConnection({}, "deployment-feedback"), "deployment-feedback"));
 $("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", checkServiceVersion));
 $("view-upgrade").addEventListener("click", openUpgrade);
@@ -1285,6 +1441,12 @@ $("copy-upgrade").addEventListener("click", () => void perform($("copy-upgrade")
 $("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", () => copyCommand("install-command", "installation", "部署命令已复制，请在运行 AstrBot 的服务器执行。")));
 for (const button of document.querySelectorAll("[data-guide]")) button.addEventListener("click", () => {
   const dialog = $(button.dataset.guide);
+  if (button.dataset.guide === "backup-dialog") {
+    const managed = data?.config.managed === true;
+    for (const item of dialog.querySelectorAll("[data-managed-backup]")) item.hidden = !managed;
+    $("backup-existing-service").hidden = managed;
+    $("backup-heading").textContent = managed ? "备份与恢复" : "Bridge 备份与恢复";
+  }
   if (!dialog.open) dialog.showModal();
 });
 for (const button of document.querySelectorAll("[data-copy]")) button.addEventListener("click", () => void perform(
@@ -1334,9 +1496,22 @@ $("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = t
 $("scope-picker").addEventListener("change", () => { selectedAccount = $("scope-picker").value; scopeId = ""; updateUserChoices(); selectScope(scopeId); });
 $("bank-picker").addEventListener("change", () => selectScope($("bank-picker").value));
 for (const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void setMode(button, button.dataset.mode));
-$("background-page").addEventListener("change", () => void saveBackground());
+$("background-page").addEventListener("change", changeBackground);
+$("reading-mode").addEventListener("change", () => {
+  if (readingDraft) readingDraft.dirty = true;
+  $("reading-feedback").hidden = true;
+  renderReading();
+});
+$("reading-save").addEventListener("click", () => void saveReading());
+for (const id of ["reflect-enabled", "reflect-timeout"]) $(id).addEventListener("input", () => {
+  if (reflectDraft) reflectDraft.dirty = true;
+  renderReflect();
+});
+$("reflect-save").addEventListener("click", () => void saveReflect());
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
+$("copy-control-plane").addEventListener("click", () => void perform($("copy-control-plane"), "copy",
+  () => copyValue("control-plane-url", "已复制")));
 $("scope-bank").addEventListener("focus", () => $("scope-bank").select());
 $("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
   const response = await bridge.apiPost(endpoint("action"), { action: "retry" });
@@ -1424,8 +1599,12 @@ async function start() {
 document.addEventListener("visibilitychange", () => {
   clearTimeout(refreshTimer);
   if (!document.hidden) {
-    backgroundReadRevision++;
-    backgroundDraft = null;
+    if (backgroundDraft?.dirty) {
+      if (!backgroundDraft.loading) backgroundDraft.attempted = false;
+    } else {
+      backgroundReadRevision++;
+      backgroundDraft = null;
+    }
     if (data) renderScope();
     scheduleRefresh(0);
   }

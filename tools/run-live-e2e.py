@@ -95,6 +95,9 @@ class Gateway(ThreadingHTTPServer):
         self.extraction_held = 0
         self.cleanup_gate = threading.Event()
         self.cleanup_gate.set()
+        self.reflect_gate = threading.Event()
+        self.reflect_gate.set()
+        self.drop_reflect = False
         self.lock = threading.Lock()
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
@@ -179,6 +182,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.server.extraction_gate.clear()
                 elif body["action"] == "release_extraction":
                     self.server.extraction_gate.set()
+                elif body["action"] == "hold_reflect":
+                    self.server.reflect_gate.clear()
+                elif body["action"] == "release_reflect":
+                    self.server.reflect_gate.set()
+                elif body["action"] == "drop_reflect_response":
+                    self.server.drop_reflect = True
                 elif body["action"] == "hold_cleanup":
                     self.server.cleanup_gate.clear()
                 elif body["action"] == "release_cleanup":
@@ -186,6 +195,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 elif body["action"] == "extraction_status":
                     self.reply(200, json.dumps({"held": self.server.extraction_held}).encode())
                     return
+                elif body["action"] == "collect_astrbot_logs":
+                    name = state.owner + "-astrbot"
+                    state.owned(name)
+                    output = subprocess.run(["docker", "logs", name], check=True, capture_output=True)
+                    path = state.output / "astrbot-current.log"
+                    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as file:
+                        file.write(output.stdout + output.stderr)
                 elif body["action"] in {"managed_install", "managed_reinstall", "managed_upgrade", "managed_uninstall",
                                        "managed_pause", "managed_unpause"}:
                     state.managed_control(body["action"])
@@ -212,6 +228,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if path.endswith("/recall") and self.command == "POST":
                 response_delay = self.server.recall_delay
                 self.server.record("recall-trace", {"path": path, "body": json.loads(raw)})
+            if path.endswith("/reflect") and self.command == "POST":
+                self.server.record("reflect-trace", {"path": path, "body": json.loads(raw)})
+                if not self.server.reflect_gate.wait(120):
+                    self.drop()
+                    return
             if "/mental-models/" in path and self.command == "GET":
                 response_delay = self.server.background_delay
             if path.endswith("/memories") and self.command == "POST":
@@ -239,6 +260,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.relay_chat_stream(response, json.loads(raw), started)
                     return
                 value = response.read(32 * 1024 * 1024 + 1)
+                if self.path.startswith("/memory/") and self.path.endswith("/reflect"):
+                    self.server.record("reflect-response-trace", {"path": self.path, "response": json.loads(value)})
+                    if self.server.drop_reflect:
+                        self.server.drop_reflect = False
+                        self.drop()
+                        return
                 # Hold the genuine response until the requested minimum latency;
                 # cloud processing time counts toward the same test deadline.
                 time.sleep(max(0, response_delay - (time.monotonic() - started)))
@@ -480,6 +507,7 @@ def main():
             state.verify()
     finally:
         state.gateway.extraction_gate.set()
+        state.gateway.reflect_gate.set()
         state.gateway.cleanup_gate.set()
         state.cleanup()
     print("Acceptance evidence: " + str(state.output))

@@ -19,7 +19,8 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
-from .core.background import ReadGuard, compose_background, context_limits, reference
+from .core.background import ReadGuard, compose_backgrounds, context_limits, reference
+from .core.agent_tools import MemoryTools
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -39,6 +40,7 @@ from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.qq_source import native_login
+from .core.reflection import Reflection
 from .core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
 from .core.worker import Worker
 
@@ -68,6 +70,9 @@ class HindsightBridge(Star):
         self.idle = asyncio.Event()
         self.idle.set()
         self.confirmations = {}
+        self.reflection = Reflection(self)
+        self.read_tools = MemoryTools(self)
+        self.read_tools.register()
         self.panel = MemoryPanel(self)
 
     @staticmethod
@@ -129,6 +134,28 @@ class HindsightBridge(Star):
             "background_timeout": "读取知识页超时，请检查记忆服务，或调整知识页读取与记忆检索的等待时间",
             "background_too_large": "知识页太长，超出使用上限；请缩短官方页面，或增加知识页长度上限及共享 token、字符上限；记忆检索继续执行",
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
+            "reading_settings_invalid": "记忆读取方式无法读取，请检查最新控制库",
+            "reading_changed": "记忆读取方式、账号或模型已变化，请重新发起查询",
+            "tool_read_timeout": "按需读取超时，可重试或使用官方面板查看",
+            "tool_budget_exhausted": "本条消息的记忆工具额度已用完，请发送新消息继续",
+            "invalid_read_position": "阅读行号无效，请从知识页第一行重新读取",
+            "invalid_read_version": "续读需要上一段返回的版本和下一行号，请从第一行重新读取",
+            "read_version_changed": "知识页已更新，请从新版第一行重新读取",
+            "read_line_too_large": "这一整行超过工具读取上限，请通过官方面板查看完整内容",
+            "tool_result_too_large": "读取结果超过工具输出上限，请缩小查询范围或通过官方面板查看",
+            "history_response_too_large": "知识页历史超过传输上限，正文仍可单独读取；完整历史请通过官方面板查看",
+            "tool_read_failed": "按需读取失败，请检查服务后重试，或使用官方面板查看",
+            "reflect_settings_invalid": "Reflect 设置无法读取，请检查最新控制库",
+            "reflect_changed": "Reflect 设置或记忆范围已变化，请刷新后重试",
+            "reflect_timeout": "Reflect 等待超时，已发送的原生请求仍会继续核对；不要重复调用",
+            "reflect_busy": "已有 Reflect 请求尚未结束，请稍后查看状态；不要重复发送",
+            "reflect_execution_unknown": "Reflect 请求的执行结果不明，相关旧记忆库不能完成清空；需要 Hindsight 提供可核验的请求完成凭据",
+            "reflect_transport_timeout": "Reflect 连接超时，无法确认服务端请求是否结束；相关旧记忆库的清空会保持暂停",
+            "reflect_no_answer": "Reflect 没有返回答案，可调整问题或使用 Recall 查找事实",
+            "reflect_response_too_large": "Reflect 原生响应超过传输上限，可缩小问题范围；请求终点不明时不能完成相关旧记忆库的清空",
+            "invalid_reflect_response": "Reflect 响应无法识别，请检查 Hindsight 版本及接口响应",
+            "bank_not_created": "记忆库尚未建立，请先在读写记忆模式下保存一条普通聊天",
+            "invalid_query_budget": "查询问题过长，请缩短后重试",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
             "control_directory_must_be_absolute": "控制目录须填写绝对路径，或留空使用默认目录",
             "control_directory_outside_plugin": "控制目录须位于 AstrBot 的 data/plugin_data/astrbot_plugin_hindsight_bridge_control 内；旧外部目录请先按备份与恢复指南停机迁移，再修改配置并重载",
@@ -142,6 +169,7 @@ class HindsightBridge(Star):
         if self.panel.closed or self.stopping:
             return
         self.confirmations.clear()
+        self.read_tools.invalidate()
         self.source_accounts.clear()
         fields = connection_fields(self.config)
         url, key, service = (fields[name] for name in ("api_url", "api_key", "service_id"))
@@ -410,7 +438,7 @@ class HindsightBridge(Star):
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
 
-    async def recall_text(self, bank, current, history=(), *, timestamp):
+    async def recall_text(self, bank, current, history=(), *, timestamp, prefix=""):
         timeout = recall_timeout(self.config)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         limits = context_limits(self.config)
@@ -429,7 +457,10 @@ class HindsightBridge(Star):
                 selected, block = [], ""
                 for item in results[:12]:
                     candidate = memory_block([*selected, item], limit=limit)
-                    if candidate and candidate != block and token_count(candidate, client.tokenizer) <= result_tokens:
+                    if (
+                        candidate and candidate != block and len(prefix + candidate) <= limit
+                        and token_count(prefix + candidate, client.tokenizer) <= result_tokens
+                    ):
                         selected.append(item)
                         block = candidate
                 if results and not block:
@@ -441,7 +472,7 @@ class HindsightBridge(Star):
                 client.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
 
-    async def recall_background(self, event, guard, current, history, *, timestamp):
+    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts=True, prefix=""):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
         limits = context_limits(self.config)
@@ -450,17 +481,27 @@ class HindsightBridge(Star):
         tasks = []
         stage = "auth"
 
-        async def read_page():
+        page_slots = asyncio.Semaphore(4)
+        page_deadline = None
+
+        async def read_page(selected):
+            page, code = None, ""
             try:
-                async with asyncio.timeout(min(limits["page_timeout"], max(0, deadline - time.monotonic()) / 4)):
-                    page = await guard.client.background_page(
-                        guard.scope["bank"], guard.selection["mental_model_id"],
-                    )
-                    return page, ""
+                async with asyncio.timeout_at(page_deadline):
+                    async with page_slots:
+                        page = await guard.client.background_page(
+                            guard.scope["bank"], selected["mental_model_id"],
+                        )
             except (HindsightError, TimeoutError) as exc:
-                return None, exc.code if isinstance(exc, HindsightError) else "background_timeout"
+                code = exc.code if isinstance(exc, HindsightError) else "background_timeout"
+            return {"reference": selected, "page": page, "code": code}
+
+        async def read_pages():
+            return await asyncio.gather(*(read_page(selected) for selected in guard.selection["pages"]))
 
         async def read_facts(query):
+            if not include_facts:
+                return [], ""
             try:
                 async with asyncio.timeout_at(deadline - min(0.02, timeout / 10)):
                     rows = await guard.client.recall(
@@ -478,31 +519,36 @@ class HindsightBridge(Star):
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
                 stage = "recall"
-                tasks = [asyncio.create_task(read_page()), asyncio.create_task(read_facts(query))]
-                (page, page_code), (rows, recall_code) = await asyncio.gather(*tasks)
+                page_deadline = time.monotonic() + min(
+                    limits["page_timeout"], max(0, deadline - time.monotonic()) / 4,
+                )
+                tasks = [asyncio.create_task(read_pages()), asyncio.create_task(read_facts(query))]
+                reads, (rows, recall_code) = await asyncio.gather(*tasks)
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
-                auth_code = next((code for code in (recall_code, page_code)
+                auth_code = next((code for code in (recall_code, *(read["code"] for read in reads))
                                   if code and HindsightError(code).authentication), "")
                 if auth_code:
-                    page, rows, page_code, recall_code = None, [], auth_code, auth_code
-                page_diagnostics = {}
-                block, page_code, facts_used, background_used = compose_background(
-                    page, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
-                    page_tokens=limits["page_tokens"],
-                    page_code=page_code, recall_code=recall_code, diagnostics=page_diagnostics,
+                    rows, recall_code = [], auth_code
+                    reads = [{**read, "page": None, "code": auth_code} for read in reads]
+                block, facts_used, outcomes = compose_backgrounds(
+                    reads, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
+                    page_tokens=limits["page_tokens"], recall_code=recall_code,
+                    on_demand=not include_facts,
+                    prefix=prefix,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
                 if time.monotonic() > deadline:
                     raise HindsightError("recall_timeout")
-                if page_code == "bank_missing":
+                if any(item["code"] == "bank_missing" for item in outcomes):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
                     guard.queue.apply_control()
                     raise HindsightError("bank_missing")
                 return block, recall_code, facts_used, {
-                    "code": page_code, "used": background_used,
-                    "exceeded": page_diagnostics.get("exceeded", []),
+                    "code": next((item["code"] for item in outcomes if item["code"]), ""),
+                    "used": any(item["used"] for item in outcomes), "pages": outcomes,
+                    "exceeded": list(dict.fromkeys(label for item in outcomes for label in item["exceeded"])),
                 }
         except TimeoutError:
             raise HindsightError("auth_timeout" if stage == "auth" else "recall_timeout") from None
@@ -554,8 +600,14 @@ class HindsightBridge(Star):
             self.worker.wake.set()
         return True
 
+    @filter.on_agent_begin()
+    async def bind_memory_tools(self, event, run_context):
+        self.read_tools.begin(event, run_context)
+
     @filter.on_agent_done()
     async def remember_assistant(self, event, run_context, response):
+        if not self.read_tools.finish(event, run_context):
+            return
         turn = self.turns.pop(event, None)
         if (
             turn is None
@@ -620,6 +672,7 @@ class HindsightBridge(Star):
 
     @filter.on_llm_request()
     async def add_memory(self, event: AstrMessageEvent, req: ProviderRequest):
+        original_tools = self.read_tools.filter_request(event, req)
         if self.outbox is None or self.client is None or event in self.handled:
             return
         incoming = self.incoming.pop(event, None)
@@ -642,6 +695,7 @@ class HindsightBridge(Star):
         content = ""
         read_guard = None
         background_status = None
+        request_prefix = ""
         started = time.monotonic()
         try:
             self.refresh_permissions()
@@ -706,6 +760,9 @@ class HindsightBridge(Star):
                         "started": time.monotonic(),
                     }
             read_guard = ReadGuard.freeze(self, scope)
+            options = await self.read_tools.prepare(event, req, incoming, scope, original_tools)
+            request_prefix = self.read_tools.request_prefix(event)
+            on_demand = options["mode"] == "tools"
             history = [
                     ("用户" if m.role == "user" else "助手", m.text)
                     for m in capture.history
@@ -713,15 +770,21 @@ class HindsightBridge(Star):
             if read_guard.selection["enabled"]:
                 memory, code, has_facts, background_status = await self.recall_background(
                     event, read_guard, incoming.text, history, timestamp=incoming.iso_timestamp,
+                    include_facts=not on_demand,
+                    prefix=request_prefix,
                 )
-                outcome = "error" if code else "success" if has_facts else "empty"
+                outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
                 if code:
                     if HindsightError(code).authentication:
                         self.outbox.pause_connection(code)
                     self.warning(code)
+            elif on_demand:
+                memory = self.read_tools.notice(scope)
+                outcome = "on_demand"
             else:
                 memory = await self.recall_text(
                     scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp,
+                    prefix=request_prefix,
                 )
                 outcome = "success" if memory else "empty"
             content = memory or "Hindsight 检索完成，本轮未匹配到相关记忆。"
@@ -754,7 +817,7 @@ class HindsightBridge(Star):
                         self.record_recall(scope, outcome, started, code)
                         if not content:
                             content = recall_notice(code)
-                        req.extra_user_content_parts.append(TextPart(text=content).mark_as_temp())
+                        req.extra_user_content_parts.append(TextPart(text=request_prefix + content).mark_as_temp())
                         if (
                             read_guard is not None and read_guard.selection["enabled"]
                             and self.background_sequences.get(background_key) == sequence
@@ -842,7 +905,7 @@ class HindsightBridge(Star):
             "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
             "/hindsight show 记忆ID：查看详情和来源\n"
             "/hindsight recall 问题：查找相关记忆\n"
-            "/hindsight background：查看本人已选知识页（Knowledge Page）\n"
+            "/hindsight background [序号]：查看本人已选知识页（Knowledge Page）\n"
             "可在插件页选择一份 Hindsight 知识页供聊天参考，例如项目目标与约束；默认关闭。\n"
             "/hindsight export：导出记忆和来源（JSON）\n"
             "修改记忆：联系管理员，在插件页暂停保存和查询后到 Hindsight 官方面板操作\n"
@@ -891,7 +954,7 @@ class HindsightBridge(Star):
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
     @hindsight.command("background")
-    async def memory_background(self, event: AstrMessageEvent):
+    async def memory_background(self, event: AstrMessageEvent, page: int = 1):
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
@@ -903,18 +966,24 @@ class HindsightBridge(Star):
                 return
             try:
                 guard = ReadGuard.freeze(self, scope, manual=True)
-                if not guard.selection["page_id"]:
+                selected = guard.selection["pages"]
+                if not selected:
                     yield event.plain_result(
                         "尚未选择知识页（Knowledge Page）。记忆检索按所选记忆模式运行。\n"
                         "知识页由 Hindsight 从已有记忆按主题生成，可让新会话参考项目目标等资料。"
-                        "想使用时，请管理员在插件页「知识页（Knowledge Page）」按问号说明准备并选择知识页。"
+                        "请管理员在官方面板准备知识页，再到插件页「聊天知识页」选择。"
                     )
                     return
+                if type(page) is not int or not 1 <= page <= len(selected):
+                    yield event.plain_result(f"知识页序号须为 1 到 {len(selected)}。")
+                    return
+                position = page
+                selected_page = selected[position - 1]
                 async with asyncio.timeout(8):
                     await guard.client.ensure_auth()
                     if not guard.valid(self, event):
                         raise QueueError("background_changed")
-                    page = await guard.client.background_page(scope["bank"], guard.selection["mental_model_id"])
+                    page = await guard.client.background_page(scope["bank"], selected_page["mental_model_id"])
                 await self.prepare_sources()
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
@@ -922,8 +991,12 @@ class HindsightBridge(Star):
                     yield event.plain_result(self.diagnostic("background_empty"))
                     return
                 # One whole bounded response; larger documents remain in the official panel.
+                position_label = f"第 {position}/{len(selected)} 篇"
+                if position < len(selected):
+                    position_label += f"；下一篇：/hindsight background {position + 1}"
                 content = (
-                    f"知识页（Knowledge Page）：{guard.selection['page_id']}\n"
+                    f"知识页（Knowledge Page）：{selected_page['page_id']}\n"
+                    f"{position_label}\n"
                     f"聊天时使用所选知识页（开关设置）：{'开启' if guard.selection['enabled'] else '关闭'}\n"
                     f"刷新时间：{page['last_refreshed_at'] or '未知'}\n"
                     f"最近刷新失败：{page['last_refresh_failed_at'] or '无记录'}\n"
@@ -1292,7 +1365,7 @@ class HindsightBridge(Star):
                 yield event.plain_result(
                     f"用户：{event.get_platform_id()} / {event.get_sender_id()}。\n"
                     "将删除这个用户在 Hindsight 中的全部记忆、知识页及其历史、用于生成记忆的聊天内容，"
-                    "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。"
+                    "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录、工具历史和日志保留。"
                     "如果其他账号共用此记忆库，它们的记忆也会一起清空。\n"
                     f"确认请在 120 秒内发送：/hindsight forget {token}"
                 )
@@ -1331,6 +1404,7 @@ class HindsightBridge(Star):
                 )
 
     async def _close_resources(self):
+        await self.reflection.cancel()
         if self.connection_task is not None:
             self.connection_task.cancel()
             await asyncio.gather(self.connection_task, return_exceptions=True)
@@ -1353,6 +1427,8 @@ class HindsightBridge(Star):
 
     async def terminate(self):
         self.stopping = True
+        await self.read_tools.close()
+        await self.reflection.close()
         self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()

@@ -12,7 +12,7 @@ import unittest
 import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.background import (
-    ReadGuard, check_page, compose_background, context_limits, reference, reference_key, save_reference,
+    ReadGuard, check_page, compose_background, compose_backgrounds, context_limits, reference, reference_key, save_reference,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.client import (
     BACKGROUND_MAX_BYTES, HindsightClient, HindsightError, native_page_id,
@@ -248,7 +248,7 @@ class References(unittest.TestCase):
         self.scope = self.queue.scope(self.incoming)
         self.assertFalse(guard.valid(self.plugin))
         saved = reference(self.queue, self.scope)
-        self.assertEqual(saved, {"revision": 2, "enabled": False, "page_id": "", "mental_model_id": "", "invalidated": True})
+        self.assertEqual(saved, {"revision": 2, "enabled": False, "page_id": "", "mental_model_id": "", "pages": [], "invalidated": True})
         self.queue.close()
         self.queue = Outbox(self.path / "runtime", "service", "http://memory.test", credential_fingerprint="key")
         self.assertEqual(reference(self.queue, self.queue.scope_owner(self.scope["scope_id"])), saved)
@@ -279,8 +279,73 @@ class References(unittest.TestCase):
         with self.assertRaisesRegex(QueueError, "background_settings_invalid"):
             reference(self.queue, self.scope)
 
+    def test_legacy_reference_reads_without_rewrite_and_order_change_invalidates_read(self):
+        self.select()
+        key = reference_key(self.queue.connection_id, self.scope["owner_id"])
+        stored = json.loads(self.queue.control.setting(key))
+        stored["format"] = 1
+        del stored["pages"]
+        legacy = json.dumps(stored)
+        self.queue.control.db.execute("UPDATE settings SET value=? WHERE key=?", (legacy, key))
+        self.assertEqual(reference(self.queue, self.scope)["pages"], [
+            {"page_id": "kp-1", "mental_model_id": "mm-1"},
+        ])
+        self.assertEqual(self.queue.control.setting(key), legacy)
+        selected = save_reference(self.queue, self.scope, revision=1, enabled=True, pages=[
+            {"page_id": "kp-1", "mental_model_id": "mm-1"},
+            {"page_id": "kp-2", "mental_model_id": "mm-2"},
+        ])
+        guard = ReadGuard.freeze(self.plugin, self.scope)
+        updated = save_reference(self.queue, self.scope, revision=2, enabled=True, pages=list(reversed(selected["pages"])))
+        self.assertFalse(guard.valid(self.plugin))
+        self.assertEqual(updated["page_id"], "kp-2")
+        self.assertEqual(updated["revision"], 3)
+        for pages in ([updated["pages"][0]] * 2, [
+            {"page_id": "kp-3", "mental_model_id": "mm-2"}, updated["pages"][0],
+        ], [{"page_id": "../other-bank", "mental_model_id": "mm-3"}]):
+            with self.assertRaisesRegex(QueueError, "background_settings_invalid"):
+                save_reference(self.queue, self.scope, revision=3, enabled=True, pages=pages)
+            self.assertEqual(reference(self.queue, self.scope), updated)
+
 
 class ContextComposition(unittest.TestCase):
+    def test_multiple_pages_are_whole_ordered_and_feedback_matches_every_budget(self):
+        pages = [
+            native_model(content="first-native-page " * 4),
+            native_model(content="second-native-page " * 160),
+            native_model(content="third-native-page " * 4),
+        ]
+        reads = []
+        for index, page in enumerate(pages):
+            page["id"] = f"mm-{index}"
+            reads.append({"reference": {"page_id": f"kp-{index}", "mental_model_id": page["id"]},
+                          "page": page, "code": ""})
+        reads.insert(1, {"reference": {"page_id": "missing", "mental_model_id": "missing-model"},
+                         "page": None, "code": "background_missing"})
+        for tokens, chars in ((256, 256), (600, 3000), (1200, 4000), (8192, 32768)):
+            block, _, outcomes = compose_backgrounds(
+                reads, [{"text": "a whole fact " * 10}], tokens=tokens, chars=chars,
+                tokenizer="o200k_base", page_tokens=400,
+            )
+            self.assertLessEqual(token_count(block), tokens)
+            self.assertLessEqual(len(block), chars)
+            self.assertEqual(outcomes[1]["code"], "background_missing")
+            positions = []
+            for read, outcome in zip(reads, outcomes):
+                if read["page"] is None:
+                    self.assertFalse(outcome["used"])
+                    continue
+                content = read["page"]["content"]
+                self.assertEqual(content in block, outcome["used"])
+                if outcome["used"]:
+                    positions.append(block.index(content))
+                else:
+                    self.assertNotIn(content.split()[0], block)
+            self.assertEqual(positions, sorted(positions))
+            if tokens >= 600:
+                self.assertTrue(outcomes[0]["used"] and outcomes[-1]["used"])
+                self.assertEqual(outcomes[2]["code"], "background_too_large")
+
     def test_state_text_reports_shared_overflow_when_the_page_alone_fits(self):
         page = native_model(content="An entire page.")
         check = check_page(page, tokens=8192, chars=32768, page_tokens=8192, tokenizer="o200k_base")

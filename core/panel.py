@@ -16,7 +16,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from .client import HindsightClient, HindsightError
-from .background import ReadGuard, check_page, context_limits, reference, save_reference
+from .background import MAX_BACKGROUND_PAGES, ReadGuard, check_page, context_limits, reference, save_reference
+from .agent_tools import read_options, save_options
+from . import reflection
 from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -66,6 +68,8 @@ class MemoryPanel:
             ("uninstall/prepare", "POST", self.prepare_uninstall),
             ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
             ("scopes/<scope_id>/background", ["GET", "POST"], self.background),
+            ("scopes/<scope_id>/reading", ["GET", "POST"], self.reading),
+            ("scopes/<scope_id>/reflect", ["GET", "POST"], self.reflect),
         ]
         if hasattr(plugin.context, "register_web_api"):
             for route, method, handler in routes:
@@ -549,6 +553,7 @@ class MemoryPanel:
             recheck()
             result = installation(Path(__file__).resolve().parent.parent, state,
                                   container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
+                                  setup_path=str(self.directory() / "setup.json"),
                                   upgrade=True)
             state["upgrade_check"] = {"banks": banks, "verified": False, "from": "1.1.0", "to": HINDSIGHT_VERSION,
                                       "connection_id": queue.connection_id,
@@ -634,6 +639,16 @@ class MemoryPanel:
                 "summary": summary,
             })
             if queue and not scope.get("pending"):
+                if getattr(plugin, "read_tools", None):
+                    try:
+                        result[-1]["reading"] = {
+                            **plugin.read_tools.public(scope), "scope_revision": scope["revision"],
+                        }
+                        result[-1]["reflect"] = {
+                            **plugin.read_tools.reflect_public(scope), "scope_revision": scope["revision"],
+                        }
+                    except QueueError as exc:
+                        result[-1]["reading"] = {"error": self.error_message(str(exc))}
                 try:
                     selection = reference(queue, scope)
                     result[-1]["background"] = {
@@ -658,6 +673,22 @@ class MemoryPanel:
                             ) + ("超出：" + "、".join(state["exceeded"]) + "。请在插件设置调整对应上限。"
                                  if state.get("exceeded") else ""),
                         }
+                        per_page = state.get("pages") or [
+                            {**page, "code": state["code"], "used": False}
+                            for page in selection["pages"]
+                        ]
+                        result[-1]["background"]["status"]["pages"] = [{
+                            "page_id": item["page_id"], "used": item["used"],
+                            "code": item["code"], "exceeded": item.get("exceeded", []),
+                            "message": "上次聊天已使用。" if item["used"] else (
+                                self.error_message(item["code"]) if item["code"] else "上次聊天未使用。"
+                            ),
+                        } for item in per_page]
+                        if len(selection["pages"]) > 1:
+                            used = sum(item["used"] for item in per_page)
+                            result[-1]["background"]["status"]["message"] = (
+                                f"上次聊天使用 {used}/{len(selection['pages'])} 篇知识页。"
+                            )
                 except QueueError as exc:
                     result[-1]["background"] = {"error": self.error_message(str(exc))}
         changed_accounts = {
@@ -856,6 +887,7 @@ class MemoryPanel:
         state = self.state()
         if state.get("management_url") and self.managed_connection(state, api_url=url, api_key=key):
             status = await self.managed_request(state)
+            url = state["api_url"]
             if not status["ready"]:
                 return {"ok": True, "ready": False, "message": "配套服务已安装，请选择模型并保存。"}
         client = HindsightClient(url, key)
@@ -867,8 +899,31 @@ class MemoryPanel:
         self.connection_ready(client.url, key)
         return {"ok": True, "ready": True, "message": "服务连接与 API 认证通过。"}
 
+    def network_endpoints(self, state):
+        path = self.directory() / "managed-network.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if value.get("installation_id") != state.get("id"):
+                return None
+            endpoints = {name: value[name] for name in ("api_url", "management_url")}
+            addresses = [urlsplit(url) for url in endpoints.values()]
+            if any(
+                address.scheme != "http" or not address.hostname or address.username is not None
+                or address.password is not None or address.path or address.query or address.fragment
+                for address in addresses
+            ) or addresses[0].hostname != addresses[1].hostname:
+                raise ValueError()
+            return endpoints
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise PanelError("配套网络记录损坏，请重新执行安装命令。") from None
+
     async def managed_request(self, state, environment=None):
+        endpoints = self.network_endpoints(state)
         url, key = state.get("management_url"), state.get("management_key")
+        if endpoints:
+            url = endpoints["management_url"]
         if not url or not key:
             raise PanelError("请先生成并执行配套服务安装命令。")
         try:
@@ -889,6 +944,8 @@ class MemoryPanel:
                     status = response.json()
                     if status.get("installation_id") != state.get("id") or status.get("protocol") != 1:
                         raise PanelError("配套服务标识不匹配，请检查安装记录。")
+                if endpoints:
+                    state.update(endpoints)
                 return {
                     "installed": True, "configured": status.get("configured") is True,
                     "ready": status.get("ready") is True,
@@ -924,9 +981,11 @@ class MemoryPanel:
             result = installation(
                 Path(__file__).resolve().parent.parent, state,
                 container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
+                setup_path=str(self.directory() / "setup.json"),
             )
-            state["api_url"] = result["api_url"]
-            state["management_url"] = result["management_url"]
+            for field in ("api_url", "management_url"):
+                if not Path("/.dockerenv").exists() or not state.get(field):
+                    state[field] = result[field]
             control_plane_url = self.control_plane_url(result.get("control_plane_url", ""))
             if control_plane_url:
                 state["control_plane_url"] = control_plane_url
@@ -1065,7 +1124,12 @@ class MemoryPanel:
         try:
             async with self.lock:
                 state = self.check_connection_job(job)
+                previous_url = state["api_url"]
                 status = await self.managed_request(state)
+                self.check_connection_job(job)
+                if state["api_url"] != previous_url or state.get("management_url") != self.state().get("management_url"):
+                    self.store_state(state)
+                    self.persist_connection_job(job, expected_revision=self.config_revision())
                 if status.get("configuration_fingerprint") is None:
                     raise PanelError("配套组件不支持接入结果核对，请先重新部署配套服务文件，再保存并连接。")
                 deadline = time.monotonic() + 360
@@ -1492,6 +1556,89 @@ class MemoryPanel:
             raise PanelError("记忆范围已变化，请刷新后重试。")
         return scope
 
+    async def reading(self, scope_id):
+        from astrbot.api.web import request
+
+        posting = request.method == "POST"
+        payload = await self.body() if posting else {}
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            plugin = self.plugin
+            await plugin.prepare_sources()
+            scope = self.scope(scope_id)
+            source = Scope(*json.loads(scope["identity_json"]))
+            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
+                raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改读取方式。")
+            guard = ReadGuard.freeze(plugin, scope, manual=True)
+            revision = self.config_revision()
+            options = read_options(guard.queue, scope)
+            closing = posting and payload.get("mode") == "automatic"
+            if not guard.valid(plugin, metadata=closing):
+                raise QueueError("scope_not_available")
+            if posting:
+                if (
+                    set(payload) != {"mode", "revision", "scope_revision", "config_revision"}
+                    or not isinstance(payload.get("mode"), str) or payload["mode"] not in {"automatic", "tools"}
+                    or type(payload.get("revision")) is not int or payload["revision"] != options["revision"]
+                    or type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
+                    or payload.get("config_revision") != revision
+                ):
+                    raise QueueError("reading_changed")
+                await plugin.prepare_sources()
+                if (
+                    not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
+                    or await self.bot_id(source.platform_instance_id) != source.bot_id
+                    or not guard.valid(plugin, metadata=closing)
+                ):
+                    raise QueueError("reading_changed")
+                options = save_options(guard.queue, scope, revision=options["revision"], mode=payload["mode"])
+            return {"selection": options, "scope_revision": scope["revision"], "config_revision": revision,
+                    "message": "记忆读取方式已保存。"}
+
+    async def reflect(self, scope_id):
+        from astrbot.api.web import request
+
+        posting = request.method == "POST"
+        payload = await self.body() if posting else {}
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            plugin = self.plugin
+            await plugin.prepare_sources()
+            scope = self.scope(scope_id)
+            source = Scope(*json.loads(scope["identity_json"]))
+            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
+                raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改 Reflect 设置。")
+            guard = ReadGuard.freeze(plugin, scope, manual=True)
+            revision = self.config_revision()
+            options = reflection.read_options(guard.queue, scope)
+            closing = posting and payload.get("enabled") is False
+            if not guard.valid(plugin, metadata=closing):
+                raise QueueError("scope_not_available")
+            if posting:
+                if (
+                    set(payload) != {"enabled", "timeout", "revision", "scope_revision", "config_revision"}
+                    or type(payload.get("enabled")) is not bool or type(payload.get("timeout")) is not int
+                    or not 3 <= payload["timeout"] <= 30
+                    or type(payload.get("revision")) is not int or payload["revision"] != options["revision"]
+                    or type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
+                    or payload.get("config_revision") != revision
+                ):
+                    raise QueueError("reflect_changed")
+                await plugin.prepare_sources()
+                if (
+                    not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
+                    or reflection.read_options(guard.queue, scope) != options
+                    or await self.bot_id(source.platform_instance_id) != source.bot_id
+                    or not guard.valid(plugin, metadata=closing)
+                ):
+                    raise QueueError("reflect_changed")
+                options = reflection.save_options(guard.queue, scope, revision=options["revision"],
+                                                  enabled=payload["enabled"], timeout=payload["timeout"])
+            return {"selection": options, "scope_revision": scope["revision"], "config_revision": revision,
+                    "message": "Reflect 设置已保存。"}
+
     async def background(self, scope_id):
         from astrbot.api.web import request
 
@@ -1509,78 +1656,144 @@ class MemoryPanel:
             scope = self.scope(scope_id)
             guard = ReadGuard.freeze(plugin, scope, manual=True)
             revision = self.config_revision()
+            page_ids = [page["page_id"] for page in guard.selection["pages"]]
             if not reading:
                 if payload.get("config_revision") != revision:
                     raise QueueError("background_changed")
+                identity_key = "page_ids" if "page_ids" in payload else "page_id"
                 if (
                     type(payload.get("scope_revision")) is not int
                     or payload["scope_revision"] != scope["revision"]
+                    or type(payload.get("revision")) is not int
                     or payload.get("revision") != guard.selection["revision"]
                     or type(payload.get("enabled")) is not bool
-                    or not isinstance(payload.get("page_id"), str)
-                    or set(payload) != {"page_id", "enabled", "revision", "scope_revision", "config_revision"}
+                    or set(payload) != {identity_key, "enabled", "revision", "scope_revision", "config_revision"}
                 ):
                     raise QueueError("background_changed")
-            closing = not reading and not payload["enabled"] and payload["page_id"] in {
-                "", guard.selection["page_id"],
-            }
+                if identity_key == "page_id":
+                    if not isinstance(payload["page_id"], str):
+                        raise QueueError("background_settings_invalid")
+                    page_ids = [payload["page_id"]] if payload["page_id"] else []
+                    if not payload["enabled"] and payload["page_id"] == guard.selection["page_id"]:
+                        page_ids = [page["page_id"] for page in guard.selection["pages"]]
+                else:
+                    page_ids = payload["page_ids"]
+                if (
+                    not isinstance(page_ids, list) or len(page_ids) > MAX_BACKGROUND_PAGES
+                    or any(not isinstance(value, str) or not value for value in page_ids)
+                    or len(set(page_ids)) != len(page_ids)
+                ):
+                    raise QueueError("background_settings_invalid")
+            saved_ids = [page["page_id"] for page in guard.selection["pages"]]
+            closing = not reading and not payload["enabled"] and page_ids in ([], saved_ids)
             if not guard.valid(plugin, metadata=closing):
                 raise QueueError("scope_not_available")
-            page_id = "" if reading else payload["page_id"]
-            if not reading and payload["enabled"] and not page_id:
+            if not reading and payload["enabled"] and not page_ids:
                 raise QueueError("background_missing")
+
+            def unchanged():
+                if not guard.valid(plugin, metadata=closing) or self.config_revision() != revision:
+                    raise QueueError("background_changed")
 
             async def recheck():
                 await plugin.prepare_sources()
-                if not guard.valid(plugin, metadata=closing) or self.config_revision() != revision:
-                    raise QueueError("background_changed")
-                if (
-                    await self.bot_id(source.platform_instance_id) != source.bot_id
-                    or not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
-                ):
+                unchanged()
+                bot = await self.bot_id(source.platform_instance_id)
+                unchanged()
+                if bot != source.bot_id:
                     raise QueueError("background_changed")
 
             pages = []
-            model_id = ""
-            check = None
+            checks = []
+            selected_refs = []
             limits = context_limits(plugin.config)
-            if reading or (page_id and not closing):
+            if reading or (page_ids and not closing):
                 await guard.client.ensure_auth()
                 await recheck()
                 pages = await guard.client.knowledge_pages(scope["bank"])
                 await recheck()
-            if page_id and closing:
-                model_id = guard.selection["mental_model_id"]
-            elif page_id:
-                selected = next((page for page in pages if page["page_id"] == page_id), None)
-                if not selected:
-                    raise QueueError("background_missing")
-                model_id = selected["mental_model_id"]
-                page = await guard.client.knowledge_page(scope["bank"], page_id)
-                await recheck()
-                model = await guard.client.background_page(scope["bank"], model_id)
-                if page["body"] != model["content"]:
-                    raise QueueError("background_changed")
-                check = check_page(model, tokenizer=guard.client.tokenizer, **{
-                    k: limits[k] for k in ("tokens", "chars", "page_tokens")
-                })
-            elif reading and guard.selection["enabled"]:
-                selected = next((page for page in pages if page["page_id"] == guard.selection["page_id"]), None)
-                if selected:
-                    if selected["mental_model_id"] != guard.selection["mental_model_id"]:
+            if closing:
+                selected_refs = guard.selection["pages"] if page_ids else []
+            elif not reading or guard.selection["enabled"]:
+                by_id = {page["page_id"]: page for page in pages}
+                saved_refs = {page["page_id"]: page for page in guard.selection["pages"]}
+                slots = asyncio.Semaphore(4)
+
+                mapped = []
+                for page_id in page_ids:
+                    selected = by_id.get(page_id)
+                    if selected is None:
+                        if not reading and page_id not in saved_refs:
+                            raise QueueError("background_missing")
+                        continue
+                    if reading and {
+                        "page_id": page_id, "mental_model_id": selected["mental_model_id"],
+                    } not in guard.selection["pages"]:
                         raise QueueError("background_changed")
+                    mapped.append(page_id)
+
+                async def fetch(page_id, *, body):
                     try:
-                        model = await guard.client.background_page(scope["bank"], selected["mental_model_id"])
-                        check = check_page(model, tokenizer=guard.client.tokenizer, **{
-                            k: limits[k] for k in ("tokens", "chars", "page_tokens")
-                        })
+                        async with slots:
+                            unchanged()
+                            value = (
+                                await guard.client.knowledge_page(scope["bank"], page_id) if body else
+                                await guard.client.background_page(scope["bank"], by_id[page_id]["mental_model_id"])
+                            )
+                            unchanged()
+                            return value
                     except HindsightError as exc:
-                        if exc.authentication or exc.code == "bank_missing":
+                        if (
+                            exc.authentication or exc.code == "bank_missing"
+                            or (not reading and (
+                                saved_refs.get(page_id, {}).get("mental_model_id") != by_id[page_id]["mental_model_id"]
+                                or exc.code != "background_missing"
+                            ))
+                        ):
                             raise
-                        check = {"code": exc.code, "message": self.error_message(exc.code)}
-                else:
-                    check = {"code": "background_missing", "message": self.error_message("background_missing")}
-            if check is not None and "tokens" in check:
+                        return exc
+
+                async def batch(identities, *, body):
+                    if not identities:
+                        return {}
+                    tasks = [asyncio.create_task(fetch(page_id, body=body)) for page_id in identities]
+                    try:
+                        values = await asyncio.gather(*tasks)
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    # Refresh native identity once between whole page/model phases.
+                    await recheck()
+                    return dict(zip(identities, values))
+
+                bodies = await batch(mapped, body=True) if not reading else {}
+                models = await batch([page_id for page_id in mapped
+                                      if not isinstance(bodies.get(page_id), HindsightError)], body=False)
+                for page_id in page_ids:
+                    if page_id not in by_id:
+                        checks.append({"page_id": page_id, "code": "background_missing"})
+                        continue
+                    page, model = bodies.get(page_id), models.get(page_id)
+                    error = next((value for value in (page, model) if isinstance(value, HindsightError)), None)
+                    if error:
+                        checks.append({"page_id": page_id, "code": error.code})
+                        continue
+                    if page is not None and page["body"] != model["content"]:
+                        raise QueueError("background_changed")
+                    checks.append({"page_id": page_id, **check_page(model, tokenizer=guard.client.tokenizer, **{
+                        k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                    })})
+                selected_refs = [
+                    {k: by_id[page_id][k] for k in ("page_id", "mental_model_id")}
+                    if page_id in by_id else saved_refs[page_id]
+                    for page_id in page_ids
+                ]
+            for check in checks:
+                if "tokens" not in check:
+                    check["message"] = self.error_message(check["code"])
+                    continue
                 check["message"] = (
                     f"含说明与元数据：{check['tokens']} token、{check['chars']} 字符"
                     f"（知识页上限 {limits['page_tokens']} token，共享 {limits['tokens']} token / {limits['chars']} 字符）。"
@@ -1590,15 +1803,17 @@ class MemoryPanel:
             await recheck()
             if not reading:
                 selection = save_reference(
-                    guard.queue, scope, revision=payload["revision"], page_id=page_id,
-                    model_id=model_id, enabled=payload["enabled"],
+                    guard.queue, scope, revision=payload["revision"], pages=selected_refs,
+                    enabled=payload["enabled"],
                 )
-                return {"selection": selection, "check": check, "message": "知识页选择已保存。"}
+                return {"selection": selection, "check": checks[0] if checks else None,
+                        "checks": checks, "message": "知识页选择与顺序已保存。"}
             return {
                 "pages": [{k: page[k] for k in ("page_id", "path", "index_stale")} for page in pages],
                 "selection": guard.selection, "scope_revision": scope["revision"],
                 "config_revision": revision,
-                "check": check, "budget": limits,
+                "check": checks[0] if checks else None, "checks": checks, "budget": limits,
+                "max_pages": MAX_BACKGROUND_PAGES,
             }
 
     async def action(self, scope_id):
