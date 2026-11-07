@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .client import HindsightClient, HindsightError
-from .background import ReadGuard, reference, save_reference
+from .background import ReadGuard, check_page, context_limits, reference, save_reference
 from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -26,6 +26,8 @@ from .installer import HINDSIGHT_VERSION, SUPPORTED_VERSIONS, installation, unin
 from .outbox import QueueError
 from .permissions import pairs
 from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
+from . import settings
+from .materials import TokenizerError
 
 NAME = "astrbot_plugin_hindsight_bridge"
 
@@ -48,6 +50,7 @@ class MemoryPanel:
             ("bootstrap", "GET", self.bootstrap),
             ("connection/check", "POST", self.check),
             ("settings/save", "POST", self.save),
+            ("parameters/save", "POST", self.save_parameters),
             ("access/save", "POST", self.save_access),
             ("accounts/authorize", "POST", self.authorize),
             ("install/prepare", "POST", self.prepare),
@@ -652,7 +655,8 @@ class MemoryPanel:
                             "message": "上次聊天已使用知识页。" if state["used"] else (
                                 "上次聊天未使用知识页：" + self.error_message(state["code"])
                                 if state["code"] else "上次聊天未使用知识页。"
-                            ),
+                            ) + ("超出：" + "、".join(state["exceeded"]) + "。请在插件设置调整对应上限。"
+                                 if state.get("exceeded") else ""),
                         }
                 except QueueError as exc:
                     result[-1]["background"] = {"error": self.error_message(str(exc))}
@@ -793,6 +797,7 @@ class MemoryPanel:
                 connection_message = ""
         return {
             "config_revision": self.config_revision(),
+            "parameters": settings.snapshot(plugin),
             "config": {
                 "configured": configured,
                 "missing_fields": missing,
@@ -1232,6 +1237,46 @@ class MemoryPanel:
             revision = self.config_revision()
             return await self._save(payload, revision)
 
+    async def save_parameters(self):
+        from astrbot.api.web import request
+
+        payload = await self.body()
+        if not request.username:
+            raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.lock:
+            if set(payload) != {"config_revision", "parameters"}:
+                raise PanelError("请只提交记忆参数，并重新加载记忆设置后保存。")
+            self.check_revision(payload)
+            revision = self.config_revision()
+            try:
+                parameters = await settings.validate(payload["parameters"])
+            except TokenizerError:
+                raise PanelError("「查询分词编码」加载失败，请检查编码名称、网络和缓存目录权限后重试。") from None
+            self.check_revision(payload)
+            if self.plugin.stopping or self.model_task and not self.model_task.done():
+                raise PanelError("插件正在重载或连接服务，请等待完成后重新保存记忆设置。")
+            plugin = self.plugin
+            previous = copy.deepcopy(dict(plugin.config))
+            try:
+                # Only local parameters change; existing queue and client stay alive.
+                plugin.config.update(parameters)
+                plugin.config.save_config()
+            except Exception:
+                plugin.config.clear()
+                plugin.config.update(previous)
+                try:
+                    plugin.config.save_config()
+                except Exception:
+                    raise PanelError("记忆设置写入失败，原配置文件也无法恢复；请检查配置文件权限与磁盘空间，并从备份恢复插件配置。") from None
+                raise PanelError("记忆设置保存失败，请检查插件配置文件权限与磁盘空间后重试。") from None
+            settings.apply(plugin, parameters)
+            return {
+                "saved": True, "previous_revision": revision,
+                "config_revision": self.config_revision(),
+                "parameters": settings.snapshot(plugin),
+                "message": "记忆设置已保存，下次读取和接收新记录时生效，无需重载插件。",
+            }
+
     async def save_access(self):
         payload = await self.body()
         async with self.lock:
@@ -1266,6 +1311,7 @@ class MemoryPanel:
         plugin = self.plugin
         try:
             recall_timeout(plugin.config)
+            context_limits(plugin.config)
         except ConfigurationError as exc:
             raise PanelError(self.error_message(str(exc))) from None
         control_plane_url = self.control_plane_url(
@@ -1496,6 +1542,8 @@ class MemoryPanel:
 
             pages = []
             model_id = ""
+            check = None
+            limits = context_limits(plugin.config)
             if reading or (page_id and not closing):
                 await guard.client.ensure_auth()
                 await recheck()
@@ -1513,17 +1561,44 @@ class MemoryPanel:
                 model = await guard.client.background_page(scope["bank"], model_id)
                 if page["body"] != model["content"]:
                     raise QueueError("background_changed")
+                check = check_page(model, tokenizer=guard.client.tokenizer, **{
+                    k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                })
+            elif reading and guard.selection["enabled"]:
+                selected = next((page for page in pages if page["page_id"] == guard.selection["page_id"]), None)
+                if selected:
+                    if selected["mental_model_id"] != guard.selection["mental_model_id"]:
+                        raise QueueError("background_changed")
+                    try:
+                        model = await guard.client.background_page(scope["bank"], selected["mental_model_id"])
+                        check = check_page(model, tokenizer=guard.client.tokenizer, **{
+                            k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                        })
+                    except HindsightError as exc:
+                        if exc.authentication or exc.code == "bank_missing":
+                            raise
+                        check = {"code": exc.code, "message": self.error_message(exc.code)}
+                else:
+                    check = {"code": "background_missing", "message": self.error_message("background_missing")}
+            if check is not None and "tokens" in check:
+                check["message"] = (
+                    f"含说明与元数据：{check['tokens']} token、{check['chars']} 字符"
+                    f"（知识页上限 {limits['page_tokens']} token，共享 {limits['tokens']} token / {limits['chars']} 字符）。"
+                    + ("超出：" + "、".join(check["exceeded"]) + "。" if check.get("exceeded") else "")
+                    + (self.error_message(check["code"]) if check["code"] else "长度检查通过；聊天时仍与检索结果共用总预算。")
+                )
             await recheck()
             if not reading:
                 selection = save_reference(
                     guard.queue, scope, revision=payload["revision"], page_id=page_id,
                     model_id=model_id, enabled=payload["enabled"],
                 )
-                return {"selection": selection, "message": "知识页选择已保存。"}
+                return {"selection": selection, "check": check, "message": "知识页选择已保存。"}
             return {
                 "pages": [{k: page[k] for k in ("page_id", "path", "index_stale")} for page in pages],
                 "selection": guard.selection, "scope_revision": scope["revision"],
                 "config_revision": revision,
+                "check": check, "budget": limits,
             }
 
     async def action(self, scope_id):

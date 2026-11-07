@@ -19,7 +19,7 @@ import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
-from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_background, reference
+from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_background, context_limits, reference
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
@@ -27,7 +27,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
-    TokenizerError, load_encoding, memory_block, recall_query,
+    TokenizerError, load_encoding, memory_block, recall_query, token_count,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, PanelError
@@ -114,6 +114,7 @@ class ConfigurationTests(unittest.TestCase):
             "control_state_dir", "agent_id", "allowed_accounts", "recall_timeout",
             "recall_max_tokens", "recall_query_tokens", "query_tokenizer", "queue_max_tasks",
             "queue_max_mib", "command_prefixes", "context_max_chars",
+            "background_max_tokens", "background_timeout",
         })
 
     def test_missing_fields_are_specific_and_secrets_are_not_displayed(self):

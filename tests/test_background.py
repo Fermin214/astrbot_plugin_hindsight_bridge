@@ -12,7 +12,7 @@ import unittest
 import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.background import (
-    ReadGuard, compose_background, reference, reference_key, save_reference,
+    ReadGuard, check_page, compose_background, context_limits, reference, reference_key, save_reference,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.client import (
     BACKGROUND_MAX_BYTES, HindsightClient, HindsightError, native_page_id,
@@ -261,6 +261,8 @@ class References(unittest.TestCase):
             lambda: self.plugin.config.update(context_max_chars=256),
             lambda: self.plugin.config.update(recall_max_tokens=256),
             lambda: self.plugin.config.update(recall_timeout=0.2),
+            lambda: self.plugin.config.update(background_max_tokens=2000),
+            lambda: self.plugin.config.update(background_timeout=2),
             lambda: setattr(self.plugin, "permission_revision", 2),
             lambda: setattr(self.plugin, "client", object()),
             lambda: setattr(self.plugin, "stopping", True),
@@ -279,6 +281,66 @@ class References(unittest.TestCase):
 
 
 class ContextComposition(unittest.TestCase):
+    def test_state_text_reports_shared_overflow_when_the_page_alone_fits(self):
+        page = native_model(content="An entire page.")
+        check = check_page(page, tokens=8192, chars=32768, page_tokens=8192, tokenizer="o200k_base")
+        diagnostics = {}
+        _, code, _, used = compose_background(
+            page, [], tokens=8192, chars=check["chars"], page_tokens=8192,
+            tokenizer="o200k_base", diagnostics=diagnostics,
+        )
+        self.assertEqual(code, "background_too_large")
+        self.assertFalse(used)
+        self.assertEqual(diagnostics["exceeded"], ["共享字符上限"])
+
+    def test_page_budget_is_independent_and_larger_shared_limits_preserve_whole_content(self):
+        page = native_model(content="完整知识页。预算独立。" * 140)
+        limits = context_limits({
+            "background_max_tokens": 4096, "recall_max_tokens": 6000, "context_max_chars": 24000,
+        })
+        check = check_page(page, tokenizer="o200k_base", **{
+            k: limits[k] for k in ("tokens", "chars", "page_tokens")
+        })
+        self.assertEqual(check["code"], "")
+        block, code, facts, used = compose_background(
+            page, [{"text": "A complete recalled fact."}], tokenizer="o200k_base",
+            **{k: limits[k] for k in ("tokens", "chars", "page_tokens")},
+        )
+        self.assertEqual(code, "")
+        self.assertTrue(used and facts)
+        self.assertIn(page["content"], block)
+        self.assertLessEqual(token_count(block), 6000)
+        self.assertLessEqual(len(block), 24000)
+        for tokens, chars, page_tokens in ((1200, 24000, 4096), (6000, 256, 4096), (6000, 24000, 400)):
+            diagnostics = {}
+            block, code, _, used = compose_background(
+                page, [{"text": "Whole fact survives."}], tokenizer="o200k_base",
+                tokens=tokens, chars=chars, page_tokens=page_tokens, diagnostics=diagnostics,
+            )
+            self.assertFalse(used)
+            self.assertEqual(code, "background_too_large")
+            self.assertIn("Whole fact survives.", block)
+            self.assertEqual(len(diagnostics["exceeded"]), 1)
+        medium = native_model(content="neutral " * 210)
+        block, code, _, used = compose_background(
+            medium, [{"text": "fact"}], tokens=600, chars=4000, tokenizer="o200k_base",
+        )
+        self.assertEqual(code, "")
+        self.assertTrue(used)
+        self.assertIn(medium["content"], block)
+
+    def test_new_defaults_and_invalid_page_settings(self):
+        self.assertEqual(context_limits({}), {
+            "tokens": 1200, "chars": 4000, "page_tokens": 400, "page_timeout": 1,
+        })
+        for key, values in (
+            ("background_max_tokens", (None, True, 63, 8193, 400.0, "400")),
+            ("background_timeout", (None, True, 0, 0.049, 10.1, float("inf"), float("nan"))),
+        ):
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "invalid_" + key):
+                    context_limits({key: value})
+
     def compose(self, page, rows, **kwargs):
         return compose_background(page, rows, tokens=1200, chars=4000, tokenizer="o200k_base", **kwargs)[:2]
 

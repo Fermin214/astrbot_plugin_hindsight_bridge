@@ -50,7 +50,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
             if getattr(self, "native_page_gate", None):
                 await self.native_page_gate()
             return httpx.Response(200, json={
-                "id": "kp-1", "name": "Background", "body": "Native background marker.",
+                "id": "kp-1", "name": "Background", "body": getattr(self, "native_body", "Native background marker."),
             })
         if request.url.path.endswith("/config") and getattr(self, "bank_missing", False):
             return httpx.Response(404, json={})
@@ -109,6 +109,45 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         status = (await panel.user_scopes())[0]["background"]["status"]
         self.assertFalse(status["used"])
         self.assertIn("读取知识页超时", status["message"])
+
+    async def test_configured_page_deadline_and_config_change_cancel_old_use(self):
+        self.select()
+        self.config.update(recall_timeout=1, background_timeout=0.05)
+        self.page_gate = lambda: asyncio.sleep(0.09)
+        event, req = self.turn("timeout")
+        await self.plugin.add_memory(event, req)
+        self.assertFalse(next(iter(self.plugin.background_outcomes.values()))["used"])
+        self.config["background_timeout"] = 0.2
+        event, req = self.turn("success")
+        await self.plugin.add_memory(event, req)
+        self.assertIn("Native background marker.", req.extra_user_content_parts[0].text)
+        for key, value in (("background_max_tokens", 2000), ("background_timeout", 0.1)):
+            async def change():
+                self.config[key] = value
+            self.page_gate = change
+            event, req = self.turn(key)
+            await self.plugin.add_memory(event, req)
+            self.assertEqual(req.extra_user_content_parts, [])
+
+    async def test_selection_check_survives_reload_without_persisting_body(self):
+        self.page_content = self.native_body = "long native page " * 500
+        request = SimpleNamespace(method="POST", query={}, username="admin")
+        panel = self.panel(request)
+        panel.body = AsyncMock(return_value={
+            "page_id": "kp-1", "enabled": True, "revision": 0,
+            "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
+        })
+        saved = await panel.background(self.scope()["scope_id"])
+        self.assertEqual(saved["check"]["code"], "background_too_large")
+        self.assertIn("知识页太长", saved["check"]["message"])
+        self.assertNotIn(self.page_content, json.dumps(saved))
+        request.method = "GET"
+        reloaded = await panel.background(self.scope()["scope_id"])
+        self.assertEqual(reloaded["check"], saved["check"])
+        self.config.update(background_max_tokens=4096, recall_max_tokens=6000, context_max_chars=24000)
+        reloaded = await panel.background(self.scope()["scope_id"])
+        self.assertEqual(reloaded["check"]["code"], "")
+        self.assertGreater(reloaded["check"]["tokens"], 400)
 
     async def test_recall_timeout_preserves_completed_background_with_failure_status(self):
         self.select()

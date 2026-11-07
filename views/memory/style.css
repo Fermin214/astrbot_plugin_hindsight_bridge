@@ -97,6 +97,13 @@ a { color: var(--accent); }
 .surface > h2 { margin-bottom: 22px; font-size: 19px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .full-width { grid-column: 1 / -1; }
+.field-help { color: var(--muted); font-size: 13px; font-weight: 400; }
+p.field-help { margin-bottom: 18px; }
+.advanced-settings { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px; }
+summary { cursor: pointer; font-weight: 600; }
+details > .form-grid, details > .field-help { margin-top: 18px; }
+.deployment-values { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 13px; }
+.deployment-values dd { margin: 0; overflow-wrap: anywhere; }
 .actions, .dialog-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; }
 .dialog-actions { justify-content: flex-end; margin-top: 26px; }
 .service-meta { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 20px; }

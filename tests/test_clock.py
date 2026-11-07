@@ -15,6 +15,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
+from plugins.astrbot_plugin_hindsight_bridge.core.background import context_limits
 from plugins.astrbot_plugin_hindsight_bridge.core.diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -87,7 +88,7 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             "configuration_accounts": configuration_accounts,
             "ConfigurationError": ConfigurationError, "configuration_message": configuration_message,
             "connection_fields": connection_fields, "missing_connection": missing_connection,
-            "recall_timeout": recall_timeout,
+            "recall_timeout": recall_timeout, "context_limits": context_limits,
             "host_timezone": host_timezone, "Outbox": Outbox, "QueueError": QueueError,
             "load_encoding": AsyncMock(), "TokenizerError": ValueError, "logger": Mock(),
             "HindsightClient": Mock(side_effect=lambda url, key, **kw: SimpleNamespace(url=url)),

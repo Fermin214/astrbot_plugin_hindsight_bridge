@@ -69,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(20)
             elif "HB-FEEDBACK-LONG" in request_text:
                 page_content = "HB-FEEDBACK-LONG complete paragraph. " * 120
+            elif "HB-BUDGET-MEDIUM" in request_text:
+                page_content = "neutral " * 210
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):

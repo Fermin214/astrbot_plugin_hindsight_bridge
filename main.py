@@ -19,7 +19,7 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
-from .core.background import ReadGuard, compose_background, reference
+from .core.background import ReadGuard, compose_background, context_limits, reference
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -34,7 +34,7 @@ from .core.dialogue import (
     persistent_messages,
 )
 from .core.identity import Incoming, sha256
-from .core.materials import TokenizerError, load_encoding, memory_block, recall_query
+from .core.materials import TokenizerError, load_encoding, memory_block, recall_query, token_count
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
@@ -85,6 +85,8 @@ class HindsightBridge(Star):
             "history_timeout": "读取会话信息超时，请检查 AstrBot 会话服务",
             "conversation_not_available": "无法取得当前会话，请检查 AstrBot 会话状态",
             "invalid_recall_timeout": "记忆检索最长等待时间须设为 0.2 到 30 秒，请修改插件配置",
+            "invalid_background_timeout": "知识页读取最长等待时间须设为 0.05 到 10 秒，请修改插件配置",
+            "invalid_background_max_tokens": "知识页长度上限须设为 64 到 8192 token，请修改插件配置",
             "recall_content_unavailable": "检索结果无法放入当前记忆长度限制，请检查记忆内容与字符上限",
             "timeout": "记忆服务响应超时",
             "recall_timeout": "查找记忆超时，可增加「记忆检索最长等待时间」或检查服务负载",
@@ -124,8 +126,8 @@ class HindsightBridge(Star):
             "background_scope_changed": "身份或记忆库已变化，知识页选择已失效，请重新选择",
             "background_missing": "找不到所选知识页，请在官方面板确认后回到插件页重新选择",
             "background_empty": "知识页还没有正文，请等待官方生成完成；一直为空时请管理员检查已有记忆和标签筛选",
-            "background_timeout": "读取知识页超时，请检查记忆服务后重试",
-            "background_too_large": "知识页太长，该次聊天没有提供给机器人；请在官方面板调整为短页，记忆检索仍按所选记忆模式执行",
+            "background_timeout": "读取知识页超时，请检查记忆服务，或调整知识页读取与记忆检索的等待时间",
+            "background_too_large": "知识页太长，超出使用上限；请缩短官方页面，或增加知识页长度上限及共享 token、字符上限；记忆检索继续执行",
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
             "control_directory_must_be_absolute": "控制目录须填写绝对路径，或留空使用默认目录",
@@ -151,6 +153,7 @@ class HindsightBridge(Star):
         try:
             control_directory = self.control_directory()
             timeout = recall_timeout(self.config)
+            context_limits(self.config)
             try:
                 accounts = configuration_accounts(self.config.get("allowed_accounts", []))
             except QueueError:
@@ -410,10 +413,8 @@ class HindsightBridge(Star):
     async def recall_text(self, bank, current, history=(), *, timestamp):
         timeout = recall_timeout(self.config)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
-        result_tokens = max(
-            256, min(1200, int(self.config.get("recall_max_tokens", 1200)))
-        )
-        limit = max(256, min(4000, int(self.config.get("context_max_chars", 4000))))
+        limits = context_limits(self.config)
+        result_tokens, limit = limits["tokens"], limits["chars"]
         client = self.client
         sequence = client.next_connection_sequence()
         stage = "auth"
@@ -425,7 +426,12 @@ class HindsightBridge(Star):
                 results = await client.recall(
                     bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
                 )
-                block = memory_block(results, limit=limit)
+                selected, block = [], ""
+                for item in results[:12]:
+                    candidate = memory_block([*selected, item], limit=limit)
+                    if candidate and candidate != block and token_count(candidate, client.tokenizer) <= result_tokens:
+                        selected.append(item)
+                        block = candidate
                 if results and not block:
                     raise HindsightError("recall_content_unavailable")
                 return block
@@ -438,15 +444,15 @@ class HindsightBridge(Star):
     async def recall_background(self, event, guard, current, history, *, timestamp):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
-        tokens = max(256, min(1200, int(self.config.get("recall_max_tokens", 1200))))
-        chars = max(256, min(4000, int(self.config.get("context_max_chars", 4000))))
+        limits = context_limits(self.config)
+        tokens, chars = limits["tokens"], limits["chars"]
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         tasks = []
         stage = "auth"
 
         async def read_page():
             try:
-                async with asyncio.timeout(min(1, max(0, deadline - time.monotonic()) / 4)):
+                async with asyncio.timeout(min(limits["page_timeout"], max(0, deadline - time.monotonic()) / 4)):
                     page = await guard.client.background_page(
                         guard.scope["bank"], guard.selection["mental_model_id"],
                     )
@@ -480,9 +486,11 @@ class HindsightBridge(Star):
                                   if code and HindsightError(code).authentication), "")
                 if auth_code:
                     page, rows, page_code, recall_code = None, [], auth_code, auth_code
+                page_diagnostics = {}
                 block, page_code, facts_used, background_used = compose_background(
                     page, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
-                    page_code=page_code, recall_code=recall_code,
+                    page_tokens=limits["page_tokens"],
+                    page_code=page_code, recall_code=recall_code, diagnostics=page_diagnostics,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
@@ -492,7 +500,10 @@ class HindsightBridge(Star):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
                     guard.queue.apply_control()
                     raise HindsightError("bank_missing")
-                return block, recall_code, facts_used, {"code": page_code, "used": background_used}
+                return block, recall_code, facts_used, {
+                    "code": page_code, "used": background_used,
+                    "exceeded": page_diagnostics.get("exceeded", []),
+                }
         except TimeoutError:
             raise HindsightError("auth_timeout" if stage == "auth" else "recall_timeout") from None
         finally:

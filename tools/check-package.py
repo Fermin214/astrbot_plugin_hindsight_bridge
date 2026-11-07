@@ -63,7 +63,7 @@ def main():
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
         "core/source.py", "core/access.py", "core/qq_source.py",
-        "core/background.py",
+        "core/background.py", "core/settings.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",

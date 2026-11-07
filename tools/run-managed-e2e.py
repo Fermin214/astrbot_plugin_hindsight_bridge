@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 spec = importlib.util.spec_from_file_location("live_harness", Path(__file__).with_name("run-live-e2e.py"))
 live = importlib.util.module_from_spec(spec)
@@ -46,17 +47,13 @@ class Managed(live.Environment):
                          "c2dec0e25ae8292e3dd01ecb6e326a87965d41ef", cwd=live.ROOT, stdout=file)
         environment = json.loads(self.model_environment.read_text())
         models = json.loads(environment["ASTRBOT_MEMORY_MODEL_CONFIG"])
-        live.private_json(self.output / "native-models.json", [
-            {"id": "delivery-embedding", "type": "dashscope_embedding", "provider_type": "embedding", "enable": True,
-             "embedding_model": models["embedding"]["model"], "embedding_api_base": models["embedding"]["base_url"],
-             "embedding_api_key": models["embedding"]["api_key"], "embedding_dimensions": 1024},
-            {"id": "delivery-rerank", "type": "bailian_rerank", "provider_type": "rerank", "enable": True,
-             "rerank_model": models["rerank"]["model"], "rerank_api_base": models["rerank"]["base_url"],
-             "rerank_api_key": models["rerank"]["api_key"]},
-        ])
+        live.private_json(self.output / "native-models.json", self.native_models(models))
+        token_cache = Path(os.environ.get("TIKTOKEN_CACHE_DIR") or os.environ.get("DATA_GYM_CACHE_DIR")
+                           or str(Path(tempfile.gettempdir()) / "data-gym-cache")).resolve()
+        live.run(sys.executable, "-c", "import tiktoken; tiktoken.get_encoding('o200k_base'); tiktoken.get_encoding('cl100k_base')")
         mounts = ["-v", str(live.ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
-                  "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", "/tmp/hindsight-bridge-token-cache:/token-cache:ro"]
+                  "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", str(token_cache) + ":/token-cache:ro"]
         self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
         name = self.owner + "-astrbot"
         self.containers.append(name)
@@ -65,6 +62,16 @@ class Managed(live.Environment):
                     "-p", f'127.0.0.1:{self.settings["onebot_port"]}:{self.settings["onebot_port"]}', *mounts, self.astrbot_image, stdout=subprocess.DEVNULL)
         self.wait(lambda: self.ready_http(f'http://127.0.0.1:{self.settings["dashboard_port"]}/api/v1/auth/setup-status'))
         print("Owned custom-bridge AstrBot ready", flush=True)
+
+    def native_models(self, models):
+        return [
+            {"id": "delivery-embedding", "type": "dashscope_embedding", "provider_type": "embedding", "enable": True,
+             "embedding_model": models["embedding"]["model"], "embedding_api_base": models["embedding"]["base_url"],
+             "embedding_api_key": models["embedding"]["api_key"], "embedding_dimensions": 1024},
+            {"id": "delivery-rerank", "type": "bailian_rerank", "provider_type": "rerank", "enable": True,
+             "rerank_model": models["rerank"]["model"], "rerank_api_base": models["rerank"]["base_url"],
+             "rerank_api_key": models["rerank"]["api_key"]},
+        ]
 
     def managed_control(self, action):
         self.owned(self.owner + "-astrbot")

@@ -74,16 +74,28 @@
     "hint": "查找记忆的最长等待时间，默认 10 秒，可设为 0.2 到 30 秒。超时后不使用该次检索结果，聊天继续；新聊天的保存独立进行。"
   },
   "recall_max_tokens": {
-    "description": "检索记忆长度上限（token）",
+    "description": "记忆参考共享长度上限（token）",
     "type": "int",
     "default": 1200,
-    "hint": "每轮记忆参考的 token 预算，知识页（Knowledge Page）与记忆召回（Recall）共用。默认 1200，范围 256 到 1200。"
+    "hint": "知识页、检索结果与说明共用的总 token 预算。默认 1200，范围 256 到 8192；增加会提高聊天模型的上下文用量。"
+  },
+  "background_max_tokens": {
+    "description": "知识页长度上限（token）",
+    "type": "int",
+    "default": 400,
+    "hint": "所选知识页正文、说明与元数据的独立上限，默认 400，范围 64 到 8192。不随检索预算缩减，但仍受共享 token 和字符上限约束；放不下时整页跳过，不截断或自动摘要。"
+  },
+  "background_timeout": {
+    "description": "知识页读取最长等待时间（秒）",
+    "type": "float",
+    "default": 1,
+    "hint": "默认 1 秒，范围 0.05 到 10 秒；实际不超过认证后剩余检索等待时间的四分之一。与记忆检索并行，超时后跳过知识页，聊天继续。"
   },
   "recall_query_tokens": {
     "description": "查询 token 上限",
     "type": "int",
     "default": 380,
-    "hint": "限制发送给 Hindsight 的查询长度，优先保留当前消息。默认 380，最多 400 token。"
+    "hint": "限制发送给 Hindsight 的查询长度，优先保留用户消息。默认 380，范围 32 到 400 token，也可在记忆管理面板的高级设置中调整。"
   },
   "query_tokenizer": {
     "description": "查询分词编码",
@@ -113,6 +125,6 @@
     "description": "提供给聊天模型的记忆字符上限",
     "type": "int",
     "default": 4000,
-    "hint": "每轮提供给聊天模型的记忆字符上限，知识页（Knowledge Page）与记忆召回（Recall）共用。默认 4000，范围 256 到 4000。"
+    "hint": "知识页、检索结果与说明共用的总字符上限。默认 4000，范围 256 到 32768；增加 token 上限时也需检查此项。"
   }
 }
