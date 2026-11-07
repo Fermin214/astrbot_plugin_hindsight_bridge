@@ -460,7 +460,7 @@ async def main():
     try:
         await acceptance.run()
     except Exception as error:
-        acceptance.report.update(failure_type=type(error).__name__, failure=str(error)[:300])
+        acceptance.report.update(complete=False, failure_type=type(error).__name__, failure=str(error)[:300])
         acceptance.save()
         raise
 

@@ -152,10 +152,16 @@ class OneBot:
                     return result
 
     async def close(self):
-        if self.socket:
-            await self.socket.close()
-        if self.reader:
-            await self.reader
+        try:
+            if self.reader:
+                self.reader.cancel()
+                try:
+                    await self.reader
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            if self.socket:
+                await self.socket.close()
 
 
 class Acceptance:
