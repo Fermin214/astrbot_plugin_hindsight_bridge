@@ -41,6 +41,9 @@ class StatePath:
     def exists(self):
         return self.panel.saved_state is not None
 
+    def is_file(self):
+        return False
+
     def read_text(self, **kwargs):
         return json.dumps(self.panel.saved_state)
 

@@ -114,12 +114,16 @@ docker info >/dev/null 2>&1 || fail '无法使用 Docker，请使用有 Docker �
 docker compose version >/dev/null 2>&1 || fail '请先安装 Docker Compose v2。'
 project=PROJECT_VALUE
 expected_host=HOST_VALUE
+setup_path=SETUP_PATH_VALUE
 target="${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/$project"
 [ ! -L "$target" ] || fail '安装目录不能是符号链接。'
 astrbot_id=''
 if [ -n "$expected_host" ]; then
   for container in $(docker ps -q); do
     if [ "$(docker inspect --format '{{.Config.Hostname}}' "$container")" = "$expected_host" ]; then
+      if [ -n "$setup_path" ]; then
+        docker exec "$container" python -c 'import json,sys; assert json.load(open(sys.argv[1])).get("id")==sys.argv[2]' "$setup_path" ID_VALUE < /dev/null >/dev/null 2>&1 || continue
+      fi
       [ -z "$astrbot_id" ] || fail '找到多个同名 AstrBot 容器，请设置唯一 hostname 后重新生成命令。'
       astrbot_id="$container"
     fi
@@ -156,29 +160,55 @@ if [ -f "$target/.env" ]; then
   done
   mv "$stage/.env.saved" "$stage/.env"
 fi
+connection_mode=native
+bind_host=127.0.0.1
 if [ -n "$astrbot_id" ]; then
   existing="$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$astrbot_id")"
   selected=''
+  fallback=''
   for shared in $existing; do
     [ "$shared" = NETWORK_VALUE ] && continue
     [[ "$shared" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || fail 'AstrBot 网络名称无法写入配置。'
     [ -z "${HINDSIGHT_ASTRBOT_NETWORK:-}" ] || [ "$shared" = "$HINDSIGHT_ASTRBOT_NETWORK" ] || continue
-    [ "$shared" != bridge ] || continue
     [ "$(docker network inspect --format '{{.Driver}} {{.Internal}}' "$shared")" = 'bridge false' ] || continue
+    if [ "$shared" = bridge ] && [ -z "${HINDSIGHT_ASTRBOT_NETWORK:-}" ]; then
+      fallback=bridge
+      continue
+    fi
     selected="$shared"
     break
   done
-  [ -n "$selected" ] || fail 'AstrBot 需要可出站的自定义 Docker 桥接网络；可用 HINDSIGHT_ASTRBOT_NETWORK 指定其中一个。'
-  printf 'services:\n  memory-api:\n    networks:\n      astrbot:\n        aliases: [ALIAS_VALUE]\nnetworks:\n  astrbot:\n    external: true\n    name: "%s"\n' "$selected" > "$stage/compose.override.yaml"
+  selected="${selected:-$fallback}"
+  if [ -n "$selected" ] && [ "$selected" != bridge ]; then
+    connection_mode=custom
+    printf 'services:\n  memory-api:\n    networks:\n      astrbot:\n        aliases: [ALIAS_VALUE]\nnetworks:\n  astrbot:\n    external: true\n    name: "%s"\n' "$selected" > "$stage/compose.override.yaml"
+  elif [ "$selected" = bridge ]; then
+    connection_mode=bridge
+    bind_host="$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' bridge)"
+    [[ "$bind_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail '无法获取默认 bridge 的网关地址。'
+  elif [ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$astrbot_id")" = host ] && [ -z "${HINDSIGHT_ASTRBOT_NETWORK:-}" ]; then
+    connection_mode=host
+  else
+    fail 'AstrBot 需要 host、默认 bridge 或可出站的自定义桥接网络；可用 HINDSIGHT_ASTRBOT_NETWORK 选择已连接的桥接网络。'
+  fi
+  if [ "$connection_mode" = bridge ] || [ "$connection_mode" = host ]; then
+    sed -i "/^    ports:$/a\\      - \"$bind_host:API_PORT_VALUE:8888\"\n      - \"$bind_host:MANAGEMENT_PORT_VALUE:8766\"" "$stage/compose.yaml"
+  fi
 fi
 owned_ports=''
 for container in $(docker ps -q --filter "label=com.docker.compose.project=$project" --filter 'label=com.docker.compose.service=memory-api'); do
   owned_ports="$owned_ports
 $(docker inspect --format '{{range .NetworkSettings.Ports}}{{range .}}{{println .HostIp .HostPort}}{{end}}{{end}}' "$container")"
 done
-for port in HOST_PORTS; do
-  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-    printf '%s\n' "$owned_ports" | grep -qx "127.0.0.1 $port" ||
+host_ports='CP_PORT_VALUE'
+if [ "$connection_mode" != custom ]; then
+  host_ports="$host_ports API_PORT_VALUE MANAGEMENT_PORT_VALUE"
+fi
+for port in $host_ports; do
+  listener_host="$bind_host"
+  [ "$port" != CP_PORT_VALUE ] || listener_host=127.0.0.1
+  if (exec 3<>"/dev/tcp/$listener_host/$port") 2>/dev/null; then
+    printf '%s\n' "$owned_ports" | grep -qx "$listener_host $port" ||
       fail "主机端口 $port 已占用。请释放该端口，或修改安装状态中的端口后重新生成命令；已有安装需同步修改 .env 中的端口。"
   fi
 done
@@ -192,6 +222,10 @@ if [ -f "$target/identity" ]; then
   done
 fi
 cp -R "$stage/." "$target/"
+# Remove only the installer's obsolete network override when changing modes.
+if [ ! -f "$stage/compose.override.yaml" ]; then
+  rm -f "$target/compose.override.yaml"
+fi
 chmod 600 "$target/.env"
 chmod 755 "$target/service"
 chmod 644 "$target/service/managed_service.py" "$target/service/model_probe.py" "$target/service/model_transport.py"
@@ -208,7 +242,23 @@ docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 
 if [ "$service_changed" = 1 ]; then
   docker compose --project-name "$project" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 600 memory-api || fail '配套管理组件更新失败，请检查容器日志后重新执行安装命令；原配置与数据保留。'
 fi
+api_url="http://$bind_host:API_PORT_VALUE"
+management_url="http://$bind_host:MANAGEMENT_PORT_VALUE"
+if [ "$connection_mode" = custom ]; then
+  api_url='http://ALIAS_VALUE:8888'
+  management_url='http://ALIAS_VALUE:8766'
+fi
 docker compose --project-name "$project" exec -T memory-api python -c "import json,os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8766/status',headers={'Authorization':'Bearer '+os.environ['ASTRBOT_MEMORY_MANAGEMENT_KEY']}); s=json.load(urllib.request.urlopen(r,timeout=5)); assert s.get('installation_id')==os.environ['HINDSIGHT_SETUP_ID'] and s.get('protocol')==1, '配套管理接口身份不匹配'" < /dev/null || fail '配套管理接口检查失败，请检查安装身份与服务日志后重试。'
+if [ -n "$astrbot_id" ] && [ -n "$setup_path" ]; then
+  docker exec "$astrbot_id" python -c 'import json,os,sys,tempfile; from pathlib import Path
+path=Path(sys.argv[1]); identity=sys.argv[2]
+assert json.loads(path.read_text()).get("id")==identity
+data=dict(installation_id=identity,api_url=sys.argv[3],management_url=sys.argv[4])
+fd,name=tempfile.mkstemp(prefix=".managed-network-",dir=path.parent)
+with os.fdopen(fd,"w") as output: json.dump(data,output)
+os.replace(name,path.with_name("managed-network.json"))
+' "$setup_path" ID_VALUE "$api_url" "$management_url" < /dev/null || fail '连接地址保存失败，请确认 AstrBot 正在运行后重新执行安装命令。'
+fi
 UPGRADE_AFTER
 printf '\n配套组件安装完成。回到插件的「设置」选择模型，点击「保存并连接」完成记忆服务接入。\n'
 printf '服务文件位置：%s\n' "$target"
@@ -340,7 +390,7 @@ def command(script):
     return f"printf '%s' '{encoded}' | base64 -d | gzip -d | bash"
 
 
-def installation(root, state, *, container_hostname="", control_plane_url="", upgrade=False):
+def installation(root, state, *, container_hostname="", setup_path="", control_plane_url="", upgrade=False):
     identifier = state["id"]
     if not re.fullmatch(r"[0-9a-f]{12}", identifier):
         raise ValueError("invalid_installation_id")
@@ -400,11 +450,11 @@ def installation(root, state, *, container_hostname="", control_plane_url="", up
         "UPGRADE_BEFORE": UPGRADE_BEFORE if upgrade else "",
         "UPGRADE_AFTER": UPGRADE_AFTER if upgrade else "",
         "PROJECT_VALUE": shlex.quote(project), "HOST_VALUE": shlex.quote(container_hostname),
+        "SETUP_PATH_VALUE": shlex.quote(str(setup_path)),
         "NETWORK_VALUE": shlex.quote(network), "ALIAS_VALUE": alias,
         "ID_VALUE": identifier, "POSTGRES_IMAGE_VALUE": POSTGRES_IMAGE,
-        "HOST_PORTS": " ".join(str(ports[name]) for name in (
-            ("control_plane_port",) if container_hostname else ports
-        )),
+        "API_PORT_VALUE": str(ports["api_port"]),
+        "MANAGEMENT_PORT_VALUE": str(ports["management_port"]),
         "CP_PORT_VALUE": str(ports["control_plane_port"]),
         "ARCHIVE_VALUE": base64.b64encode(archive.getvalue()).decode("ascii"),
     }.items():
