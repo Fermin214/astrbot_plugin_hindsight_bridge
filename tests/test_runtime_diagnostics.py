@@ -21,6 +21,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient,
 from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
 from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_backgrounds, context_limits, reference
 from plugins.astrbot_plugin_hindsight_bridge.core.agent_tools import MemoryTools
+from plugins.astrbot_plugin_hindsight_bridge.core.reflection import Reflection
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (

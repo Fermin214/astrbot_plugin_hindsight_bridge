@@ -352,6 +352,48 @@ class HindsightClient:
             self.connection_result(False, "connection_error", sequence=sequence)
             raise HindsightError("connection_error") from None
 
+    async def reflect(self, bank, query, *, max_tokens, settled):
+        sequence = self.next_connection_sequence()
+        try:
+            async with self.http.stream(
+                "POST", self.url + self.bank_path(bank) + "/reflect",
+                json={"query": query, "budget": "low", "max_tokens": max_tokens, "include": {"facts": {}}},
+                headers={"Authorization": "Bearer " + self.api_key},
+                timeout=httpx.Timeout(120, connect=3),
+            ) as response:
+                if not response.is_success:
+                    if response.status_code in {401, 403}:
+                        self.connection_result(False, f"http_{response.status_code}", sequence=sequence)
+                    raise HindsightError(f"http_{response.status_code}")
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    if len(data) + len(chunk) > BACKGROUND_MAX_BYTES:
+                        raise HindsightError("reflect_response_too_large")
+                    data.extend(chunk)
+            value = json.loads(data)
+            if (
+                not isinstance(value, dict) or not isinstance(value.get("text"), str)
+                or value.get("based_on") is not None and not isinstance(value["based_on"], dict)
+                or value.get("usage") is not None and not isinstance(value["usage"], dict)
+            ):
+                raise ValueError
+            settled()
+            if time.monotonic() < self.auth_until:
+                self.connection_result(True, sequence=sequence)
+            return value
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError):
+            settled()
+            self.connection_result(False, "connection_error", sequence=sequence)
+            raise HindsightError("connection_error") from None
+        except httpx.TimeoutException:
+            self.connection_result(False, "reflect_transport_timeout", sequence=sequence)
+            raise HindsightError("reflect_transport_timeout") from None
+        except httpx.HTTPError:
+            self.connection_result(False, "connection_error", sequence=sequence)
+            raise HindsightError("connection_error") from None
+        except (ValueError, RecursionError):
+            raise HindsightError("invalid_reflect_response") from None
+
     async def _background_read(self, bank, suffix, *, expected=dict):
         try:
             return await self.read_bounded(self.bank_path(bank) + suffix, expected=expected)

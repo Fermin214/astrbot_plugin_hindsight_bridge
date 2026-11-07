@@ -15,11 +15,11 @@ def definition(schema, value):
     return value
 
 
-def arguments(name, content=MARKER):
+def arguments(name, content=MARKER, memory_ids=None):
     if name == "done":
         return {
             "answer": content, "markdown": content, "answer_found": bool(content),
-            "memory_ids": [], "observation_ids": [], "mental_model_ids": [],
+            "memory_ids": memory_ids or [], "observation_ids": [], "mental_model_ids": [],
             "document": {"sections": [{"heading": "Background", "level": 2, "blocks": [content]}] if content else []},
         }
     return {"query": "Cedar-120", "reason": "synthetic fixture", "max_tokens": 256}
@@ -34,6 +34,18 @@ def tool_value(message):
         return value if isinstance(value, dict) else {}
     except (ValueError, TypeError):
         return {}
+
+
+def cited_memories(body):
+    ids = []
+    for message in body.get("messages", []):
+        if message.get("role") != "tool":
+            continue
+        result = tool_value(message)
+        for memory in result.get("memories", []):
+            if isinstance(memory, dict) and isinstance(memory.get("id"), str):
+                ids.append(memory["id"])
+    return ids[:2]
 
 
 def bridge_tool_reply(body):
@@ -69,10 +81,14 @@ def bridge_tool_reply(body):
         kind, params = "recall", {"query": "Cedar-120 quota " + str(len(current))}
     elif "HB-TOOLS-PROBE-" in query and not current:
         kind, params = "recall", {"query": "Cedar-120"}
+    elif "HB-REFLECT-SHARED" in query and len(current) < 5:
+        kind, params = ("reflect" if len(current) == 3 else "recall"), {"query": "HB-REFLECT-QUESTION Cedar-120 constraints " + str(len(current))}
+    elif "HB-REFLECT-" in query and not current:
+        kind, params = "reflect", {"query": "HB-REFLECT-QUESTION Cedar-120 constraints"}
     if not kind:
-        return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
+        return {"role": "assistant", "content": "HB-REFLECT-FINAL" if "HB-REFLECT-" in query else "HB-TOOLS-ANSWER"}, "stop"
     if not any(tool.get("function", {}).get("name") == "hindsight_bridge_" + kind for tool in body.get("tools", [])):
-        return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
+        return {"role": "assistant", "content": "HB-REFLECT-FINAL" if "HB-REFLECT-" in query else "HB-TOOLS-ANSWER"}, "stop"
     return {"role": "assistant", "content": None, "tool_calls": [{
         "id": "bridge-fixture-" + str(len(current)), "type": "function",
         "function": {"name": "hindsight_bridge_" + kind, "arguments": json.dumps(params)},
@@ -129,6 +145,8 @@ class Handler(BaseHTTPRequestHandler):
                 prefix = "HB-TOOLS-V2" if "HB-TOOLS-PAGE-V2" in request_text else "HB-TOOLS-V1"
                 page_content = "".join(f"{prefix}-LINE-{index:03d} complete original paragraph; conditions preserved.\n"
                                        for index in range(200))
+            elif "HB-REFLECT-QUESTION" in request_text:
+                page_content = "HB-REFLECT-ANSWER: Cedar-120 is the native constraint; preserve it when choosing the next step."
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):
@@ -160,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
                 content = '{"creates":[],"updates":[],"deletes":[]}'
             elif (
                 getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512
-                and "HB-TOOLS-" in str(body.get("messages", []))
+                and ("HB-TOOLS-" in str(body.get("messages", [])) or "<hb-read-request:" in str(body.get("messages", [])))
             ):
                 message, finish = bridge_tool_reply(body)
             elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
@@ -176,18 +194,18 @@ class Handler(BaseHTTPRequestHandler):
                     name = "recall"
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": "fixture-call", "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments(name, page_content))},
+                    "function": {"name": name, "arguments": json.dumps(arguments(name, page_content, cited_memories(body)))},
                 }]}
                 finish = "tool_calls"
                 self.server.counts["page"] += 1
             elif "call" in properties:
-                content = json.dumps({"call": {"name": "done", "arguments": arguments("done", page_content)}})
+                content = json.dumps({"call": {"name": "done", "arguments": arguments("done", page_content, cited_memories(body))}})
                 self.server.counts["page"] += 1
             elif "query" in properties:
                 content = json.dumps(arguments("search"))
                 self.server.counts["page"] += 1
             elif "answer_found" in properties or "markdown" in properties:
-                content = json.dumps(arguments("done", page_content))
+                content = json.dumps(arguments("done", page_content, cited_memories(body)))
                 self.server.counts["page"] += 1
             if finish != "tool_calls" and message is None:
                 message = {"role": "assistant", "content": content}

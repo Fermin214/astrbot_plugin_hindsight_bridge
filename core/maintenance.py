@@ -74,7 +74,8 @@ class Maintenance:
                 (queue.connection_id, scope["bank"]),
             )
         }
-        inflight = bool(bank_tasks & queue.in_flight)
+        reflections = queue.control.reflection_pending(queue.connection_id, bank=scope["bank"])
+        inflight = bool(bank_tasks & queue.in_flight) or bool(reflections)
         remote_active = []
         operations = []
         if not pending and not inflight:
@@ -109,6 +110,8 @@ class Maintenance:
             "pending": len(pending), "in_flight": inflight,
             "remote_active": len(remote_active),
             "remote_operations": len(operations),
+            "reflect_pending": len(reflections),
+            "reflect_unknown": sum(item["state"] == "unknown" for item in reflections),
             "bank_missing": queue.control.bank_state(queue.connection_id, scope["bank"]) == "missing",
         }
 
@@ -244,6 +247,11 @@ class Maintenance:
             progress = control.db.execute(
                 "SELECT * FROM erasures WHERE forget_id=?", (fid,)
             ).fetchone()
+            reflections = control.reflection_pending(self.outbox.connection_id, bank=bank)
+            if reflections:
+                code = "reflect_execution_unknown" if any(item["state"] == "unknown" for item in reflections) else "reflect_busy"
+                control.cleanup_state(fid, "cleaning", code, epoch=progress["cleanup_epoch"])
+                return False
             if progress["cleanup_step"] == 7:
                 # Verified Banks are checked again, including references no longer listed remotely.
                 with control.transaction():
@@ -313,7 +321,16 @@ class Maintenance:
         success = await self.check(force=not self.attempted_startup)
         self.attempted_startup = True
         if not success:
-            return False
+            # A durable Reflect barrier isolates the retired Bank; other owners
+            # can recover without treating that erasure as completed.
+            pending = [item for item in self.outbox.control.erasures(self.outbox.connection_id) if item["phase"] != "verified"]
+            for item in pending:
+                owner = self.outbox.control.owner(self.outbox.connection_id, item["owner_id"])
+                if (
+                    not owner or owner["bank"] == item["old_bank"] or owner["generation"] <= item["old_generation"]
+                    or not self.outbox.control.reflection_pending(self.outbox.connection_id, bank=item["old_bank"])
+                ):
+                    return False
         # Apply the newest control records before allowing either recall or queue submission.
         self.outbox.apply_control()
         if self.outbox.recovering:
