@@ -122,7 +122,7 @@ if [ -n "$expected_host" ]; then
   for container in $(docker ps -q); do
     if [ "$(docker inspect --format '{{.Config.Hostname}}' "$container")" = "$expected_host" ]; then
       if [ -n "$setup_path" ]; then
-        docker exec "$container" python -c 'import json,sys; assert json.load(open(sys.argv[1])).get("id")==sys.argv[2]' "$setup_path" ID_VALUE < /dev/null 2>/dev/null || continue
+        docker exec "$container" python -c 'import json,sys; assert json.load(open(sys.argv[1])).get("id")==sys.argv[2]' "$setup_path" ID_VALUE < /dev/null >/dev/null 2>&1 || continue
       fi
       [ -z "$astrbot_id" ] || fail '找到多个同名 AstrBot 容器，请设置唯一 hostname 后重新生成命令。'
       astrbot_id="$container"
