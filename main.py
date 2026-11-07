@@ -19,7 +19,7 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
-from .core.background import ReadGuard, compose_background, context_limits, reference
+from .core.background import ReadGuard, compose_backgrounds, context_limits, reference
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -450,15 +450,23 @@ class HindsightBridge(Star):
         tasks = []
         stage = "auth"
 
-        async def read_page():
+        page_slots = asyncio.Semaphore(4)
+        page_deadline = None
+
+        async def read_page(selected):
+            page, code = None, ""
             try:
-                async with asyncio.timeout(min(limits["page_timeout"], max(0, deadline - time.monotonic()) / 4)):
-                    page = await guard.client.background_page(
-                        guard.scope["bank"], guard.selection["mental_model_id"],
-                    )
-                    return page, ""
+                async with asyncio.timeout_at(page_deadline):
+                    async with page_slots:
+                        page = await guard.client.background_page(
+                            guard.scope["bank"], selected["mental_model_id"],
+                        )
             except (HindsightError, TimeoutError) as exc:
-                return None, exc.code if isinstance(exc, HindsightError) else "background_timeout"
+                code = exc.code if isinstance(exc, HindsightError) else "background_timeout"
+            return {"reference": selected, "page": page, "code": code}
+
+        async def read_pages():
+            return await asyncio.gather(*(read_page(selected) for selected in guard.selection["pages"]))
 
         async def read_facts(query):
             try:
@@ -478,31 +486,34 @@ class HindsightBridge(Star):
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
                 stage = "recall"
-                tasks = [asyncio.create_task(read_page()), asyncio.create_task(read_facts(query))]
-                (page, page_code), (rows, recall_code) = await asyncio.gather(*tasks)
+                page_deadline = time.monotonic() + min(
+                    limits["page_timeout"], max(0, deadline - time.monotonic()) / 4,
+                )
+                tasks = [asyncio.create_task(read_pages()), asyncio.create_task(read_facts(query))]
+                reads, (rows, recall_code) = await asyncio.gather(*tasks)
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
-                auth_code = next((code for code in (recall_code, page_code)
+                auth_code = next((code for code in (recall_code, *(read["code"] for read in reads))
                                   if code and HindsightError(code).authentication), "")
                 if auth_code:
-                    page, rows, page_code, recall_code = None, [], auth_code, auth_code
-                page_diagnostics = {}
-                block, page_code, facts_used, background_used = compose_background(
-                    page, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
-                    page_tokens=limits["page_tokens"],
-                    page_code=page_code, recall_code=recall_code, diagnostics=page_diagnostics,
+                    rows, recall_code = [], auth_code
+                    reads = [{**read, "page": None, "code": auth_code} for read in reads]
+                block, facts_used, outcomes = compose_backgrounds(
+                    reads, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
+                    page_tokens=limits["page_tokens"], recall_code=recall_code,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
                 if time.monotonic() > deadline:
                     raise HindsightError("recall_timeout")
-                if page_code == "bank_missing":
+                if any(item["code"] == "bank_missing" for item in outcomes):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
                     guard.queue.apply_control()
                     raise HindsightError("bank_missing")
                 return block, recall_code, facts_used, {
-                    "code": page_code, "used": background_used,
-                    "exceeded": page_diagnostics.get("exceeded", []),
+                    "code": next((item["code"] for item in outcomes if item["code"]), ""),
+                    "used": any(item["used"] for item in outcomes), "pages": outcomes,
+                    "exceeded": list(dict.fromkeys(label for item in outcomes for label in item["exceeded"])),
                 }
         except TimeoutError:
             raise HindsightError("auth_timeout" if stage == "auth" else "recall_timeout") from None
@@ -842,7 +853,7 @@ class HindsightBridge(Star):
             "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
             "/hindsight show 记忆ID：查看详情和来源\n"
             "/hindsight recall 问题：查找相关记忆\n"
-            "/hindsight background：查看本人已选知识页（Knowledge Page）\n"
+            "/hindsight background [序号]：查看本人已选知识页（Knowledge Page）\n"
             "可在插件页选择一份 Hindsight 知识页供聊天参考，例如项目目标与约束；默认关闭。\n"
             "/hindsight export：导出记忆和来源（JSON）\n"
             "修改记忆：联系管理员，在插件页暂停保存和查询后到 Hindsight 官方面板操作\n"
@@ -891,7 +902,7 @@ class HindsightBridge(Star):
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
     @hindsight.command("background")
-    async def memory_background(self, event: AstrMessageEvent):
+    async def memory_background(self, event: AstrMessageEvent, page: int = 1):
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
@@ -903,18 +914,24 @@ class HindsightBridge(Star):
                 return
             try:
                 guard = ReadGuard.freeze(self, scope, manual=True)
-                if not guard.selection["page_id"]:
+                selected = guard.selection["pages"]
+                if not selected:
                     yield event.plain_result(
                         "尚未选择知识页（Knowledge Page）。记忆检索按所选记忆模式运行。\n"
                         "知识页由 Hindsight 从已有记忆按主题生成，可让新会话参考项目目标等资料。"
-                        "想使用时，请管理员在插件页「知识页（Knowledge Page）」按问号说明准备并选择知识页。"
+                        "请管理员在官方面板准备知识页，再到插件页「聊天知识页」选择。"
                     )
                     return
+                if type(page) is not int or not 1 <= page <= len(selected):
+                    yield event.plain_result(f"知识页序号须为 1 到 {len(selected)}。")
+                    return
+                position = page
+                selected_page = selected[position - 1]
                 async with asyncio.timeout(8):
                     await guard.client.ensure_auth()
                     if not guard.valid(self, event):
                         raise QueueError("background_changed")
-                    page = await guard.client.background_page(scope["bank"], guard.selection["mental_model_id"])
+                    page = await guard.client.background_page(scope["bank"], selected_page["mental_model_id"])
                 await self.prepare_sources()
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
@@ -922,8 +939,12 @@ class HindsightBridge(Star):
                     yield event.plain_result(self.diagnostic("background_empty"))
                     return
                 # One whole bounded response; larger documents remain in the official panel.
+                position_label = f"第 {position}/{len(selected)} 篇"
+                if position < len(selected):
+                    position_label += f"；下一篇：/hindsight background {position + 1}"
                 content = (
-                    f"知识页（Knowledge Page）：{guard.selection['page_id']}\n"
+                    f"知识页（Knowledge Page）：{selected_page['page_id']}\n"
+                    f"{position_label}\n"
                     f"聊天时使用所选知识页（开关设置）：{'开启' if guard.selection['enabled'] else '关闭'}\n"
                     f"刷新时间：{page['last_refreshed_at'] or '未知'}\n"
                     f"最近刷新失败：{page['last_refresh_failed_at'] or '无记录'}\n"

@@ -368,9 +368,9 @@ class Control:
                 except (ValueError, KeyError, TypeError):
                     raise QueueError("background_settings_invalid") from None
                 self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 1, "revision": revision + 1, "enabled": False,
-                    "page_id": "", "mental_model_id": "",
-                    "invalidated": bool(previous.get("page_id") or previous.get("invalidated")),
+                    "format": 2, "revision": revision + 1, "enabled": False,
+                    "page_id": "", "mental_model_id": "", "pages": [],
+                    "invalidated": bool(previous.get("page_id") or previous.get("pages") or previous.get("invalidated")),
                 }), key))
             self.bump()
         return self.db.execute(
