@@ -51,6 +51,14 @@
           <p id="reading-feedback" class="operation-status" role="status" hidden></p>
           <p class="field-help">按需工具让模型决定何时搜索、分段读取知识页和查找事实，需要模型支持工具。先发送一条普通私聊以检查会话工具；自动知识页仍独立使用。</p>
           <p class="field-help">工具查询与结果可能保存在 AstrBot 会话和日志中。清空 Bridge 记忆会保留这些宿主记录；会话与日志由 AstrBot 管理。</p>
+          <div class="knowledge-row"><label for="reflect-enabled">Reflect</label><label class="check-label"><input id="reflect-enabled" type="checkbox">启用</label></div>
+          <div class="knowledge-row"><label for="reflect-timeout">等待秒数</label><input id="reflect-timeout" type="number" min="3" max="30" step="1" value="12" inputmode="numeric"></div>
+          <p id="reflect-effective" class="field-help"></p>
+          <p class="field-help">Reflect 通过 Hindsight 综合记忆回答复杂问题，会额外调用记忆处理模型；每条消息最多一次，与其他记忆工具共用额度，不替代自动召回。等待超时后仍会核对已发送请求；执行终点不明时，相关旧记忆库不能完成清空。</p>
+          <div class="actions"><button id="reflect-save" type="button">保存 Reflect 设置</button><button id="reflect-reload" type="button" class="text-button">重新加载 Reflect 设置</button></div>
+          <p id="reflect-conflict" class="operation-status" role="status" hidden>设置或记忆范围已变化，草稿仍保留；请重新加载 Reflect 设置后修改。</p>
+          <p id="reflect-status" class="operation-status" role="status" hidden></p>
+          <p id="reflect-feedback" class="operation-status" role="status" hidden></p>
           <div class="knowledge-row"><label for="background-page">聊天知识页</label><select id="background-page"><option value="">不使用知识页</option></select></div>
           <p class="field-help">最多选择 8 篇，按列表顺序提供完整页面，共用记忆预算。选择新页面即添加，上移、下移调整优先顺序。</p>
           <ol id="background-selected" class="knowledge-pages" aria-label="知识页顺序"></ol>

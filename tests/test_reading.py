@@ -106,6 +106,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         event, request = self.turn()
         request = self.request = ToolRequest()
         request.model = None
+        request.prompt = "source"
         scope = self.scope()
         save_options(self.plugin.outbox, scope, revision=0, mode="tools")
         request.func_tool = ToolSet(list(self.tools.owned.values()))
@@ -115,7 +116,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(request.func_tool.tools), len(NAMES))
         context = RunContext()
         context.context = SimpleNamespace(context=self.context, event=event)
-        context.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(
+        context.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(text="source", _no_save=False), SimpleNamespace(
             text=self.tools.request_prefix(event) + "notice", _no_save=True,
         )])]
         await self.plugin.bind_memory_tools(event, context)
@@ -152,6 +153,9 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
             self.tools.begin(event, foreign)
             self.assertIsNone(turn.context_ref)
             self.assertFalse(self.tools.finish(event, foreign))
+            foreign.messages[0].content.append(context.messages[0].content[-1])
+            self.tools.begin(event, foreign)
+            self.assertIsNone(turn.context_ref)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
             self.tools.begin(event, context)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))

@@ -58,8 +58,8 @@ function harness() {
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
-    backgroundReadRevision: 0, backgroundDraft: null, readingDraft: null,
-    renderBackground() {}, renderReading() {}, renderScope() {},
+    backgroundReadRevision: 0, backgroundDraft: null, readingDraft: null, reflectDraft: null,
+    renderBackground() {}, renderReading() {}, renderReflect() {}, renderScope() {},
     clearCommands() {},
     renderServiceVersion() {},
     clearUpgrade() {},
@@ -1006,6 +1006,48 @@ test("reading mode preserves original revisions and drops feedback after user ch
   await saving;
   assert.equal(context.$("reading-mode").value, "automatic");
   assert.doesNotMatch(context.$("reading-feedback").textContent, /saved-other-user/);
+});
+
+test("Reflect keeps dirty values across polling, detects conflicts and ignores a former user's save", async () => {
+  const context = harness();
+  for (const name of ["renderReflect", "saveReflect", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  context.data = { config_revision: "config-1", status: {}, scopes: [{
+    scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
+    reflect: { revision: 2, scope_revision: 3, enabled: false, timeout: 12, observed_available: true },
+  }] };
+  context.scopeId = "one";
+  context.renderReflect();
+  context.$("reflect-enabled").checked = true;
+  context.$("reflect-timeout").value = "20";
+  context.reflectDraft.dirty = true;
+  context.renderReflect();
+  assert.equal(context.$("reflect-timeout").value, "20");
+  context.data.scopes[0].reflect.revision = 3;
+  context.renderReflect();
+  assert.equal(context.$("reflect-conflict").hidden, false);
+  assert.equal(context.$("reflect-save").disabled, true);
+  assert.equal(context.$("reflect-timeout").value, "20");
+  context.renderReflect({ discard: true });
+  assert.equal(context.$("reflect-timeout").value, "12");
+  context.$("reflect-enabled").checked = true;
+  context.reflectDraft.dirty = true;
+  let release;
+  context.bridge = { apiPost: (route, payload) => {
+    assert.equal(route, "scopes/one/reflect");
+    assert.equal(payload.enabled, true);
+    assert.equal(payload.timeout, 12);
+    assert.equal(payload.revision, 3);
+    return new Promise((resolve) => { release = resolve; });
+  } };
+  const saving = context.saveReflect();
+  context.scopeId = "two";
+  context.data.scopes.push({ scope_id: "two", bank: "bank-two", summary: {},
+    reflect: { revision: 0, scope_revision: 1, enabled: false, timeout: 12 } });
+  context.renderReflect();
+  release({ message: "saved-former-user" });
+  await saving;
+  assert.equal(context.$("reflect-enabled").checked, false);
+  assert.doesNotMatch(context.$("reflect-feedback").textContent, /saved-former-user/);
 });
 
 test("removed accounts stay out of user choices even while their Banks are retained", () => {

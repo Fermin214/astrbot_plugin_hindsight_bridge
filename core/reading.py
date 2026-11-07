@@ -177,7 +177,7 @@ def native_sources(response):
         clean.append(item)
     result = {"available": True, "memories": clean}
     for key in ("mental_models", "directives"):
-        values = based.get(key, [])
+        values = based.get(key, based.get("mental-models", []) if key == "mental_models" else [])
         if not isinstance(values, list) or any(
             not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]
             for item in values

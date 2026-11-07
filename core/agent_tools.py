@@ -14,6 +14,7 @@ from .control import QueueError
 from .diagnostics import recall_timeout
 from .identity import Scope, canonical, sha256
 from . import reading
+from . import reflection
 from .source import local_runner
 
 PREFIX = "hindsight_bridge_"
@@ -31,6 +32,11 @@ SCHEMAS = {
                      {"page_id": {"type": "string"}}, ["page_id"]),
 }
 NAMES = frozenset(PREFIX + name for name in SCHEMAS)
+REFLECT_NAME = PREFIX + "reflect"
+ALL_SCHEMAS = {**SCHEMAS, "reflect": (
+    "通过 Hindsight Reflect 综合本人的记忆回答复杂问题。会额外调用原生模型；回答和来源是外部参考，不是新事实。每条消息最多调用一次。",
+    {"query": {"type": "string"}}, ["query"],
+)}
 MAX_CALLS = 4
 MAX_BYTES = 16 * 1024
 NOTICE_TOKENS = 32
@@ -124,6 +130,9 @@ class ToolTurn:
     context_ref: object = None
     selected_provider: str | None = None
     prefix: str = ""
+    names: frozenset = NAMES
+    reflect_options: dict = field(default_factory=dict)
+    reflect_calls: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -147,7 +156,7 @@ class MemoryTools:
 
         class NativeReadTool(FunctionTool):
             def __init__(tool, owner, kind):
-                description, properties, required = SCHEMAS[kind]
+                description, properties, required = ALL_SCHEMAS[kind]
                 super().__init__(
                     name=PREFIX + kind, description=description,
                     parameters={"type": "object", "properties": copy.deepcopy(properties), "required": list(required),
@@ -159,7 +168,7 @@ class MemoryTools:
                 return await tool.owner.execute(context, tool.kind, kwargs)
 
         self.manager = context.get_llm_tool_manager()
-        for kind in SCHEMAS:
+        for kind in ALL_SCHEMAS:
             name = PREFIX + kind
             if self.manager.get_func(name) is not None:
                 continue
@@ -171,6 +180,7 @@ class MemoryTools:
         self.turns.clear()
         self.observed.clear()
         self.outcomes.clear()
+        self.plugin.reflection.outcomes.clear()
 
     async def close(self):
         self.closed = True
@@ -194,16 +204,16 @@ class MemoryTools:
             )
         ))
 
-    def active(self):
-        return bool(self.manager and set(self.owned) == NAMES and all(
-            self.manager.get_func(name) is tool and tool.active for name, tool in self.owned.items()
+    def active(self, required=NAMES):
+        return bool(required and self.manager and required <= self.owned.keys() and all(
+            self.manager.get_func(name) is self.owned[name] and self.owned[name].active for name in required
         ))
 
-    def eligible_tools(self, toolset):
+    def eligible_tools(self, toolset, required=NAMES):
         tools = getattr(toolset, "tools", [])
         provided = {tool.name for tool in tools if self.own_entry(tool) and getattr(tool, "active", False)}
         handoff = any(getattr(tool, "agent", None) is not None or tool.name.startswith("transfer_to_") for tool in tools)
-        return bool(self.active() and provided == NAMES and not handoff)
+        return bool(self.active(required) and required <= provided and not handoff)
 
     def light_entry(self, tool):
         original = self.owned.get(tool.name)
@@ -215,15 +225,15 @@ class MemoryTools:
     def turn_tools_available(self, turn, request):
         source = turn.toolset_ref()
         current = getattr(request, "func_tool", None)
-        if self.eligible_tools(current):
+        if self.eligible_tools(current, turn.names):
             return True
-        if not self.eligible_tools(source):
+        if not self.eligible_tools(source, turn.names):
             return False
         # Native skills_like schemas lose handler identity; the retained request copy
         # supplies ownership, while the public light schema supplies visibility.
         tools = getattr(current, "tools", [])
         return bool(
-            {tool.name for tool in tools if self.light_entry(tool) and getattr(tool, "active", False)} == NAMES
+            turn.names <= {tool.name for tool in tools if self.light_entry(tool) and getattr(tool, "active", False)}
             and not any(tool.name.startswith("transfer_to_") for tool in tools)
         )
 
@@ -239,7 +249,7 @@ class MemoryTools:
             enable = bool(turn and self.valid(turn, event))
         selected = copy.copy(original)
         selected.tools = [tool for tool in original.tools if not self.own_entry(tool) or (
-            enable and getattr(tool, "active", False)
+            enable and turn and tool.name in turn.names and getattr(tool, "active", False)
         )]
         request.func_tool = selected
         return original
@@ -305,8 +315,15 @@ class MemoryTools:
     def matches_request(turn, context):
         if not turn.prefix:
             return False
+        request = turn.request_ref()
+        prompt = getattr(request, "prompt", None)
+        if not isinstance(prompt, str) or not prompt.strip():
+            return False
         for message in getattr(context, "messages", []):
             if getattr(message, "role", None) != "user":
+                continue
+            parts = getattr(message, "content", [])
+            if not any(getattr(part, "text", None) == prompt and not getattr(part, "_no_save", False) for part in parts):
                 continue
             for part in getattr(message, "content", []):
                 if getattr(part, "_no_save", False) and getattr(part, "text", "").startswith(turn.prefix):
@@ -318,26 +335,33 @@ class MemoryTools:
         return turn.prefix if turn else ""
 
     def retire(self, turn):
-        event, request = turn.event_ref(), turn.request_ref()
         turn.expires = 0
+        self.remove_turn_tools(turn, frozenset(self.owned))
+
+    def remove_turn_tools(self, turn, names):
+        event, request = turn.event_ref(), turn.request_ref()
         if event is not None and self.turns.get(event) is turn:
             if request is not None:
                 original = getattr(request, "func_tool", None)
                 if original is not None:
                     selected = copy.copy(original)
-                    selected.tools = [tool for tool in original.tools if not self.own_entry(tool) and not self.light_entry(tool)]
+                    selected.tools = [tool for tool in original.tools if tool.name not in names or (
+                        not self.own_entry(tool) and not self.light_entry(tool)
+                    )]
                     request.func_tool = selected
             source = turn.toolset_ref()
             if source is not None:
-                source.tools = [tool for tool in source.tools if not self.own_entry(tool)]
+                source.tools = [tool for tool in source.tools if tool.name not in names or not self.own_entry(tool)]
+        turn.names = turn.names - names
 
     async def prepare(self, event, request, incoming, scope, original):
         guard = ReadGuard.freeze(self.plugin, scope)
         options = read_options(guard.queue, scope)
+        reflect_options = reflection.runtime_options(guard.queue, scope)
         key = (guard.queue.connection_id, scope["owner_id"])
         self.sequence += 1
         sequence = self.sequence
-        available, fingerprint = False, ""
+        available, reflect_available, fingerprint = False, False, ""
         model = getattr(request, "model", None)
         selected_provider = self.selected_provider(event)
         try:
@@ -345,6 +369,7 @@ class MemoryTools:
                 fingerprint, supported = await self.provider_state(event.unified_msg_origin, model, selected_provider)
             request_ref = weakref.ref(request)
             available = bool(supported and self.eligible_tools(original))
+            reflect_available = bool(supported and self.eligible_tools(original, frozenset({REFLECT_NAME})))
         except Exception:  # Capability discovery must not interrupt the existing automatic path.
             pass
         if not guard.valid(self.plugin, event):
@@ -355,12 +380,18 @@ class MemoryTools:
             "umo": event.unified_msg_origin, "provider": fingerprint, "model": model,
             "selected_provider": selected_provider,
             "available": available, "sequence": sequence,
+            "reflect_available": reflect_available,
         }
+        self.plugin.reflection.observe(scope, reflect_options, sequence, reflect_available)
         self.outcomes[key] = {
             "bank": scope["bank"], "revision": options["revision"], "sequence": sequence,
             "state": "not_called" if available else "unavailable", "calls": 0, "code": "",
+            "reflect_revision": reflect_options["revision"], "reflect_calls": 0,
         }
-        if options["mode"] == "tools" and available:
+        names = (NAMES if options["mode"] == "tools" and available else frozenset()) | (
+            frozenset({REFLECT_NAME}) if reflect_options["enabled"] and reflect_available else frozenset()
+        )
+        if names:
             limits = context_limits(self.plugin.config)
             turn = self.turns[event] = ToolTurn(
                 guard, options, incoming_digest(incoming, guard.queue.deployment_id), incoming.iso_timestamp,
@@ -369,6 +400,7 @@ class MemoryTools:
                 request_ref=request_ref, event_ref=weakref.ref(event),
                 selected_provider=selected_provider,
                 prefix="<hb-read-request:" + secrets.token_hex(12) + ">\n",
+                names=names, reflect_options=reflect_options,
             )
             self.filter_request(event, request, original, enable=True)
             turn.toolset_ref = weakref.ref(request.func_tool)
@@ -378,7 +410,7 @@ class MemoryTools:
         plugin = self.plugin
         request = turn.request_ref()
         if (
-            self.closed or time.monotonic() >= turn.expires or not self.active()
+            self.closed or time.monotonic() >= turn.expires or not self.active(turn.names)
             or request is None or getattr(request, "model", None) != turn.model
             or self.selected_provider(event) != turn.selected_provider
             or not self.turn_tools_available(turn, request)
@@ -386,22 +418,31 @@ class MemoryTools:
             or not local_runner(plugin.context.get_config(turn.umo))
             or plugin.context.get_config(turn.umo).get("agent_runner", {}).get("config", {}).get("model", {}).get("fallback_provider_ids")
             or read_options(turn.guard.queue, turn.guard.scope) != turn.options
-            or turn.options["mode"] != "tools"
+            or reflection.runtime_options(turn.guard.queue, turn.guard.scope) != turn.reflect_options
+            or turn.options["mode"] != "tools" and not turn.reflect_options["enabled"]
         ):
             return False
         incoming = plugin.snapshot(event)
         return bool(incoming and incoming_digest(incoming, turn.guard.queue.deployment_id) == turn.digest)
 
-    async def availability(self, scope):
+    def observation(self, scope):
         queue = self.plugin.outbox
         observation = self.observed.get((queue.connection_id, scope["owner_id"]), {})
         source = Scope(*json.loads(scope["identity_json"]))
         grant = queue.access.authorization(source.platform_instance_id, source.user_id)
         if (
             observation.get("bank") != scope["bank"] or observation.get("generation") != scope["generation"]
-            or not observation.get("available") or not self.active()
             or observation.get("source_id") != source.id or not grant or not grant["enabled"]
+            or grant["source_id"] != source.id
             or observation.get("authorization_revision") != grant["revision"]
+        ):
+            return {}
+        return observation
+
+    async def availability(self, scope, *, reflect=False):
+        observation = self.observation(scope)
+        if not observation.get("reflect_available" if reflect else "available") or not self.active(
+            frozenset({REFLECT_NAME}) if reflect else NAMES
         ):
             return False
         try:
@@ -419,15 +460,14 @@ class MemoryTools:
         queue = self.plugin.outbox
         options = read_options(queue, scope)
         key = (queue.connection_id, scope["owner_id"])
-        observation = self.observed.get(key, {})
+        observation = self.observation(scope)
         status = self.outcomes.get(key, {})
         if status.get("bank") != scope["bank"] or status.get("revision") != options["revision"]:
             status = {}
         return {
             **options,
             "observed_available": bool(
-                not options.get("invalidated") and observation.get("bank") == scope["bank"]
-                and observation.get("available") and self.active()
+                observation.get("available") and self.active()
             ),
             "status": {
                 **{key: status[key] for key in ("state", "calls", "code") if key in status},
@@ -435,21 +475,34 @@ class MemoryTools:
             },
         }
 
+    def reflect_public(self, scope):
+        queue = self.plugin.outbox
+        value = self.plugin.reflection.public(scope)
+        observation = self.observation(scope)
+        value["observed_available"] = bool(
+            not value.get("error") and observation.get("reflect_available") and self.active(frozenset({REFLECT_NAME}))
+        )
+        return value
+
     def notice(self, scope):
         value = self.public(scope)
         if value["observed_available"]:
             return "Hindsight 细节记忆由按需工具读取；本轮尚未调用，不能据此判断没有相关记忆。"
         return "Hindsight 按需工具未提供，请管理员检查模型工具支持、会话工具列表和回退模型/子代理交接设置，或切回自动召回。"
 
-    def record(self, turn, state, code=""):
+    def record(self, turn, state, code="", *, kind=""):
         key = (turn.guard.queue.connection_id, turn.guard.scope["owner_id"])
         if self.observed.get(key, {}).get("sequence") == turn.sequence:
             if code == "reading_changed":
                 self.observed[key]["available"] = False
+                self.observed[key]["reflect_available"] = False
             self.outcomes[key] = {
                 "bank": turn.guard.scope["bank"], "revision": turn.options["revision"],
                 "sequence": turn.sequence, "state": state, "calls": turn.calls, "code": code,
+                "reflect_revision": turn.reflect_options["revision"], "reflect_calls": turn.reflect_calls,
             }
+            if kind == "reflect":
+                self.plugin.reflection.record(turn, state, code)
 
     def deliver(self, turn, value):
         text = canonical(value)
@@ -496,26 +549,31 @@ class MemoryTools:
             turn is None or getattr(actual, "context", None) is not self.plugin.context
             or turn.context_ref is None or turn.context_ref() is not context
             or turn.expires == 0
+            or PREFIX + kind not in turn.names
         ):
             return canonical({"error": "tool_context_unavailable"})
         try:
             async with (
                 self.plugin.using_resources(),
-                asyncio.timeout(min(3, recall_timeout(self.plugin.config))),
+                asyncio.timeout(turn.reflect_options["timeout"] if kind == "reflect" else min(3, recall_timeout(self.plugin.config))),
                 turn.lock,
             ):
                 if self.turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
                     return canonical({"error": "tool_context_unavailable"})
+                if PREFIX + kind not in turn.names:
+                    return canonical({"error": "tool_context_unavailable"})
                 if turn.context_ref() is not context or not self.valid(turn, event):
-                    self.record(turn, "unavailable", "reading_changed")
+                    self.record(turn, "unavailable", "reading_changed", kind=kind)
                     return self.deliver(turn, {"error": "reading_changed"})
                 if (
                     turn.calls >= MAX_CALLS or 2 * turn.tokens - turn.output_tokens <= NOTICE_TOKENS
                     or MAX_BYTES - turn.output_bytes <= NOTICE_BYTES
                 ):
-                    self.record(turn, "budget", "tool_budget_exhausted")
+                    self.record(turn, "budget", "tool_budget_exhausted", kind=kind)
                     return self.deliver(turn, {"error": "tool_budget_exhausted"})
                 turn.calls += 1
+                if kind == "reflect":
+                    turn.reflect_calls += 1
 
                 async def recheck():
                     await self.plugin.prepare_sources()
@@ -534,7 +592,7 @@ class MemoryTools:
                     await recheck()
                     value = await self.read(turn, kind, arguments, recheck)
                     await recheck()
-                    self.record(turn, "success")
+                    self.record(turn, "success", kind=kind)
                     return self.deliver(turn, value)
                 except (HindsightError, QueueError, TimeoutError) as exc:
                     code = "tool_read_timeout" if isinstance(exc, TimeoutError) else (
@@ -549,11 +607,14 @@ class MemoryTools:
                         else:
                             queue.control.set_bank_state(queue.connection_id, turn.guard.scope["bank"], "missing")
                             queue.apply_control()
-                    self.record(turn, "error", code)
+                    self.record(turn, "error", code, kind=kind)
                     return self.deliver(turn, {"error": code, "message": self.plugin.diagnostic(code)})
                 except Exception:
-                    self.record(turn, "error", "tool_read_failed")
+                    self.record(turn, "error", "tool_read_failed", kind=kind)
                     return self.deliver(turn, {"error": "tool_read_failed"})
+                finally:
+                    if kind == "reflect":
+                        self.remove_turn_tools(turn, frozenset({REFLECT_NAME}))
         except QueueError as exc:
             if self.turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
@@ -561,11 +622,12 @@ class MemoryTools:
         except TimeoutError:
             if self.turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
-            self.record(turn, "error", "tool_read_timeout")
-            return self.deliver(turn, {"error": "tool_read_timeout"})
+            code = "reflect_timeout" if kind == "reflect" else "tool_read_timeout"
+            self.record(turn, "error", code, kind=kind)
+            return self.deliver(turn, {"error": code, "message": self.plugin.diagnostic(code)})
 
     async def read(self, turn, kind, arguments, recheck):
-        schema = SCHEMAS.get(kind)
+        schema = ALL_SCHEMAS.get(kind)
         if not schema or not isinstance(arguments, dict) or (
             set(arguments) - set(schema[1]) or not set(schema[2]) <= set(arguments)
         ):
@@ -577,6 +639,12 @@ class MemoryTools:
             "tokenizer": client.tokenizer,
         }
         base = {"kind": kind, "external_data": True}
+        if kind == "reflect":
+            query = reading.query_text(
+                arguments["query"], tokenizer=client.tokenizer,
+                budget=int(self.plugin.config.get("recall_query_tokens", 380)),
+            )
+            return await self.plugin.reflection.ask(turn, query, recheck, **limits)
         if kind in {"search_pages", "recall"}:
             query = reading.query_text(
                 arguments["query"], tokenizer=client.tokenizer,

@@ -21,6 +21,7 @@ let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
 let readingDraft = null;
+let reflectDraft = null;
 let bootstrapReadRevision = 0;
 let versionCheckRevision = 0;
 let versionCheck = null;
@@ -682,6 +683,7 @@ function renderScope() {
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
   renderBackground();
   renderReading();
+  renderReflect();
 }
 
 function renderReading() {
@@ -726,6 +728,59 @@ async function saveReading() {
     await refreshBootstrap();
     if (scopeId === draft.id) notify(response.message || "记忆读取方式已保存。", false, "reading-feedback");
   }, "reading-feedback");
+}
+
+function renderReflect({ discard = false } = {}) {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const saved = scope?.reflect || { revision: 0, enabled: false, timeout: 12 };
+  const snapshot = JSON.stringify([scopeId, scope?.bank, saved.revision, saved.scope_revision, data?.config_revision]);
+  const changedScope = !reflectDraft || reflectDraft.id !== scopeId || reflectDraft.bank !== scope?.bank;
+  if (discard || changedScope || !reflectDraft.dirty) {
+    reflectDraft = { snapshot, id: scopeId, bank: scope?.bank, revision: saved.revision,
+      scope_revision: saved.scope_revision, config_revision: data?.config_revision, dirty: false };
+    $("reflect-enabled").checked = !!saved.enabled;
+    $("reflect-timeout").value = String(saved.timeout ?? 12);
+    if (discard || changedScope) $("reflect-feedback").hidden = true;
+  }
+  const conflict = reflectDraft.snapshot !== snapshot;
+  const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error || locks.has("memory");
+  $("reflect-enabled").disabled = !!unavailable || (!saved.enabled && (!saved.observed_available || !!scope?.summary?.maintenance));
+  $("reflect-timeout").disabled = !!unavailable;
+  $("reflect-save").disabled = !!unavailable || conflict || !reflectDraft.dirty;
+  $("reflect-reload").disabled = locks.has("memory") || !scope;
+  $("reflect-conflict").hidden = !conflict;
+  $("reflect-effective").textContent = `已保存：${saved.enabled ? "开启" : "关闭"}；等待 ${saved.timeout ?? 12} 秒。`;
+  const messages = [];
+  if (saved.error) messages.push("Reflect 设置无法读取，请检查最新控制数据。");
+  if (saved.invalidated) messages.push("身份或记忆库已变化，Reflect 已关闭。");
+  if (saved.unknown) messages.push("Reflect 请求的执行终点不明，相关旧记忆库不能完成清空；需要 Hindsight 提供可核验的请求完成凭据。");
+  else if (saved.pending) messages.push("正在核对已发送的 Reflect 请求，请不要重复调用。");
+  const status = saved.status || {};
+  if (saved.enabled) {
+    if (scope?.mode === "paused" || scope?.summary?.maintenance) messages.push("记忆已暂停，Reflect 不会读取内容。");
+    else if (!saved.observed_available) messages.push("此会话暂不支持 Reflect；请检查工具、模型、回退模型及子代理设置。");
+    else if (status.state === "error" || status.state === "budget") messages.push(status.message || "上次 Reflect 调用失败，请查看聊天中的工具结果。");
+    else if (status.state === "success") messages.push("上次聊天已完成一次 Reflect 调用。");
+    else messages.push("上次聊天未调用 Reflect，不能据此判断没有相关记忆。");
+  } else if (!saved.observed_available) messages.push("先发送一条普通私聊，检查模型和会话是否支持 Reflect 工具。");
+  $("reflect-status").textContent = messages.join(" ");
+  $("reflect-status").hidden = !messages.length;
+}
+
+async function saveReflect() {
+  const draft = reflectDraft;
+  if (!draft) return;
+  await perform($("reflect-save"), "memory", async () => {
+    const timeout = Number($("reflect-timeout").value);
+    if (!Number.isSafeInteger(timeout) || timeout < 3 || timeout > 30) throw new Error("Reflect 等待须为 3 到 30 秒的整数。");
+    const payload = { enabled: $("reflect-enabled").checked, timeout, revision: draft.revision,
+      scope_revision: draft.scope_revision, config_revision: draft.config_revision };
+    const response = await bridge.apiPost(endpoint("reflect", draft.id), payload);
+    if (reflectDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
+    await refreshBootstrap();
+    if (scopeId === draft.id) notify(response.message || "Reflect 设置已保存。", false, "reflect-feedback");
+  }, "reflect-feedback");
 }
 
 function backgroundSnapshot(scope) {
@@ -1427,6 +1482,12 @@ $("bank-picker").addEventListener("change", () => selectScope($("bank-picker").v
 for (const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void setMode(button, button.dataset.mode));
 $("background-page").addEventListener("change", () => void saveBackground());
 $("reading-mode").addEventListener("change", () => void saveReading());
+for (const id of ["reflect-enabled", "reflect-timeout"]) $(id).addEventListener("input", () => {
+  if (reflectDraft) reflectDraft.dirty = true;
+  renderReflect();
+});
+$("reflect-save").addEventListener("click", () => void saveReflect());
+$("reflect-reload").addEventListener("click", () => renderReflect({ discard: true }));
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
 $("scope-bank").addEventListener("focus", () => $("scope-bank").select());

@@ -340,7 +340,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             db.execute("ALTER TABLE erasure_refs DROP COLUMN checked_pass")
             db.execute("PRAGMA user_version=2")
         self.open()
-        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 6)
         operation, listing = self.client.operation, self.client.list_operations
         reads, listings = [], 0
 

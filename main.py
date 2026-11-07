@@ -40,6 +40,7 @@ from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.qq_source import native_login
+from .core.reflection import Reflection
 from .core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
 from .core.worker import Worker
 
@@ -69,6 +70,7 @@ class HindsightBridge(Star):
         self.idle = asyncio.Event()
         self.idle.set()
         self.confirmations = {}
+        self.reflection = Reflection(self)
         self.read_tools = MemoryTools(self)
         self.read_tools.register()
         self.panel = MemoryPanel(self)
@@ -143,6 +145,15 @@ class HindsightBridge(Star):
             "tool_result_too_large": "读取结果超过工具输出上限，请缩小查询范围或通过官方面板查看",
             "history_response_too_large": "知识页历史超过传输上限，正文仍可单独读取；完整历史请通过官方面板查看",
             "tool_read_failed": "按需读取失败，请检查服务后重试，或使用官方面板查看",
+            "reflect_settings_invalid": "Reflect 设置无法读取，请检查最新控制库",
+            "reflect_changed": "Reflect 设置或记忆范围已变化，请刷新后重试",
+            "reflect_timeout": "Reflect 等待超时，已发送的原生请求仍会继续核对；不要重复调用",
+            "reflect_busy": "已有 Reflect 请求尚未结束，请稍后查看状态；不要重复发送",
+            "reflect_execution_unknown": "Reflect 请求的执行结果不明，相关旧记忆库不能完成清空；需要 Hindsight 提供可核验的请求完成凭据",
+            "reflect_transport_timeout": "Reflect 连接超时，无法确认服务端请求是否结束；相关旧记忆库的清空会保持暂停",
+            "reflect_no_answer": "Reflect 没有返回答案，可调整问题或使用 Recall 查找事实",
+            "reflect_response_too_large": "Reflect 原生响应超过传输上限，可缩小问题范围；请求终点不明时不能完成相关旧记忆库的清空",
+            "invalid_reflect_response": "Reflect 响应无法识别，请检查 Hindsight 版本及接口响应",
             "bank_not_created": "记忆库尚未建立，请先在读写记忆模式下保存一条普通聊天",
             "invalid_query_budget": "查询问题过长，请缩短后重试",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
@@ -427,7 +438,7 @@ class HindsightBridge(Star):
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
 
-    async def recall_text(self, bank, current, history=(), *, timestamp):
+    async def recall_text(self, bank, current, history=(), *, timestamp, prefix=""):
         timeout = recall_timeout(self.config)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         limits = context_limits(self.config)
@@ -446,7 +457,10 @@ class HindsightBridge(Star):
                 selected, block = [], ""
                 for item in results[:12]:
                     candidate = memory_block([*selected, item], limit=limit)
-                    if candidate and candidate != block and token_count(candidate, client.tokenizer) <= result_tokens:
+                    if (
+                        candidate and candidate != block and len(prefix + candidate) <= limit
+                        and token_count(prefix + candidate, client.tokenizer) <= result_tokens
+                    ):
                         selected.append(item)
                         block = candidate
                 if results and not block:
@@ -770,6 +784,7 @@ class HindsightBridge(Star):
             else:
                 memory = await self.recall_text(
                     scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp,
+                    prefix=request_prefix,
                 )
                 outcome = "success" if memory else "empty"
             content = memory or "Hindsight 检索完成，本轮未匹配到相关记忆。"
@@ -1389,6 +1404,7 @@ class HindsightBridge(Star):
                 )
 
     async def _close_resources(self):
+        await self.reflection.cancel()
         if self.connection_task is not None:
             self.connection_task.cancel()
             await asyncio.gather(self.connection_task, return_exceptions=True)
@@ -1412,6 +1428,7 @@ class HindsightBridge(Star):
     async def terminate(self):
         self.stopping = True
         await self.read_tools.close()
+        await self.reflection.close()
         self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()

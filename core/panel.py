@@ -18,6 +18,7 @@ import httpx
 from .client import HindsightClient, HindsightError
 from .background import MAX_BACKGROUND_PAGES, ReadGuard, check_page, context_limits, reference, save_reference
 from .agent_tools import read_options, save_options
+from . import reflection
 from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -68,6 +69,7 @@ class MemoryPanel:
             ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
             ("scopes/<scope_id>/background", ["GET", "POST"], self.background),
             ("scopes/<scope_id>/reading", ["GET", "POST"], self.reading),
+            ("scopes/<scope_id>/reflect", ["GET", "POST"], self.reflect),
         ]
         if hasattr(plugin.context, "register_web_api"):
             for route, method, handler in routes:
@@ -640,6 +642,9 @@ class MemoryPanel:
                     try:
                         result[-1]["reading"] = {
                             **plugin.read_tools.public(scope), "scope_revision": scope["revision"],
+                        }
+                        result[-1]["reflect"] = {
+                            **plugin.read_tools.reflect_public(scope), "scope_revision": scope["revision"],
                         }
                     except QueueError as exc:
                         result[-1]["reading"] = {"error": self.error_message(str(exc))}
@@ -1558,6 +1563,51 @@ class MemoryPanel:
                 options = save_options(guard.queue, scope, revision=options["revision"], mode=payload["mode"])
             return {"selection": options, "scope_revision": scope["revision"], "config_revision": revision,
                     "message": "记忆读取方式已保存。"}
+
+    async def reflect(self, scope_id):
+        from astrbot.api.web import request
+
+        posting = request.method == "POST"
+        payload = await self.body() if posting else {}
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            if not request.username:
+                raise PanelError("请使用 AstrBot 管理账号登录。")
+            plugin = self.plugin
+            await plugin.prepare_sources()
+            scope = self.scope(scope_id)
+            source = Scope(*json.loads(scope["identity_json"]))
+            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
+                raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改 Reflect 设置。")
+            guard = ReadGuard.freeze(plugin, scope, manual=True)
+            revision = self.config_revision()
+            options = reflection.read_options(guard.queue, scope)
+            closing = posting and payload.get("enabled") is False
+            if not guard.valid(plugin, metadata=closing):
+                raise QueueError("scope_not_available")
+            if posting:
+                if (
+                    set(payload) != {"enabled", "timeout", "revision", "scope_revision", "config_revision"}
+                    or type(payload.get("enabled")) is not bool or type(payload.get("timeout")) is not int
+                    or not 3 <= payload["timeout"] <= 30
+                    or type(payload.get("revision")) is not int or payload["revision"] != options["revision"]
+                    or type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
+                    or payload.get("config_revision") != revision
+                ):
+                    raise QueueError("reflect_changed")
+                if payload["enabled"] and not await plugin.read_tools.availability(scope, reflect=True):
+                    raise PanelError("请先发送一条普通私聊，确认模型与会话支持 Reflect 工具；回退模型或子代理交接不开放此功能。")
+                await plugin.prepare_sources()
+                if (
+                    not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
+                    or reflection.read_options(guard.queue, scope) != options
+                    or await self.bot_id(source.platform_instance_id) != source.bot_id
+                    or not guard.valid(plugin, metadata=closing)
+                ):
+                    raise QueueError("reflect_changed")
+                options = reflection.save_options(guard.queue, scope, revision=options["revision"],
+                                                  enabled=payload["enabled"], timeout=payload["timeout"])
+            return {"selection": options, "scope_revision": scope["revision"], "config_revision": revision,
+                    "message": "Reflect 设置已保存。"}
 
     async def background(self, scope_id):
         from astrbot.api.web import request
