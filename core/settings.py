@@ -31,6 +31,8 @@ def values(config):
 
 
 async def validate(payload):
+    if isinstance(payload, dict) and set(payload) == set(DEFAULTS) - {"context_max_chars"}:
+        payload = {**payload, "context_max_chars": NUMBERS["context_max_chars"][3]}
     if not isinstance(payload, dict) or set(payload) != set(DEFAULTS):
         raise ValueError("记忆参数不完整或含未知项目，请重新加载记忆设置后保存。")
     result = copy.deepcopy(payload)

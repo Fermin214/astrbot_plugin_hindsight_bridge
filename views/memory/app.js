@@ -4,7 +4,7 @@ const modeLabels = { active: "读写记忆", readonly: "只读记忆", paused: "
 let data = null;
 let settingsRevision = "";
 let parameterDraft = null;
-const parameterKeys = ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+const parameterKeys = ["background_max_tokens", "recall_max_tokens",
   "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
   "queue_max_tasks", "queue_max_mib", "command_prefixes"];
 let scopeId = "";
@@ -108,6 +108,7 @@ async function perform(button, group, work, feedbackTarget = "feedback") {
     }
     if (group === "setup") renderServiceVersion();
     if (group === "memory") renderScope();
+    if (group === "parameters") renderParameters();
   }
 }
 
@@ -353,6 +354,8 @@ function renderParameters({ discard = false } = {}) {
   }
   $("parameters-fields").disabled = locks.has("parameters");
   $("parameters-conflict").hidden = parameterDraft.revision === data.config_revision;
+  $("save-parameters").disabled = locks.has("parameters") || !parameterDraft.dirty
+    || parameterDraft.revision !== data.config_revision || !$("parameters-form").checkValidity();
   const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
     service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
   $("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
@@ -1360,7 +1363,7 @@ $("settings-form").addEventListener("submit", (event) => { event.preventDefault(
 $("parameters-form").addEventListener("input", () => {
   if (parameterDraft) parameterDraft.dirty = true;
   $("parameters-feedback").hidden = true;
-  renderParameterLimits();
+  renderParameters();
 });
 $("parameters-form").addEventListener("submit", (event) => {
   event.preventDefault();

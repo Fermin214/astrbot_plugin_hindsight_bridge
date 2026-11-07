@@ -29,7 +29,7 @@ function harness() {
       setAttribute(name, value) { this.attributes[name] = value; },
       removeAttribute(name) { delete this[name === "maxlength" ? "maxLength" : name]; },
       showModal() { this.open = true; }, close() { this.open = false; },
-      focus() {}, select() {}, reset() {}, reportValidity() { return true; },
+      focus() {}, select() {}, reset() {}, checkValidity() { return true; }, reportValidity() { return true; },
     };
   }
   const context = vm.createContext({
@@ -52,7 +52,7 @@ function harness() {
     maintenanceIdentity: "", maintenanceCheckedAt: 0,
     maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "", parameterDraft: null,
-    parameterKeys: ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+    parameterKeys: ["background_max_tokens", "recall_max_tokens",
       "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
       "queue_max_tasks", "queue_max_mib", "command_prefixes"],
     renderParameters() {},
@@ -100,17 +100,24 @@ function parameterHarness() {
 
 test("memory settings polling retains drafts and exposes conflicts without changing saved values", () => {
   const context = parameterHarness();
+  assert.equal(context.$("save-parameters").disabled, true);
   context.$("memory-background_max_tokens").value = "4096";
   context.parameterDraft.dirty = true;
   context.renderParameters();
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.$("parameters-conflict").hidden, true);
+  assert.equal(context.$("save-parameters").disabled, false);
+  context.$("parameters-form").checkValidity = () => false;
+  context.renderParameters();
+  assert.equal(context.$("save-parameters").disabled, true);
+  context.$("parameters-form").checkValidity = () => true;
   context.data.config_revision = "b";
   context.data.parameters.values = { ...context.data.parameters.values, background_max_tokens: 2000 };
   context.renderParameters();
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.parameterDraft.revision, "a");
   assert.equal(context.$("parameters-conflict").hidden, false);
+  assert.equal(context.$("save-parameters").disabled, true);
   context.renderParameters({ discard: true });
   assert.equal(context.$("memory-background_max_tokens").value, "2000");
   assert.equal(context.parameterDraft.revision, "b");
@@ -127,6 +134,7 @@ test("memory parameter saves use an independent payload and acknowledge the retu
     assert.deepEqual(Object.keys(payload).sort(), ["config_revision", "parameters"]);
     assert.equal(payload.config_revision, "a");
     assert.equal(payload.parameters.background_max_tokens, 4096);
+    assert.equal("context_max_chars" in payload.parameters, false);
     assert.equal(JSON.stringify(payload.parameters.command_prefixes), '["!","#"]');
     return { saved: true, config_revision: "b", message: "已保存并生效",
       parameters: { ...context.data.parameters, values: payload.parameters, effective: payload.parameters } };
@@ -136,6 +144,7 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   assert.equal(context.settingsRevision, "b");
   assert.equal(context.parameterDraft.revision, "b");
   assert.equal(context.parameterDraft.dirty, false);
+  assert.equal(context.$("save-parameters").disabled, true);
   assert.equal(context.data.parameters.effective.background_max_tokens, 4096);
   assert.equal(context.$("memory-command_prefixes").value, "!, #");
   context.$("memory-command_prefixes").value = "";
@@ -146,11 +155,11 @@ test("memory parameter saves use an independent payload and acknowledge the retu
 
 test("failed parameter saves retain input and revision and reject invalid numeric serialization", async () => {
   const context = parameterHarness();
-  context.$("memory-context_max_chars").value = "24000";
+  context.$("memory-recall_max_tokens").value = "6000";
   context.parameterDraft.dirty = true;
   context.bridge = { apiPost: async () => { throw new Error("配置已被更新"); } };
   await context.saveParameters();
-  assert.equal(context.$("memory-context_max_chars").value, "24000");
+  assert.equal(context.$("memory-recall_max_tokens").value, "6000");
   assert.equal(context.parameterDraft.revision, "a");
   assert.equal(context.parameterDraft.dirty, true);
   assert.match(context.$("parameters-feedback").textContent, /配置已被更新/);

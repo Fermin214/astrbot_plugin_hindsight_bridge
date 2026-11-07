@@ -17,7 +17,7 @@
     <div id="settings-conflict" class="notice error" role="status" hidden><p>设置已更新。</p><button id="reload-settings" type="button">重新加载设置</button></div>
     <section id="upgrade-notice" class="upgrade-notice" role="status" hidden>
       <strong id="upgrade-notice-title"></strong>
-      <div class="notice-actions"><button id="ignore-upgrade" type="button">忽略</button><button id="view-upgrade" type="button" class="primary">查看升级</button></div>
+      <div class="notice-actions"><button id="ignore-upgrade" type="button">忽略</button><button id="view-upgrade" type="button">查看升级</button></div>
     </section>
     <div id="paused-banks-notice" class="notice" role="status" hidden><span>有记忆库暂停读写</span><button id="show-paused-banks" type="button">查看暂停状态</button></div>
     <nav class="tabs" role="tablist" aria-label="插件页面">
@@ -47,12 +47,12 @@
           <div class="bank-row"><span>Bank ID</span><input id="scope-bank" readonly spellcheck="false" aria-label="Bank ID"><button id="copy-bank" type="button">复制 ID</button></div>
           <p id="bank-state" class="operation-status" hidden></p>
           <section class="memory-feature" aria-labelledby="reading-heading">
-            <div class="knowledge-row reading-row"><label id="reading-heading" for="reading-mode">细节记忆</label><select id="reading-mode"><option value="automatic">自动召回</option><option value="tools">按需工具</option></select><button id="reading-save" type="button" class="primary">保存</button></div>
+            <div class="knowledge-row reading-row"><label id="reading-heading" for="reading-mode">细节记忆</label><select id="reading-mode"><option value="automatic">自动召回</option><option value="tools">按需工具</option></select><button id="reading-save" type="button">保存</button></div>
             <p id="reading-status" class="operation-status" role="status" hidden></p>
             <p id="reading-feedback" class="operation-status" role="status" hidden></p>
           </section>
           <section class="memory-feature" aria-labelledby="reflect-heading">
-            <div class="reflect-controls"><label id="reflect-heading" class="check-label"><input id="reflect-enabled" type="checkbox">Reflect</label><label class="reflect-timeout" for="reflect-timeout">超时（秒）<input id="reflect-timeout" type="number" min="3" max="30" step="1" value="12" inputmode="numeric"></label><div class="actions reflect-actions"><button id="reflect-save" type="button" class="primary">保存</button></div></div>
+            <div class="reflect-controls"><label id="reflect-heading" class="check-label"><input id="reflect-enabled" type="checkbox">Reflect</label><label class="reflect-timeout" for="reflect-timeout">超时（秒）<input id="reflect-timeout" type="number" min="3" max="30" step="1" value="12" inputmode="numeric"></label><div class="actions reflect-actions"><button id="reflect-save" type="button">保存</button></div></div>
             <p id="reflect-conflict" class="operation-status" role="status" hidden>设置已更新，请刷新页面。</p>
             <p id="reflect-status" class="operation-status" role="status" hidden></p>
             <p id="reflect-feedback" class="operation-status" role="status" hidden></p>
@@ -62,7 +62,7 @@
             <ol id="background-selected" class="knowledge-pages" aria-label="知识页顺序"></ol>
             <p id="background-status" class="operation-status" role="status" hidden></p>
             <p id="background-feedback" class="operation-status" role="status" hidden></p>
-            <div class="actions"><button id="background-save" type="button" class="primary">保存</button><button id="background-recheck" type="button">刷新知识页</button><button id="background-settings" type="button">调整长度</button></div>
+            <div class="actions"><button id="background-save" type="button">保存</button><button id="background-recheck" type="button">刷新知识页</button><button id="background-settings" type="button">调整长度</button></div>
           </section>
         </section>
         <section class="content-section">
@@ -94,7 +94,7 @@
             <h3>模型</h3>
             <div class="form-grid"><label>记忆处理<select id="chat-provider"></select></label><label>向量<select id="embedding-provider"></select></label><label class="full-width">重排<select id="rerank-provider"></select></label></div>
             <p id="provider-help" class="operation-status" role="status" hidden></p>
-            <div class="actions"><button id="save-models" type="button" class="primary">保存并连接</button></div>
+            <div class="actions"><button id="save-models" type="button">保存并连接</button></div>
             <p id="model-progress" class="operation-status" role="status" hidden></p>
           </section>
           <form id="settings-form">
@@ -106,7 +106,7 @@
               <label class="full-width">Hindsight 管理地址<span class="input-action"><input id="control-plane-url" type="url" placeholder="https://memory.example.com" autocomplete="off"><button id="copy-control-plane" type="button">复制</button></span></label>
             </div>
             <p id="status-description" class="operation-status" role="status" hidden></p>
-            <div class="actions"><button id="save-settings" type="submit" class="primary">保存连接</button><button id="save-access" type="button" class="primary" hidden>保存管理地址</button><button id="check-connection" type="button">测试连接</button></div>
+            <div class="actions"><button id="save-settings" type="submit">保存连接</button><button id="save-access" type="button" hidden>保存管理地址</button><button id="check-connection" type="button">测试连接</button></div>
             <p id="connection-result" class="operation-status" role="status" hidden></p>
           </form>
           <section id="maintenance" class="connection-maintenance" hidden><div class="service-ops"><button id="backup-guide" type="button" data-guide="backup-dialog">备份</button><button id="go-upgrade" type="button" hidden>升级</button><button id="reinstall" type="button">重新部署</button><button id="prepare-uninstall" type="button" class="danger-quiet">卸载</button></div></section>
@@ -119,7 +119,6 @@
           <div class="form-grid">
             <label>知识页长度（token）<input id="memory-background_max_tokens" type="number" required min="64" max="8192" step="1"></label>
             <label>记忆参考（token）<input id="memory-recall_max_tokens" type="number" required min="256" max="8192" step="1"></label>
-            <label>记忆参考（字符）<input id="memory-context_max_chars" type="number" required min="256" max="32768" step="1"></label>
             <label>检索超时（秒）<input id="memory-recall_timeout" type="number" required min="0.2" max="30" step="any"></label>
             <label>知识页超时（秒）<input id="memory-background_timeout" type="number" required min="0.05" max="10" step="any"></label>
             <label>查询长度（token）<input id="memory-recall_query_tokens" type="number" required min="32" max="400" step="1"></label>
@@ -131,7 +130,7 @@
           <p id="parameters-conflict" class="operation-status error" role="status" hidden>设置已更新，请刷新页面。</p>
           <p id="parameters-limits" class="operation-status" role="status" hidden></p>
           <p id="parameters-feedback" class="operation-status" role="status" hidden></p>
-          <div class="actions"><button id="save-parameters" type="submit" class="primary">保存</button></div>
+          <div class="actions"><button id="save-parameters" type="submit">保存</button></div>
         </fieldset>
       </form>
       <section class="surface" id="deployment-info">
@@ -143,12 +142,12 @@
     <div id="feedback" class="feedback" role="status" aria-live="polite" hidden><span id="feedback-message"></span><button id="dismiss-feedback" type="button" aria-label="关闭提示">关闭</button></div>
   </main>
 
-  <dialog id="account-dialog" aria-labelledby="account-heading"><form id="account-form"><div class="dialog-header"><h2 id="account-heading">添加用户</h2><button type="button" data-close="account-dialog" aria-label="关闭">×</button></div><div class="dialog-fields"><label>平台实例<select id="account-platform" required></select></label><label><span id="account-user-label">用户 ID</span><input id="account-user" required autocomplete="off"></label></div><p id="platform-help" class="operation-status" hidden></p><p id="account-feedback" class="operation-status" role="status" hidden></p><div class="dialog-actions"><button id="save-account" class="primary" type="submit">添加用户</button></div></form></dialog>
-  <dialog id="authorization-dialog" aria-labelledby="authorization-heading"><div class="dialog-header"><h2 id="authorization-heading">确认机器人身份</h2></div><p id="authorization-description"></p><div class="dialog-actions"><button id="cancel-authorization" type="button">取消</button><button id="confirm-authorization" type="button" class="primary">确认开通</button></div></dialog>
+  <dialog id="account-dialog" aria-labelledby="account-heading"><form id="account-form"><div class="dialog-header"><h2 id="account-heading">添加用户</h2><button type="button" data-close="account-dialog" aria-label="关闭">×</button></div><div class="dialog-fields"><label>平台实例<select id="account-platform" required></select></label><label><span id="account-user-label">用户 ID</span><input id="account-user" required autocomplete="off"></label></div><p id="platform-help" class="operation-status" hidden></p><p id="account-feedback" class="operation-status" role="status" hidden></p><div class="dialog-actions"><button id="save-account" type="submit">添加用户</button></div></form></dialog>
+  <dialog id="authorization-dialog" aria-labelledby="authorization-heading"><div class="dialog-header"><h2 id="authorization-heading">确认机器人身份</h2></div><p id="authorization-description"></p><div class="dialog-actions"><button id="cancel-authorization" type="button">取消</button><button id="confirm-authorization" type="button">确认开通</button></div></dialog>
   <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading"><div class="dialog-header"><h2 id="remove-account-heading">移除用户</h2></div><p id="remove-account-user"></p><p>移除访问权限，保留记忆。</p><div class="dialog-actions"><button id="cancel-remove-account" type="button">取消</button><button id="confirm-remove-account" type="button" class="danger">确认移除</button></div><p id="remove-account-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading"><div class="dialog-header"><h2 id="forget-heading">清空记忆</h2></div><p>删除此记忆库的全部内容，无法撤销。</p><p id="forget-user" class="forget-user"></p><p id="forget-message" class="operation-status"></p><label class="check-label"><input id="forget-agree" type="checkbox">确认清空</label><div class="dialog-actions"><button id="cancel-forget" type="button">取消</button><button id="confirm-forget" type="button" class="danger" disabled>确认清空</button></div><p id="forget-feedback" class="operation-status" role="status"></p></dialog>
 
-  <dialog id="deployment-dialog" aria-labelledby="deployment-heading"><div class="dialog-header"><h2 id="deployment-heading">重新部署</h2><button type="button" data-close="deployment-dialog" aria-label="关闭">×</button></div><p id="deployment-description"></p><div id="installation" class="command-output" hidden><textarea id="install-command" aria-label="部署命令" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-command" type="button">复制命令</button></div></div><div class="dialog-actions"><button id="generate-deployment" type="button" class="primary">生成部署命令</button><button id="check-deployment" type="button" hidden>检查服务连接</button></div><p id="deployment-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="deployment-dialog" aria-labelledby="deployment-heading"><div class="dialog-header"><h2 id="deployment-heading">重新部署</h2><button type="button" data-close="deployment-dialog" aria-label="关闭">×</button></div><p id="deployment-description"></p><div id="installation" class="command-output" hidden><textarea id="install-command" aria-label="部署命令" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-command" type="button">复制命令</button></div></div><div class="dialog-actions"><button id="generate-deployment" type="button">生成部署命令</button><button id="check-deployment" type="button" hidden>检查服务连接</button></div><p id="deployment-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>删除这套配套服务的专属容器、全部记忆和专属数据卷，无法撤销。</p><label class="check-label"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="backup-dialog" aria-labelledby="backup-heading">
     <div class="dialog-header"><h2 id="backup-heading">备份与恢复</h2><button type="button" data-close="backup-dialog" aria-label="关闭">×</button></div>

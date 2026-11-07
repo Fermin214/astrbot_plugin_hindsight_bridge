@@ -41,7 +41,7 @@ p, span { overflow-wrap: anywhere; }
 button, input, select, textarea { font: inherit; }
 button, .button { cursor: pointer; min-height: 42px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 16px; background: var(--surface); color: var(--text); line-height: 1.5; }
 button:hover:enabled { border-color: var(--accent); background: var(--tint); }
-button:disabled { cursor: not-allowed; opacity: .55; }
+button:disabled { cursor: not-allowed; background: var(--bg); border-color: var(--line); color: var(--muted); opacity: .65; }
 input, select, textarea { display: block; width: 100%; min-height: 44px; border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; background: var(--surface); color: var(--text); font-weight: 400; }
 input::placeholder { color: var(--muted); opacity: 1; }
 input[readonly] { background: var(--bg); }
@@ -54,7 +54,6 @@ textarea { resize: vertical; min-height: 96px; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 label { display: grid; gap: 9px; min-width: 0; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.primary { background: var(--tint); border-color: var(--accent); font-weight: 600; }
 .danger { background: var(--danger-bg); border-color: var(--danger); color: var(--danger); }
 .danger:hover:enabled { background: var(--danger-bg); border-color: var(--danger); }
 a { color: var(--accent); }
