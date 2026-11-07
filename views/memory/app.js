@@ -481,7 +481,10 @@ function renderStatus() {
   const setup = $("panel-setup");
   const connection = $("setup-fields");
   if (connected === true || data.config.configured) {
-    if (setup.lastElementChild !== connection) setup.append(connection);
+    const deployment = $("deployment-info");
+    if (setup.lastElementChild !== deployment || deployment.previousElementSibling !== connection) {
+      setup.append(connection, deployment);
+    }
   } else if (setup.firstElementChild !== connection) setup.prepend(connection);
   const attention = !!status.recovering || !data.config.configured || connected !== true;
   $("service-alert").hidden = !attention;
