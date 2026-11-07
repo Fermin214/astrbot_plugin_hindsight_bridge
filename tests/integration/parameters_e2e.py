@@ -74,8 +74,14 @@ class ManagedParameters(Feedback):
                 await page.reload()
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-                await self.single_page(page, frame, bank, short)
-                self.report["not_covered"].append("injected page latency on the direct managed API")
+                if self.settings.get("parameters_only"):
+                    from parameter_panel import verify_advanced
+
+                    await verify_advanced(self, frame)
+                    self.report.update(complete=True, acceptance_scope="native managed advanced parameters and queue admission")
+                else:
+                    await self.single_page(page, frame, bank, short)
+                    self.report["not_covered"].append("injected page latency on the direct managed API")
                 self.save()
                 assert hashlib.sha256(core.read_bytes()).hexdigest() == original
             finally:

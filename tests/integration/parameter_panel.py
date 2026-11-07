@@ -1,5 +1,6 @@
 """Native iframe parameter writes, readback and identity continuity."""
 
+import asyncio
 import json
 
 from live_e2e import ALICE, database, jsonl, until
@@ -40,6 +41,10 @@ async def save_parameters(acceptance, frame, **updates):
 async def verify_advanced(acceptance, frame):
     await acceptance.drained()
     scope = await acceptance.scope()
+    original_mode = scope["mode"]
+    if original_mode != "active":
+        await acceptance.action(scope["scope_id"], "mode", mode="active")
+        await asyncio.sleep(1.1)
     route = acceptance.prefix + "/scopes/" + scope["scope_id"] + "/background"
     before = await acceptance.http("GET", route)
     await save_parameters(acceptance, frame, recall_query_tokens=32, query_tokenizer="cl100k_base",
@@ -64,7 +69,7 @@ async def verify_advanced(acceptance, frame):
     try:
         before_tasks = len(acceptance.tasks())
         await acceptance.bot.chat(ALICE, "A synthetic capacity message. " * 100)
-        assert len(acceptance.tasks()) == before_tasks + 1
+        assert len(acceptance.tasks()) == before_tasks + 1, acceptance.tasks()
         before_tasks += 1
         await acceptance.bot.chat(ALICE, "This synthetic second message exceeds the one-record queue limit.")
         assert len(acceptance.tasks()) == before_tasks
@@ -76,4 +81,6 @@ async def verify_advanced(acceptance, frame):
                               recall_timeout=10, background_timeout=1)
     await acceptance.drained()
     await save_parameters(acceptance, frame, recall_query_tokens=380, query_tokenizer="o200k_base", command_prefixes=[])
+    if original_mode != "active":
+        await acceptance.action(scope["scope_id"], "mode", mode=original_mode)
     acceptance.passed("native_advanced_settings_change_token_counts_query_budget_queue_admission_and_command_exclusions")

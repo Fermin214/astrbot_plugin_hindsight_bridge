@@ -31,13 +31,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("existing", "managed"), required=True)
+    parser.add_argument("--scope", choices=("single-page", "advanced"), default="single-page")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
     args = parser.parse_args()
     if args.mode == "existing":
         subprocess.run([sys.executable, str(ROOT / "tools/run-feedback-e2e.py"), "--output", str(args.output),
                         "--astrbot-version", args.astrbot_version, "--hindsight-version", args.hindsight_version,
-                        "--scope", "single-page"], check=True)
+                        "--scope", "parameters" if args.scope == "advanced" else "single-page"], check=True)
         return
     if args.hindsight_version != "1.2.0":
         parser.error("new managed installations use Hindsight 1.2.0")
@@ -49,7 +50,8 @@ def main():
         state = FixtureManaged(args)
         state.model_environment = args.model_environment
         state.driver = "parameters_e2e.py"
-        state.settings.update(parameter_managed=True, stop_timeout=10, chat_tokens=512)
+        state.settings.update(parameter_managed=True, parameters_only=args.scope == "advanced",
+                              stop_timeout=10, chat_tokens=512)
         try:
             state.prepare_network()
             model = Model((state.gateway_host, 0), state.settings["chat_token"])

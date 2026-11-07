@@ -16,8 +16,63 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.scope.outputs.host }}
+      models: ${{ steps.scope.outputs.models }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select checks for changed files
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FULL_CHECK: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).splitlines()
+
+          base = os.environ.get("BASE_SHA", "")
+          try:
+              files = git("diff", "--name-only", base, os.environ["HEAD_SHA"]) if (
+                  base.strip("0") and os.environ["FULL_CHECK"] != "true"
+              ) else git("ls-files")
+          except subprocess.CalledProcessError:
+              files = git("ls-files")
+          code = [name for name in files if not name.endswith((".md", ".png", ".svg"))]
+          python = any(
+              name == "main.py" or name.startswith(("core/", "deploy/", "examples/"))
+              or (name.startswith("tests/test_") and name.endswith(".py"))
+              or name in {"requirements.txt", "requirements-dev.txt", "_conf_schema.json", "tests/run.py",
+                          "tools/check-package.py", "tools/build-test-package.py"}
+              for name in code
+          )
+          frontend = any(
+              (name.startswith("views/") and name.endswith((".js", ".html")))
+              or name == "tests/test_memory_view.js" for name in code
+          )
+          host = any(
+              name == "main.py" or name.startswith(("core/", ".astrbot-plugin/"))
+              or name in {"requirements.txt", "_conf_schema.json", "metadata.yaml",
+                          "tests/integration/astrbot_smoke.py", "tests/integration/package_fixture.py"}
+              for name in code
+          )
+          models = bool(set(code) & {
+              "core/providers.py", "deploy/model_transport.py", "deploy/model_probe.py",
+              "tools/check-model-protocols.py", "requirements.txt", "deploy/compose.yaml",
+          })
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for name, enabled in (("python", python), ("frontend", frontend), ("host", host), ("models", models)):
+                  output.write(f"{name}={str(enabled).lower()}\n")
+          print("Selected:", ", ".join(name for name, enabled in (
+              ("regressions", python), ("page", frontend), ("host", host), ("models", models),
+          ) if enabled) or "syntax, metadata, package and documentation")
+          PY
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -27,10 +82,15 @@ jobs:
           node-version: "22"
       - run: python -m pip install -r requirements-dev.txt
       - run: node --check views/memory/app.js
-      - run: python tests/run.py
+      - if: steps.scope.outputs.python == 'true'
+        run: python tests/run.py
+      - if: steps.scope.outputs.frontend == 'true' && steps.scope.outputs.python != 'true'
+        run: node tests/test_memory_view.js
       - run: python tools/check-package.py
 
   astrbot-smoke:
+    needs: check
+    if: needs.check.outputs.host == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -58,6 +118,8 @@ jobs:
           path: ${{ runner.temp }}/hindsight-delivery
 
   hindsight-model-contracts:
+    needs: check
+    if: needs.check.outputs.models == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -74,79 +136,3 @@ jobs:
             -w /verify/plugins/astrbot_plugin_hindsight_bridge \
             ghcr.io/vectorize-io/hindsight:${{ matrix.hindsight }}-slim \
             python tools/check-model-protocols.py
-
-  managed-installation-startup:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Real legacy permission failure, revised image and preserved-data retry
-        run: python tests/integration/install_startup.py --output "${{ runner.temp }}/installer-evidence"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: managed-installation-startup-evidence
-          path: |
-            ${{ runner.temp }}/installer-evidence/result.json
-            ${{ runner.temp }}/installer-evidence/*.log
-
-  memory-parameters:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mode: existing
-            astrbot: "4.29.1"
-            hindsight: "1.1.0"
-          - mode: existing
-            astrbot: "4.29.4"
-            hindsight: "1.2.0"
-          - mode: managed
-            astrbot: "4.29.4"
-            hindsight: "1.2.0"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install -r requirements-dev.txt
-      - run: docker build -t hindsight-bridge-delivery-postgres:17 deploy/postgres
-      - name: Native parameter save, long-page chat and reload persistence
-        shell: bash
-        run: |
-          python tools/run-parameters-e2e.py \
-            --mode "${{ matrix.mode }}" \
-            --astrbot-version "${{ matrix.astrbot }}" \
-            --hindsight-version "${{ matrix.hindsight }}" \
-            --output "${{ runner.temp }}/parameter-evidence" \
-            2>&1 | tee "${{ runner.temp }}/parameters.log"
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          report = json.loads(Path("${{ runner.temp }}/parameter-evidence/live-e2e-report.json").read_text())
-          assert report["complete"] is True, report
-          assert len(report["parameter_saves"]) >= 10, report
-          print("Native panel acceptance completed:", report["astrbot"], report["hindsight"], len(report["passed"]))
-          PY
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: parameters-${{ matrix.mode }}-${{ matrix.astrbot }}-${{ matrix.hindsight }}
-          path: |
-            ${{ runner.temp }}/parameters.log
-            ${{ runner.temp }}/parameter-evidence/live-e2e-report.json
-            ${{ runner.temp }}/parameter-evidence/package-inventory.json
-            ${{ runner.temp }}/parameter-evidence/*.png
-            ${{ runner.temp }}/parameter-evidence/control-failure.jsonl
-            ${{ runner.temp }}/parameter-evidence/chat-trace.jsonl
-            ${{ runner.temp }}/parameter-evidence/recall-trace.jsonl

@@ -320,6 +320,14 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("parameters_only"):
+                    from parameter_panel import verify_advanced
+
+                    await verify_advanced(self, frame)
+                    self.report["acceptance_scope"] = "native advanced parameter save, tokenizer, query budget, queue admission and exclusions"
+                    self.report["complete"] = True
+                    self.save()
+                    return
                 if self.settings.get("single_page"):
                     await self.single_page(page, frame, bank, short)
                     assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
