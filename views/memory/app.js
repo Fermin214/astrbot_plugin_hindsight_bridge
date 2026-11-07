@@ -343,6 +343,14 @@ function hydrateConfig() {
   updateProviderHelp();
 }
 
+function renderControlPlane() {
+  let address = "";
+  try { address = controlPlaneUrl(data?.config?.control_plane_url || ""); } catch { /* Invalid saved addresses stay in settings. */ }
+  $("control-plane-access").hidden = !address;
+  $("saved-control-plane-url").value = address;
+  $("configure-control-plane").hidden = !!address;
+}
+
 function renderParameters({ discard = false } = {}) {
   const snapshot = data?.parameters;
   if (!snapshot) return;
@@ -517,6 +525,7 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   if (revision !== bootstrapReadRevision) return;
   if (settingsRevision && next.config_revision !== settingsRevision) clearCommands();
   data = next;
+  renderControlPlane();
   renderParameters();
   if (managedSetup?.installation_id && data.config.managed && data.installation_id === managedSetup.installation_id) managedSetup.providers = data.providers;
   if (hydrate) hydrateConfig();
@@ -1490,6 +1499,13 @@ $("reflect-save").addEventListener("click", () => void saveReflect());
 $("reflect-reload").addEventListener("click", () => renderReflect({ discard: true }));
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
+$("copy-control-plane").addEventListener("click", () => void perform($("copy-control-plane"), "copy",
+  () => copyValue("saved-control-plane-url", "管理地址已复制，请在浏览器打开。")));
+$("saved-control-plane-url").addEventListener("focus", () => $("saved-control-plane-url").select());
+$("configure-control-plane").addEventListener("click", () => {
+  activateTab("setup");
+  $("control-plane-url").focus();
+});
 $("scope-bank").addEventListener("focus", () => $("scope-bank").select());
 $("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
   const response = await bridge.apiPost(endpoint("action"), { action: "retry" });

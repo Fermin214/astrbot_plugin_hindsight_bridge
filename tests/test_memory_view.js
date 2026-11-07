@@ -54,7 +54,7 @@ function harness() {
     parameterKeys: ["background_max_tokens", "recall_max_tokens", "context_max_chars",
       "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
       "queue_max_tasks", "queue_max_mib", "command_prefixes"],
-    renderParameters() {},
+    renderParameters() {}, renderControlPlane() {},
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
