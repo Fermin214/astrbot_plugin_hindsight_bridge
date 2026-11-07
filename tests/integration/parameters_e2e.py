@@ -75,6 +75,8 @@ class ManagedParameters(Feedback):
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 await self.single_page(page, frame, bank, short)
+                self.report["not_covered"].append("injected page latency on the direct managed API")
+                self.save()
                 assert hashlib.sha256(core.read_bytes()).hexdigest() == original
             finally:
                 await self.bot.close()

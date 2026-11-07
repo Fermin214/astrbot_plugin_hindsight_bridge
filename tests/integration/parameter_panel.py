@@ -46,29 +46,34 @@ async def verify_advanced(acceptance, frame):
                           queue_max_tasks=1, queue_max_mib=1, command_prefixes=["HB-IGNORE:"])
     after = await acceptance.http("GET", route)
     assert before["check"]["tokens"] != after["check"]["tokens"], (before["check"], after["check"])
+    await acceptance.bot.chat(ALICE, "A synthetic bounded-query message. " * 100)
+    await acceptance.drained()
+    if not acceptance.settings.get("parameter_managed"):
+        import tiktoken
+
+        query = jsonl("recall-trace")[-1]["body"]["query"]
+        assert len(tiktoken.get_encoding("cl100k_base").encode(query, disallowed_special=())) <= 32
     await acceptance.bot.chat(ALICE, "HB-IGNORE: this synthetic message must never become a saved material.")
     await acceptance.bot.chat(ALICE, "/hindsight status")
     assert "Hindsight 知识页" not in acceptance.latest_wire()
     await acceptance.drained()
     assert "HB-IGNORE:" not in json.dumps(database(acceptance.runtime, "SELECT payload FROM outbox"))
-    await acceptance.control("hold_extraction")
-    held_before = len(jsonl("held-extraction-trace"))
+    await save_parameters(acceptance, frame, recall_timeout=0.3, background_timeout=0.05)
+    managed = acceptance.settings.get("parameter_managed")
+    await acceptance.control("managed_pause" if managed else "stop_hindsight")
     try:
-        await acceptance.bot.chat(ALICE, "A synthetic capacity message. " * 100)
-        await until(lambda: len(jsonl("held-extraction-trace")) > held_before, timeout=45)
         before_tasks = len(acceptance.tasks())
+        await acceptance.bot.chat(ALICE, "A synthetic capacity message. " * 100)
+        assert len(acceptance.tasks()) == before_tasks + 1
+        before_tasks += 1
         await acceptance.bot.chat(ALICE, "This synthetic second message exceeds the one-record queue limit.")
         assert len(acceptance.tasks()) == before_tasks
+        assert (await acceptance.scope())["summary"]["recall"]["code"] == "queue_capacity_reached"
     finally:
-        await acceptance.control("release_extraction")
-        await save_parameters(acceptance, frame, queue_max_tasks=10000, queue_max_mib=64)
+        await acceptance.control("managed_unpause" if managed else "start_hindsight")
+        await acceptance.backend_ready()
+        await save_parameters(acceptance, frame, queue_max_tasks=10000, queue_max_mib=64,
+                              recall_timeout=10, background_timeout=1)
     await acceptance.drained()
-    if not acceptance.settings.get("parameter_managed"):
-        import tiktoken
-
-        queries = jsonl("recall-trace")
-        assert queries
-        query = queries[-1]["body"]["query"]
-        assert len(tiktoken.get_encoding("cl100k_base").encode(query, disallowed_special=())) <= 32
     await save_parameters(acceptance, frame, recall_query_tokens=380, query_tokenizer="o200k_base", command_prefixes=[])
     acceptance.passed("native_advanced_settings_change_token_counts_query_budget_queue_admission_and_command_exclusions")

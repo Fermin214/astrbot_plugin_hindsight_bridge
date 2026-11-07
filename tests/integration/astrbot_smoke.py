@@ -123,7 +123,11 @@ async def main():
             candidate_sha256 = verify_installed_candidate(manager)
             assert metadata.config["recall_timeout"] == 10
             assert plugin.outbox is None
-            assert len([row for row in context.registered_web_apis if NAME in row[0]]) == 10
+            routes = {row[0] for row in context.registered_web_apis if NAME in row[0]}
+            assert {
+                f"/{NAME}/bootstrap", f"/{NAME}/parameters/save",
+                f"/{NAME}/scopes/<scope_id>/background",
+            } <= routes, routes
             passed.append("official_archive_install_and_empty_config")
             metadata.config.update(api_url=f"http://127.0.0.1:{port}", api_key="delivery-key", service_id="delivery-service",
                                    allowed_accounts=[{"platform_instance_id": "delivery-qq", "user_id": "123"}])

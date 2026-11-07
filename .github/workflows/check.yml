@@ -130,6 +130,14 @@ jobs:
             --hindsight-version "${{ matrix.hindsight }}" \
             --output "${{ runner.temp }}/parameter-evidence" \
             2>&1 | tee "${{ runner.temp }}/parameters.log"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("${{ runner.temp }}/parameter-evidence/live-e2e-report.json").read_text())
+          assert report["complete"] is True, report
+          assert len(report["parameter_saves"]) >= 10, report
+          print("Native panel acceptance completed:", report["astrbot"], report["hindsight"], len(report["passed"]))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -140,3 +148,5 @@ jobs:
             ${{ runner.temp }}/parameter-evidence/package-inventory.json
             ${{ runner.temp }}/parameter-evidence/*.png
             ${{ runner.temp }}/parameter-evidence/control-failure.jsonl
+            ${{ runner.temp }}/parameter-evidence/chat-trace.jsonl
+            ${{ runner.temp }}/parameter-evidence/recall-trace.jsonl
