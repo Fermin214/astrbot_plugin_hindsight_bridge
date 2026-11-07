@@ -372,6 +372,19 @@ class Control:
                     "page_id": "", "mental_model_id": "", "pages": [],
                     "invalidated": bool(previous.get("page_id") or previous.get("pages") or previous.get("invalidated")),
                 }), key))
+            key = "reading:" + sha256(canonical([connection, owner_id]))
+            previous = self.setting(key)
+            if previous:
+                try:
+                    previous = json.loads(previous)
+                    revision = previous["revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError):
+                    raise QueueError("reading_settings_invalid") from None
+                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
+                    "format": 1, "revision": revision + 1, "mode": "automatic", "invalidated": True,
+                }), key))
             self.bump()
         return self.db.execute(
             "SELECT * FROM erasures WHERE forget_id=?", (fid,)

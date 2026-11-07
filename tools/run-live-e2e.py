@@ -186,6 +186,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 elif body["action"] == "extraction_status":
                     self.reply(200, json.dumps({"held": self.server.extraction_held}).encode())
                     return
+                elif body["action"] == "collect_astrbot_logs":
+                    name = state.owner + "-astrbot"
+                    state.owned(name)
+                    output = subprocess.run(["docker", "logs", name], check=True, capture_output=True)
+                    path = state.output / "astrbot-current.log"
+                    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as file:
+                        file.write(output.stdout + output.stderr)
                 elif body["action"] in {"managed_install", "managed_reinstall", "managed_upgrade", "managed_uninstall",
                                        "managed_pause", "managed_unpause"}:
                     state.managed_control(body["action"])

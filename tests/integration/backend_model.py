@@ -25,6 +25,60 @@ def arguments(name, content=MARKER):
     return {"query": "Cedar-120", "reason": "synthetic fixture", "max_tokens": 256}
 
 
+def tool_value(message):
+    content = message.get("content", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    try:
+        value = json.loads(content)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def bridge_tool_reply(body):
+    """Drive only synthetic chats; native Hindsight model requests use their own tools."""
+    messages = body.get("messages", [])
+    last_user = next((index for index in range(len(messages) - 1, -1, -1)
+                      if messages[index].get("role") == "user"), -1)
+    if last_user >= 0 and str(messages[last_user].get("content", "")).startswith("You have decided to call tool(s):"):
+        last_user = next((index for index in range(last_user - 1, -1, -1)
+                          if messages[index].get("role") == "user"), -1)
+    query = json.dumps(messages[last_user].get("content", "")) if last_user >= 0 else ""
+    current = [message for message in messages[last_user + 1:] if message.get("role") == "tool"]
+    history = [tool_value(message) for message in messages if message.get("role") == "tool"]
+    page = next((value for value in reversed(history) if isinstance(value, dict) and value.get("kind") == "page"), {})
+    kind, params = "", {}
+    if "HB-TOOLS-FLOW" in query or "HB-TOOLS-GUARDS" in query:
+        if not current:
+            kind, params = "search_pages", {"query": "HB-TOOLS-PAGE"}
+        elif len(current) == 1:
+            values = tool_value(current[0]).get("items", [])
+            selected = next((value for value in values if "HB-TOOLS-PAGE" in value.get("name", "")), None)
+            if selected:
+                kind, params = "read_page", {"page_id": selected["id"]}
+        elif len(current) == 2:
+            kind, params = "recall", {"query": "Cedar-120"}
+    elif "HB-TOOLS-CONTINUE" in query and len(current) < 2 and page.get("next_line"):
+        kind, params = "read_page", {"page_id": page["page_id"], "start_line": page["next_line"], "version": page["version"]}
+    elif "HB-TOOLS-SOURCES" in query and page and len(current) < 2:
+        kind, params = ("page_sources" if not current else "page_history"), {"page_id": page["page_id"]}
+    elif "HB-TOOLS-STALE" in query and not current and page.get("next_line"):
+        kind, params = "read_page", {"page_id": page["page_id"], "start_line": page["next_line"], "version": page["version"]}
+    elif "HB-TOOLS-QUOTA" in query and len(current) < 6:
+        kind, params = "recall", {"query": "Cedar-120 quota " + str(len(current))}
+    elif "HB-TOOLS-PROBE-" in query and not current:
+        kind, params = "recall", {"query": "Cedar-120"}
+    if not kind:
+        return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
+    if not any(tool.get("function", {}).get("name") == "hindsight_bridge_" + kind for tool in body.get("tools", [])):
+        return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"
+    return {"role": "assistant", "content": None, "tool_calls": [{
+        "id": "bridge-fixture-" + str(len(current)), "type": "function",
+        "function": {"name": "hindsight_bridge_" + kind, "arguments": json.dumps(params)},
+    }]}, "tool_calls"
+
+
 class Model(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -71,6 +125,10 @@ class Handler(BaseHTTPRequestHandler):
                 page_content = "HB-FEEDBACK-LONG complete paragraph. " * 120
             elif "HB-BUDGET-MEDIUM" in request_text:
                 page_content = "neutral " * 210
+            elif "HB-TOOLS-PAGE" in request_text:
+                prefix = "HB-TOOLS-V2" if "HB-TOOLS-PAGE-V2" in request_text else "HB-TOOLS-V1"
+                page_content = "".join(f"{prefix}-LINE-{index:03d} complete original paragraph; conditions preserved.\n"
+                                       for index in range(200))
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):
@@ -81,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
             properties = schema.get("properties", {})
             fact = definition(schema, properties.get("facts", {}).get("items", {}))
             fields = fact.get("properties", {}) if isinstance(fact, dict) else {}
-            content, finish = "ok", "stop"
+            content, finish, message = "ok", "stop", None
             if "what" in fields:
                 self.server.counts["extraction"] += 1
                 self.server.extraction_started.set()
@@ -100,6 +158,11 @@ class Handler(BaseHTTPRequestHandler):
             elif "creates" in properties:
                 self.server.counts["consolidation"] += 1
                 content = '{"creates":[],"updates":[],"deletes":[]}'
+            elif (
+                getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512
+                and "HB-TOOLS-" in str(body.get("messages", []))
+            ):
+                message, finish = bridge_tool_reply(body)
             elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
                 choice = body.get("tool_choice")
                 name = choice.get("function", {}).get("name") if isinstance(choice, dict) else "done"
@@ -126,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
             elif "answer_found" in properties or "markdown" in properties:
                 content = json.dumps(arguments("done", page_content))
                 self.server.counts["page"] += 1
-            if finish != "tool_calls":
+            if finish != "tool_calls" and message is None:
                 message = {"role": "assistant", "content": content}
             result = {
                 "id": "fixture", "object": "chat.completion", "created": int(time.time()),

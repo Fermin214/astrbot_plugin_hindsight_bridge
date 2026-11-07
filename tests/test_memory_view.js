@@ -58,8 +58,8 @@ function harness() {
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
-    backgroundReadRevision: 0, backgroundDraft: null,
-    renderBackground() {}, renderScope() {},
+    backgroundReadRevision: 0, backgroundDraft: null, readingDraft: null,
+    renderBackground() {}, renderReading() {}, renderScope() {},
     clearCommands() {},
     renderServiceVersion() {},
     clearUpgrade() {},
@@ -972,6 +972,40 @@ test("multiple pages render usage per page and persist ordering and removal", as
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(JSON.stringify(writes[1].page_ids), '["kp-2"]');
   assert.equal(writes[1].enabled, true);
+});
+
+test("reading mode preserves original revisions and drops feedback after user changes", async () => {
+  const context = harness();
+  for (const name of ["renderReading", "saveReading", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  context.$("reading-mode").replaceChildren(context.option("automatic", "auto"), context.option("tools", "tools"));
+  context.data = { config_revision: "config-1", status: {}, scopes: [{
+    scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
+    reading: { revision: 2, scope_revision: 3, mode: "automatic", observed_available: false },
+  }] };
+  context.scopeId = "one";
+  context.renderReading();
+  assert.equal(context.$("reading-mode").options[1].disabled, true);
+  context.data.scopes[0].reading.observed_available = true;
+  context.renderReading();
+  assert.equal(context.$("reading-mode").options[1].disabled, false);
+  context.$("reading-mode").value = "tools";
+  let release;
+  context.bridge = { apiPost: (route, payload) => {
+    assert.equal(route, "scopes/one/reading");
+    assert.equal(payload.revision, 2);
+    assert.equal(payload.scope_revision, 3);
+    assert.equal(payload.config_revision, "config-1");
+    return new Promise((resolve) => { release = resolve; });
+  } };
+  const saving = context.saveReading();
+  context.scopeId = "two";
+  context.data.scopes.push({ scope_id: "two", bank: "bank-two", summary: {},
+    reading: { revision: 0, scope_revision: 1, mode: "automatic" } });
+  context.renderReading();
+  release({ message: "saved-other-user" });
+  await saving;
+  assert.equal(context.$("reading-mode").value, "automatic");
+  assert.doesNotMatch(context.$("reading-feedback").textContent, /saved-other-user/);
 });
 
 test("removed accounts stay out of user choices even while their Banks are retained", () => {

@@ -104,6 +104,7 @@ class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
             context=SimpleNamespace(get_config=Mock(return_value=host)),
             outbox=None, permissions=None, permission_revision=0,
             panel=SimpleNamespace(closed=False), stopping=False, confirmations={},
+            read_tools=SimpleNamespace(invalidate=lambda: None),
             source_accounts={}, prepare_sources=AsyncMock(),
             control_directory=lambda: root / "control", control_root=lambda: root / "control", warning=Mock(),
             _close_resources=AsyncMock(), recall_outcomes={}, background_outcomes={}, monitor_connection=AsyncMock(),

@@ -20,6 +20,7 @@ let maintenanceExpiryTimer;
 let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
+let readingDraft = null;
 let bootstrapReadRevision = 0;
 let versionCheckRevision = 0;
 let versionCheck = null;
@@ -494,7 +495,7 @@ function renderStatus() {
 
 function recallDescription(recall) {
   if (!recall) return "尚未检索";
-  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过" };
+  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过", on_demand: "按需工具，未自动召回" };
   const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome] || "结果未知";
   let result = `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}`;
   if (recall.error_message) result += `：${recall.error_message}`;
@@ -680,6 +681,51 @@ function renderScope() {
   $("maintenance-state").hidden = !$("maintenance-state").textContent;
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
   renderBackground();
+  renderReading();
+}
+
+function renderReading() {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const saved = scope?.reading || { revision: 0, mode: "automatic" };
+  const snapshot = JSON.stringify([scopeId, scope?.bank, saved.revision, saved.scope_revision, data?.config_revision]);
+  if (readingDraft?.snapshot !== snapshot) {
+    readingDraft = { snapshot, id: scopeId, revision: saved.revision,
+      scope_revision: saved.scope_revision, config_revision: data?.config_revision };
+    $("reading-feedback").hidden = true;
+  }
+  const select = $("reading-mode");
+  select.value = saved.mode || "automatic";
+  select.disabled = !scope || !!scope.pending || !!scope.historical || !!data?.status?.recovering
+    || !!saved.error || locks.has("memory");
+  select.options[1].disabled = !saved.observed_available && saved.mode !== "tools";
+  const status = saved.status || {};
+  const messages = [];
+  if (saved.error) messages.push(saved.error);
+  if (saved.invalidated) messages.push("身份或记忆库已变化，细节记忆已恢复自动召回。");
+  if (saved.mode === "tools") {
+    if (scope?.summary?.maintenance || scope?.mode === "paused") messages.push("记忆已暂停，按需工具不会读取内容。");
+    else if (status.state === "success") messages.push(`上次聊天调用记忆工具 ${status.calls} 次。`);
+    else if (status.state === "error") messages.push(status.message || "上次工具读取失败，请检查服务；也可切回自动召回。");
+    else if (status.state === "budget") messages.push("上次聊天的记忆工具额度已用完。");
+    else if (status.state === "not_called") messages.push("上次聊天未调用记忆工具，不能据此判断没有相关记忆。");
+    else if (status.state === "unavailable") messages.push("此会话未提供全部记忆工具，或模型、执行器不支持；请检查会话工具，或切回自动召回。");
+    else messages.push("按需工具的可用状态将在收到普通私聊后更新；不可用时可切回自动召回。");
+  } else if (!saved.observed_available) messages.push("发送一条普通私聊后，可检查此会话是否支持按需工具。");
+  $("reading-status").textContent = messages.join(" ");
+  $("reading-status").hidden = !messages.length;
+}
+
+async function saveReading() {
+  const draft = readingDraft;
+  if (!draft) return;
+  const payload = { mode: $("reading-mode").value, revision: draft.revision,
+    scope_revision: draft.scope_revision, config_revision: draft.config_revision };
+  await perform(null, "memory", async () => {
+    const response = await bridge.apiPost(endpoint("reading", draft.id), payload);
+    if (readingDraft !== draft || scopeId !== draft.id) return;
+    await refreshBootstrap();
+    if (scopeId === draft.id) notify(response.message || "记忆读取方式已保存。", false, "reading-feedback");
+  }, "reading-feedback");
 }
 
 function backgroundSnapshot(scope) {
@@ -1380,6 +1426,7 @@ $("scope-picker").addEventListener("change", () => { selectedAccount = $("scope-
 $("bank-picker").addEventListener("change", () => selectScope($("bank-picker").value));
 for (const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void setMode(button, button.dataset.mode));
 $("background-page").addEventListener("change", () => void saveBackground());
+$("reading-mode").addEventListener("change", () => void saveReading());
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
 $("scope-bank").addEventListener("focus", () => $("scope-bank").select());

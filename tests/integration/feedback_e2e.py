@@ -267,7 +267,7 @@ class Feedback(Acceptance):
                 core = ROOT / "verification/data/cmd_config.json"
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
                 full = not self.settings.get("feedback_only")
-                upgrading = full or self.settings.get("single_page") or self.settings.get("multi_page")
+                upgrading = full or self.settings.get("single_page") or self.settings.get("multi_page") or self.settings.get("read_tools")
                 await self.install("baseline-install.zip" if upgrading else "candidate-install.zip")
                 legacy = ROOT / "verification/legacy-control"
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
@@ -285,7 +285,7 @@ class Feedback(Acceptance):
                 bank, identifier = scope["bank"], scope["scope_id"]
                 short = await self.page(bank, "Short background")
                 await self.select(short)
-                if self.settings.get("single_page") or self.settings.get("multi_page"):
+                if self.settings.get("single_page") or self.settings.get("multi_page") or self.settings.get("read_tools"):
                     await self.install("candidate-upgrade.zip")
                     await self.usable()
                     assert (await self.scope())["bank"] == bank
@@ -321,6 +321,14 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("read_tools"):
+                    from reading_e2e import verify
+
+                    await verify(self, page, frame, bank)
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(complete=True, acceptance_scope="native Agent read tools, page versions, mode settings, quotas and host history")
+                    self.save()
+                    return
                 if self.settings.get("multi_page"):
                     from multiple_pages import verify, verify_recovery
 

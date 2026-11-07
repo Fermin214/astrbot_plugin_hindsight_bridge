@@ -36,6 +36,7 @@ if native_models.exists():
     config["provider"].extend(json.loads(native_models.read_text()))
 config["agent_runner"]["runner_type"] = "local"
 config["agent_runner"]["config"]["model"]["provider_id"] = "delivery-chat"
+config["agent_runner"]["config"]["misc"]["tool_schema_mode"] = settings.get("tool_schema_mode", "full")
 config["provider_settings"]["streaming_response"] = False
 config["provider_settings"]["proactive_capability"]["add_cron_tools"] = False
 (root / "data/cmd_config.json").write_text(json.dumps(config, indent=2))

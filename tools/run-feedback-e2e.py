@@ -22,8 +22,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
+    parser.add_argument("--tool-schema-mode", choices=("full", "skills_like"), default="full")
     parser.add_argument("--scope", choices=("full", "feedback", "view", "recovery", "single-page", "multi-page",
-                                          "multi-page-recovery", "parameters"), default="full")
+                                          "multi-page-recovery", "read-tools", "parameters"), default="full")
     args = parser.parse_args()
     args.magpie_url = "http://127.0.0.1:3425/v1"
     args.chat_model = "compatibility-fixture"
@@ -40,6 +41,8 @@ def main():
         state.settings["multi_page"] = args.scope in {"multi-page", "multi-page-recovery"}
         state.settings["multi_page_recovery_only"] = args.scope == "multi-page-recovery"
         state.settings["parameters_only"] = args.scope == "parameters"
+        state.settings["read_tools"] = args.scope == "read-tools"
+        state.settings["tool_schema_mode"] = args.tool_schema_mode
         live.private_json(state.output / "live-settings.json", state.settings)
         control_volume = state.output / "control-volume"
         control_volume.mkdir()
@@ -62,7 +65,8 @@ def main():
                          "--output", str(state.output))
                 with (state.output / "baseline-install.zip").open("wb") as archive:
                     live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
-                             ("v0.2.8" if state.settings["multi_page"] else
+                             ("7513bf7385eb692bc621568d45697bc9e3ff9a79" if state.settings["read_tools"] else
+                              "v0.2.8" if state.settings["multi_page"] else
                               "66c0e1118a61a721a23b4bed220c6922f6a5b887" if args.scope == "single-page" else "v0.2.6"),
                              cwd=ROOT, stdout=archive)
                 state.verify()
