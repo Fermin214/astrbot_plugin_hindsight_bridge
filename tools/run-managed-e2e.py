@@ -21,6 +21,9 @@ class Managed(live.Environment):
     def __init__(self, args):
         super().__init__(args)
         self.network = self.owner + "-astrbot-network"
+        self.network_mode = args.network_mode
+        if self.network_mode != "custom":
+            self.network = self.network_mode
         self.project = None
         self.network_created = False
         self.driver = "managed_e2e.py"
@@ -28,11 +31,16 @@ class Managed(live.Environment):
         self.settings.update(listen_host="0.0.0.0", chat_tokens=8192, control_plane_port=live.free_port())
         self.settings["upgrade_from_1_1"] = args.upgrade_from_1_1
         self.settings["verify_panel"] = args.verify_panel
+        self.settings.update(network_mode=self.network_mode, api_port=live.free_port(), management_port=live.free_port())
+        if self.network_mode == "host":
+            self.settings["listen_host"] = "127.0.0.1"
 
     def prepare_network(self):
-        self.docker("network", "create", "--label", "hindsight-bridge.test=" + self.owner, self.network, stdout=subprocess.DEVNULL)
-        self.network_created = True
-        self.gateway_host = subprocess.check_output(["docker", "network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", self.network], text=True).strip()
+        if self.network_mode == "custom":
+            self.docker("network", "create", "--label", "hindsight-bridge.test=" + self.owner, self.network, stdout=subprocess.DEVNULL)
+            self.network_created = True
+        gateway_network = "bridge" if self.network_mode == "host" else self.network
+        self.gateway_host = subprocess.check_output(["docker", "network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", gateway_network], text=True).strip()
         self.gateway.server_close()
         self.gateway = live.Gateway(self)
         base = f"http://{self.gateway_host}:{self.gateway.server_port}"
@@ -57,11 +65,17 @@ class Managed(live.Environment):
         self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
         name = self.owner + "-astrbot"
         self.containers.append(name)
+        ports = [] if self.network_mode == "host" else [
+            "-p", f'127.0.0.1:{self.settings["dashboard_port"]}:{self.settings["dashboard_port"]}',
+            "-p", f'127.0.0.1:{self.settings["onebot_port"]}:{self.settings["onebot_port"]}',
+        ]
         self.docker("run", "-d", "--name", name, "--hostname", name, "--label", "hindsight-bridge.test=" + self.owner,
-                    "--network", self.network, "--memory", "1536m", "-p", f'127.0.0.1:{self.settings["dashboard_port"]}:{self.settings["dashboard_port"]}',
-                    "-p", f'127.0.0.1:{self.settings["onebot_port"]}:{self.settings["onebot_port"]}', *mounts, self.astrbot_image, stdout=subprocess.DEVNULL)
+                    "--network", self.network, "--memory", "1536m", *ports, *mounts, self.astrbot_image, stdout=subprocess.DEVNULL)
+        self.astrbot_networks = subprocess.check_output([
+            "docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", name,
+        ], text=True)
         self.wait(lambda: self.ready_http(f'http://127.0.0.1:{self.settings["dashboard_port"]}/api/v1/auth/setup-status'))
-        print("Owned custom-bridge AstrBot ready", flush=True)
+        print("Owned " + self.network_mode + " AstrBot ready", flush=True)
 
     def native_models(self, models):
         return [
@@ -109,12 +123,22 @@ class Managed(live.Environment):
                 (self.output / ("managed-before-uninstall-" + name + ".log")).write_bytes(result.stdout + result.stderr)
         with (self.output / (action + ".log")).open("w") as log:
             live.run("bash", "-c", command, env={**os.environ, "HINDSIGHT_INSTALL_ROOT": str(self.install_root),
-                                                "HINDSIGHT_ASTRBOT_NETWORK": self.network}, timeout=660,
+                                                "HINDSIGHT_ASTRBOT_NETWORK": "" if self.network_mode == "host" else self.network}, timeout=660,
                      stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         if action != "managed_uninstall":
             name = subprocess.check_output(["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=" + project,
                                             "--filter", "label=com.docker.compose.service=memory-api"], text=True).strip()
-            address = subprocess.check_output(["docker", "inspect", "--format", '{{(index .NetworkSettings.Networks "' + self.network + '").IPAddress}}', name], text=True).strip()
+            api_network = self.network if self.network_mode == "custom" else project + "-clients"
+            address = subprocess.check_output(["docker", "inspect", "--format", '{{(index .NetworkSettings.Networks "' + api_network + '").IPAddress}}', name], text=True).strip()
+            bindings = json.loads(subprocess.check_output(["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", name], text=True))
+            expected_ports = {"9999/tcp"} | ({"8888/tcp", "8766/tcp"} if self.network_mode != "custom" else set())
+            published = {port for port, entries in bindings.items() if entries}
+            if published != expected_ports or any(
+                entry["HostIp"] != (self.gateway_host if self.network_mode == "bridge" and port != "9999/tcp" else "127.0.0.1")
+                for port, entries in bindings.items() if entries for entry in entries
+            ):
+                raise RuntimeError("Unexpected managed host port exposure")
+            self.settings["verified_host_bindings"] = bindings
             self.settings.update(hindsight_url="http://" + address + ":8888", memory_key=state["api_key"], managed_project=project)
             actual = subprocess.check_output([
                 "docker", "exec", name, "python", "-c", "from hindsight_api import __version__; print(__version__)",
@@ -137,6 +161,11 @@ class Managed(live.Environment):
             self.owned(self.owner + "-astrbot")
             if not subprocess.check_output(["docker", "network", "inspect", "--format", "{{.Name}}", self.network], text=True).strip() == self.network:
                 raise RuntimeError("External AstrBot network changed")
+        networks = subprocess.check_output([
+            "docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", self.owner + "-astrbot",
+        ], text=True)
+        if networks != self.astrbot_networks:
+            raise RuntimeError("AstrBot network configuration changed")
 
     def cleanup(self):
         if self.project:
@@ -174,10 +203,15 @@ def main():
                         help="install the previous native plugin/service, then use the current browser upgrade flow")
     parser.add_argument("--verify-panel", action="store_true",
                         help="verify panel layout, user lifecycle and pause recovery in the owned browser environment")
-    parser.add_argument("--scenario", choices=("full", "connection", "mode"), default="full",
+    parser.add_argument("--network-mode", choices=("custom", "bridge", "host"), default="custom")
+    parser.add_argument("--scenario", choices=("full", "connection", "mode", "network"), default="full",
                         help="check active model edits and mode switching, or mode switching alone")
     args = parser.parse_args()
     state = Managed(args)
+    if args.scenario == "network":
+        state.driver = "network_e2e.py"
+        state.settings["connection_check_mode"] = "managed"
+        live.private_json(state.output / "live-settings.json", state.settings)
     if args.scenario in {"connection", "mode"}:
         state.driver = "connection_e2e.py"
         state.settings["connection_check_mode"] = "managed"

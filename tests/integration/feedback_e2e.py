@@ -134,6 +134,16 @@ class Feedback(Acceptance):
         from parameter_panel import save_parameters
 
         async def configure(**updates):
+            if "context_max_chars" in updates:
+                state = await self.bootstrap()
+                await self.http("POST", self.prefix + "/parameters/save", payload={
+                    "config_revision": state["config_revision"],
+                    "parameters": {**state["parameters"]["values"], **updates},
+                })
+                await page.reload()
+                await self.dismiss_host_notice(page)
+                await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                return
             return await save_parameters(self, frame, **updates)
 
         async def selected_check():

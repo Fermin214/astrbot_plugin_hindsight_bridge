@@ -63,6 +63,7 @@ async def verify(acceptance, page, frame, bank):
     await frame.locator("#reading-mode option[value='tools']").wait_for(state="attached")
     await until(lambda: frame.locator("#reading-mode option[value='tools']").is_enabled(), timeout=15)
     await frame.locator("#reading-mode").select_option("tools")
+    await frame.locator("#reading-save").click()
 
     async def mode_is_tools():
         return (await acceptance.scope())["reading"]["mode"] == "tools"
@@ -183,6 +184,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.dismiss_host_notice(page)
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
     await frame.locator("#reading-mode").select_option("automatic")
+    await frame.locator("#reading-save").click()
 
     async def automatic():
         return (await acceptance.scope())["reading"]["mode"] == "automatic"
@@ -190,6 +192,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.bot.chat(ALICE, "A synthetic automatic recall after disabling tools.")
     assert not any(tool["function"]["name"].startswith(PREFIX) for tool in acceptance.requests()[-1].get("tools", []))
     await frame.locator("#reading-mode").select_option("tools")
+    await frame.locator("#reading-save").click()
     await until(mode_is_tools, timeout=15)
     acceptance.passed("native_panel_can_switch_back_to_automatic_and_reenable_tools_without_reloading")
 

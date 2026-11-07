@@ -32,6 +32,15 @@ class ParameterSettings(unittest.IsolatedAsyncioTestCase):
         })
         return panel
 
+    async def test_token_only_panel_uses_the_internal_character_ceiling(self):
+        panel = self.setup_panel()
+        payload = panel.body.return_value["parameters"]
+        payload.pop("context_max_chars")
+        result = await panel.save_parameters()
+        self.assertTrue(result["saved"])
+        self.assertEqual(self.config["context_max_chars"], 32768)
+        self.assertEqual(result["parameters"]["effective"]["recall_max_tokens"], payload["recall_max_tokens"])
+
     async def test_save_keeps_queue_payload_selection_pause_and_identity_and_applies_capacity(self):
         self.select()
         event, req = self.turn()

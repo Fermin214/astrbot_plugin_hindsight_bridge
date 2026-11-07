@@ -22,22 +22,26 @@ async def verify_recovery(acceptance, page, frame, bank, short):
         await frame.locator(f'#background-page option[value="{identity}"]').wait_for(state="attached", timeout=20000)
         await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
         await frame.locator("#background-page").select_option(identity)
+        await frame.locator("#background-save").click()
         await until(lambda: selection_is(ids[:position + 1]), timeout=20)
     await frame.locator("#background-selected > li").nth(2).wait_for()
     for identity in ids:
         await acceptance.native("DELETE", bank + "/knowledge-base/nodes/" + identity)
     await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selection_is(ids[1:]), timeout=20)
     assert (await acceptance.scope())["background"]["enabled"]
     acceptance.passed("enabled_selection_can_remove_one_deleted_page_while_other_pages_are_also_deleted")
 
     await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
     await frame.locator("#background-page").select_option("")
+    await frame.locator("#background-save").click()
 
     async def disabled():
         return not (await acceptance.scope())["background"]["enabled"]
     await until(disabled, timeout=20)
     await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selection_is(ids[2:]), timeout=20)
     assert not (await acceptance.scope())["background"]["enabled"]
     acceptance.passed("disabled_selection_can_remove_one_deleted_page_without_reading_or_dropping_the_other_reference")
@@ -56,6 +60,7 @@ async def verify_recovery(acceptance, page, frame, bank, short):
     assert (await acceptance.http("GET", route))["selection"] == before["selection"]
     await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
     await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selection_is([]), timeout=20)
     latest = await acceptance.scope()
     assert not latest["background"]["enabled"]
@@ -120,12 +125,15 @@ async def verify(acceptance, page, frame, bank, short):
     await frame.locator("#background-recheck").click()
     await frame.locator(f'#background-page option[value="{medium}"]').wait_for(state="attached", timeout=20000)
     await frame.locator("#background-page").select_option(medium)
+    await frame.locator("#background-save").click()
     await until(lambda: selected([short, medium]), timeout=20)
     await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
     await frame.locator("#background-page").select_option(long)
+    await frame.locator("#background-save").click()
     await until(lambda: selected([short, medium, long]), timeout=20)
     await frame.locator("#background-selected > li").nth(2).wait_for()
     await frame.locator("#background-selected > li").nth(1).get_by_role("button", name="上移第 2 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selected([medium, short, long]), timeout=20)
     checked = await acceptance.http("GET", route)
     assert [item["page_id"] for item in checked["checks"]] == [medium, short, long]
@@ -171,6 +179,7 @@ async def verify(acceptance, page, frame, bank, short):
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
     await frame.locator("#background-selected > li").nth(2).wait_for()
     await frame.locator("#background-selected > li").nth(2).get_by_role("button", name="移除第 3 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selected([medium, short]), timeout=20)
     retained = await acceptance.native("GET", bank + "/knowledge-base/pages/" + long)
     assert retained["id"] == long
@@ -186,6 +195,7 @@ async def verify(acceptance, page, frame, bank, short):
     acceptance.passed("deleted_page_has_individual_missing_feedback_while_other_page_is_used")
 
     await frame.locator("#background-page").select_option("")
+    await frame.locator("#background-save").click()
 
     async def closed():
         return not (await acceptance.scope())["background"]["enabled"]
@@ -198,10 +208,12 @@ async def verify(acceptance, page, frame, bank, short):
 
     await acceptance.native("DELETE", bank + "/knowledge-base/nodes/" + medium)
     await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await frame.locator("#background-save").click()
     await until(lambda: selected([short]), timeout=20)
     assert not (await acceptance.scope())["background"]["enabled"]
     await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
     await frame.locator("#background-page").select_option(short)
+    await frame.locator("#background-save").click()
 
     async def enabled_missing():
         return (await acceptance.scope())["background"]["enabled"]

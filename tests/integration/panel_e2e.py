@@ -283,11 +283,13 @@ async def verify_panel(acceptance, page, context, frame, scope):
     await reload_panel()
     await frame.locator('#background-page option[value="' + created["page_id"] + '"]').wait_for(state="attached", timeout=30000)
     await frame.locator("#background-page").select_option(created["page_id"])
+    await frame.locator("#background-save").click()
     async def knowledge_enabled():
         return (await selected())["background"]["enabled"]
     await until(knowledge_enabled, timeout=30)
     await until(lambda: frame.locator("#background-page").is_enabled(), timeout=30)
     await frame.locator("#background-page").select_option("")
+    await frame.locator("#background-save").click()
     async def knowledge_disabled():
         saved = (await selected())["background"]
         return not saved["enabled"] and saved["page_id"] == created["page_id"]
