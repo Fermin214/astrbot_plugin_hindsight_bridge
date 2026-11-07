@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -144,6 +146,48 @@ class LiveHarnessTests(unittest.TestCase):
             path.chmod(0o644)
             harness.private_json(path, {"synthetic": "value"})
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_saved_cleanup_stops_registered_process_and_ignores_a_reused_pid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = object.__new__(harness.Environment)
+            state.output, state.owner = Path(directory), "hb-live-12345678"
+            state.resources = {"owner": state.owner, "projects": [], "processes": []}
+            process = state.start_process("model-proxy", [sys.executable, "-c", "import time; time.sleep(30)"])
+            unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+            try:
+                state.resources["processes"].append({"role": "stale-proxy", "pid": unrelated.pid, "start": "old"})
+                state.save_resources()
+                restored = harness.Environment.load_resources(state.output)
+                attached = restored.start_process("tunnel", [sys.executable, "-c", "import time; time.sleep(30)"])
+                state.save_resources()
+                with patch.object(state, "remove_resources"):
+                    state.cleanup()
+                self.assertEqual(process.wait(timeout=3), -harness.signal.SIGTERM)
+                self.assertEqual(attached.wait(timeout=3), -harness.signal.SIGTERM)
+                self.assertIsNone(unrelated.poll())
+                self.assertTrue((state.output / "model-proxy.log").exists())
+                self.assertEqual(stat.S_IMODE((state.output / "acceptance-resources.json").stat().st_mode), 0o600)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if "attached" in locals() and attached.poll() is None:
+                    attached.kill()
+                    attached.wait()
+                unrelated.terminate()
+                unrelated.wait()
+
+    def test_cleanup_attempts_other_owned_resources_after_one_project_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = object.__new__(harness.Environment)
+            state.output, state.owner = Path(directory), "hb-live-12345678"
+            state.resources = {"owner": state.owner, "processes": [], "projects": ["astrbot-memory-123456789abc"]}
+            state.save_resources()
+            state.remove_resources = Mock(side_effect=[RuntimeError("project cleanup failed"), None])
+            with self.assertRaisesRegex(RuntimeError, "project cleanup failed"):
+                state.cleanup()
+            self.assertEqual(state.remove_resources.call_count, 2)
+            self.assertEqual(state.remove_resources.call_args.args[0], "hindsight-bridge.test=" + state.owner)
 
     def test_existing_and_in_repository_output_paths_are_rejected(self):
         for path in (harness.ROOT / ".local/live-output", harness.ROOT):

@@ -1,19 +1,17 @@
-"""Owned loopback-only real-service acceptance, with a OneBot protocol simulator.
-
-Run outside the sandbox with explicit approval. Docker containers use host
-networking solely to reach a loopback Magpie gateway; every test listener binds
-127.0.0.1 and uses its own port. No existing service/configuration is modified.
-"""
+"""Real-service acceptance with owned resources and a OneBot protocol simulator."""
 
 import argparse
 from contextlib import contextmanager
+import fcntl
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -25,6 +23,28 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
+
+MODEL_PREFLIGHT = """
+import json, sys
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+settings = json.load(sys.stdin)
+request = Request(settings["chat_url"].rstrip("/") + "/chat/completions",
+    data=json.dumps({"model": settings["chat_model"], "stream": False, "max_tokens": 16,
+                     "messages": [{"role": "user", "content": "Reply OK."}]}).encode(),
+    headers={"Authorization": "Bearer " + settings["chat_token"], "Content-Type": "application/json"})
+try:
+    with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
+        assert json.loads(response.read(1024 * 1024)).get("choices")
+except Exception as error:
+    print("HTTP " + str(error.code) if isinstance(error, HTTPError) else type(error).__name__)
+    sys.exit(1)
+"""
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -46,6 +66,12 @@ def private_json(path, value):
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
         os.fchmod(file.fileno(), 0o600)
         json.dump(value, file, indent=2)
+
+@contextmanager
+def resource_lock(output):
+    with os.fdopen(os.open(output / "acceptance-resources.lock", os.O_WRONLY | os.O_CREAT, 0o600), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def extraction_response(request, raw):
@@ -299,6 +325,7 @@ class Environment:
         os.chmod(self.output, 0o700)
         self.owner = "hb-live-" + secrets.token_hex(4)
         self.containers = []
+        self.resources = {"owner": self.owner, "projects": [], "processes": []}
         self.volume = self.owner + "-postgres"
         astrbot_version = getattr(args, "astrbot_version", "4.29.1")
         self.astrbot_image = "soulter/astrbot:v" + astrbot_version
@@ -352,9 +379,48 @@ class Environment:
         self.models.update(HINDSIGHT_API_LLM_PROVIDER="openai", HINDSIGHT_API_LLM_MODEL=args.chat_model,
                            HINDSIGHT_API_LLM_BASE_URL=self.settings["chat_url"], HINDSIGHT_API_LLM_API_KEY=self.settings["chat_token"])
         private_json(self.output / "live-settings.json", self.settings)
+        self.save_resources()
 
     def docker(self, *args, **options):
         return run("docker", *args, **options)
+
+    def save_resources(self):
+        path = self.output / "acceptance-resources.json"
+        with resource_lock(self.output):
+            if path.exists():
+                saved = json.loads(path.read_text())
+                self.resources["projects"] = sorted(set(saved["projects"] + self.resources["projects"]))
+                processes = {(item["pid"], item["start"]): item
+                             for item in saved["processes"] + self.resources["processes"]}
+                self.resources["processes"] = list(processes.values())
+            private_json(path, self.resources)
+
+    def register_project(self, project):
+        if not re.fullmatch(r"astrbot-memory-[0-9a-f]{12}", project):
+            raise ValueError("Invalid acceptance project")
+        if project not in self.resources["projects"]:
+            self.resources["projects"].append(project)
+            self.save_resources()
+
+    @staticmethod
+    def process_start(pid):
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return None if fields[0] == "Z" else fields[19]
+        except FileNotFoundError:
+            return None
+
+    def start_process(self, role, command):
+        if not re.fullmatch(r"[a-z0-9-]+", role):
+            raise ValueError("Invalid acceptance process role")
+        with (self.output / (role + ".log")).open("wb") as log:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+        self.resources["processes"].append({
+            "role": role, "pid": process.pid, "start": self.process_start(process.pid),
+        })
+        self.save_resources()
+        return process
 
     def owned(self, name):
         label = subprocess.check_output(["docker", "inspect", "--format", '{{index .Config.Labels "hindsight-bridge.test"}}', name], text=True).strip()
@@ -364,9 +430,30 @@ class Environment:
     def launch(self, role, image, *options, command=()):
         name = self.owner + "-" + role
         self.containers.append(name)
-        self.docker("run", "-d", "--name", name, "--label", "hindsight-bridge.test=" + self.owner,
+        self.docker("run", "-d", "--name", name, "--hostname", name, "--label", "hindsight-bridge.test=" + self.owner,
                     "--network", "host", *options, image, *command, stdout=subprocess.DEVNULL)
         return name
+
+    def preflight(self):
+        name = self.owner + "-astrbot"
+        self.owned(name)
+        ids = subprocess.check_output(["docker", "ps", "-q"], text=True).split()
+        hostname = subprocess.check_output([
+            "docker", "inspect", "--format", "{{.Config.Hostname}}", name,
+        ], text=True).strip()
+        hostnames = subprocess.check_output([
+            "docker", "inspect", "--format", "{{.Config.Hostname}}", *ids,
+        ], text=True).splitlines() if ids else []
+        if not hostname or hostnames.count(hostname) != 1:
+            raise RuntimeError("Expected one running AstrBot with its own hostname")
+        result = subprocess.run(
+            ["docker", "exec", "-i", name, "python", "-c", MODEL_PREFLIGHT],
+            input=json.dumps({key: self.settings[key] for key in ("chat_url", "chat_token", "chat_model")}),
+            text=True, capture_output=True, timeout=40,
+        )
+        if result.returncode:
+            raise RuntimeError("Model preflight failed from AstrBot: " + result.stdout.strip())
+        private_json(self.output / "preflight.json", {"astrbot": name, "hostname": hostname, "model_connected": True})
 
     def start_hindsight(self, rrf=False):
         name = self.owner + "-hindsight"
@@ -463,42 +550,112 @@ class Environment:
         print("Real AstrBot dashboard is ready", flush=True)
 
     def verify(self):
+        self.preflight()
         self.docker("build", "-t", "hindsight-bridge-live-browser:1.56.0", "-f", str(ROOT / "tests/integration/Dockerfile.browser"), str(ROOT / "tests/integration"),
                     stdout=(self.output / "browser-build.log").open("w"), stderr=subprocess.STDOUT)
         name = self.owner + "-browser"
         self.containers.append(name)
-        self.docker("run", "--name", name, "--label", "hindsight-bridge.test=" + self.owner, "--network", "host", "--memory", "2g", "--shm-size", "512m",
+        self.docker("run", "--name", name, "--hostname", name, "--label", "hindsight-bridge.test=" + self.owner, "--network", "host", "--memory", "2g", "--shm-size", "512m",
                     "-e", "HOME=/tmp", "-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                     "hindsight-bridge-live-browser:1.56.0", "python", "/candidate-source/tests/integration/" + self.driver)
 
+    def remove_resources(self, label, project=False):
+        names = subprocess.check_output(["docker", "ps", "-aq", "--filter", "label=" + label], text=True).split()
+        for name in names:
+            if project:
+                service = subprocess.check_output([
+                    "docker", "inspect", "--format", '{{index .Config.Labels "com.docker.compose.service"}}', name,
+                ], text=True).strip()
+                if service not in {"memory-api", "memory-db", "memory-settings-init"}:
+                    raise RuntimeError("Unexpected managed project resource")
+            result = subprocess.run(["docker", "logs", name], capture_output=True)
+            (self.output / (name + ".log")).write_bytes(result.stdout + result.stderr)
+        if names:
+            self.docker("rm", "-f", *names, stdout=subprocess.DEVNULL)
+        for kind in ("volume", "network"):
+            names = subprocess.check_output([
+                "docker", kind, "ls", "-q", "--filter", "label=" + label,
+            ], text=True).split()
+            if project and names:
+                identifier = label.split("=", 1)[1]
+                allowed = {identifier + "_memory_postgres", identifier + "_memory_settings"} if kind == "volume" else {
+                    identifier + "_memory_database", identifier + "-clients",
+                }
+                actual = subprocess.check_output([
+                    "docker", kind, "inspect", "--format", "{{.Name}}", *names,
+                ], text=True).splitlines()
+                if not set(actual) <= allowed:
+                    raise RuntimeError("Unexpected managed project resource")
+            if names:
+                self.docker(kind, "rm", *names, stdout=subprocess.DEVNULL)
+
     def cleanup(self):
-        for name in reversed(self.containers):
+        self.resources = self.load_resources(self.output).resources
+        failures = []
+        for resource in reversed(self.resources["processes"]):
+            pid = resource["pid"]
+            if not resource["start"] or self.process_start(pid) != resource["start"]:
+                continue
             try:
-                self.owned(name)
-                result = subprocess.run(["docker", "logs", name], capture_output=True)
-                (self.output / (name + ".log")).write_bytes(result.stdout + result.stderr)
-                self.docker("stop", "-t", "90", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.docker("rm", name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except (subprocess.CalledProcessError, RuntimeError):
-                print("Cleanup needs inspection: " + name, file=sys.stderr)
-        try:
-            label = subprocess.check_output(["docker", "volume", "inspect", "--format", '{{index .Labels "hindsight-bridge.test"}}', self.volume], text=True, stderr=subprocess.DEVNULL).strip()
-            if label == self.owner:
-                self.docker("volume", "rm", self.volume, stdout=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            pass
+                os.killpg(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 3
+                while self.process_start(pid) == resource["start"] and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if self.process_start(pid) == resource["start"]:
+                    os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for label, project in [
+            *[("com.docker.compose.project=" + name, True) for name in self.resources["projects"]],
+            ("hindsight-bridge.test=" + self.owner, False),
+        ]:
+            try:
+                self.remove_resources(label, project=project)
+            except (subprocess.CalledProcessError, RuntimeError) as error:
+                failures.append(str(error))
+        if failures:
+            raise RuntimeError("Acceptance cleanup failed: " + "; ".join(failures))
+
+    @classmethod
+    def load_resources(cls, output):
+        state = object.__new__(cls)
+        state.output = output.resolve()
+        with resource_lock(state.output):
+            state.resources = json.loads((state.output / "acceptance-resources.json").read_text())
+        state.owner = state.resources["owner"]
+        if not re.fullmatch(r"hb-live-[0-9a-f]{8}", state.owner) or any(
+            not re.fullmatch(r"astrbot-memory-[0-9a-f]{12}", project)
+            for project in state.resources["projects"]
+        ):
+            raise ValueError("Invalid acceptance resource record")
+        return state
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--cleanup", type=Path, help="remove resources recorded in an acceptance output directory")
+    parser.add_argument("--attach", type=Path, help="start an auxiliary process in an existing acceptance environment")
+    parser.add_argument("--role", help="auxiliary process name used for its log")
     parser.add_argument("--model-environment", type=Path, default=Path("/tmp/hindsight-bridge-qwen-acceptance/model-environment.json"))
     parser.add_argument("--magpie-url", default="http://127.0.0.1:3425/v1")
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
     parser.add_argument("--scenario", choices=("full", "accepted", "connection"), default="full")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.cleanup:
+        Environment.load_resources(args.cleanup).cleanup()
+        return
+    if args.attach:
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        if not args.role or not command:
+            parser.error("--attach requires --role and a command after --")
+        Environment.load_resources(args.attach).start_process(args.role, command)
+        return
+    if not args.output:
+        parser.error("--output is required")
     state = Environment(args)
     state.driver = {"accepted": "accepted_e2e.py", "connection": "connection_e2e.py", "full": "live_e2e.py"}[args.scenario]
     try:

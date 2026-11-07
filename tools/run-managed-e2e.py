@@ -25,7 +25,6 @@ class Managed(live.Environment):
         if self.network_mode != "custom":
             self.network = self.network_mode
         self.project = None
-        self.network_created = False
         self.driver = "managed_e2e.py"
         self.install_root = self.output / "managed-installations"
         self.settings.update(listen_host="0.0.0.0", chat_tokens=8192, control_plane_port=live.free_port())
@@ -38,7 +37,6 @@ class Managed(live.Environment):
     def prepare_network(self):
         if self.network_mode == "custom":
             self.docker("network", "create", "--label", "hindsight-bridge.test=" + self.owner, self.network, stdout=subprocess.DEVNULL)
-            self.network_created = True
         gateway_network = "bridge" if self.network_mode == "host" else self.network
         self.gateway_host = subprocess.check_output(["docker", "network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", gateway_network], text=True).strip()
         self.gateway.server_close()
@@ -100,6 +98,7 @@ class Managed(live.Environment):
         if self.project not in {None, project}:
             raise RuntimeError("Managed installation identity changed")
         self.project = project
+        self.register_project(project)
         if action in {"managed_pause", "managed_unpause"}:
             names = subprocess.check_output([
                 "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=" + project,
@@ -166,31 +165,6 @@ class Managed(live.Environment):
         ], text=True)
         if networks != self.astrbot_networks:
             raise RuntimeError("AstrBot network configuration changed")
-
-    def cleanup(self):
-        if self.project:
-            for name in subprocess.check_output(["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=" + self.project], text=True).split():
-                service = subprocess.check_output(["docker", "inspect", "--format", '{{index .Config.Labels "com.docker.compose.service"}}', name], text=True).strip()
-                if service not in {"memory-api", "memory-db", "memory-settings-init"}:
-                    raise RuntimeError("Unexpected managed project resource")
-                result = subprocess.run(["docker", "logs", name], capture_output=True)
-                (self.output / ("managed-" + service + ".log")).write_bytes(result.stdout + result.stderr)
-                self.docker("stop", "-t", "90", name, stdout=subprocess.DEVNULL)
-                self.docker("rm", name, stdout=subprocess.DEVNULL)
-            for kind, names in (("network", {self.project + "_memory_database", self.project + "-clients"}),
-                                ("volume", {self.project + "_memory_postgres", self.project + "_memory_settings"})):
-                for name in subprocess.check_output(["docker", kind, "ls", "-q", "--filter", "label=com.docker.compose.project=" + self.project], text=True).split():
-                    actual = subprocess.check_output(["docker", kind, "inspect", "--format", "{{.Name}}", name], text=True).strip()
-                    if actual not in names:
-                        raise RuntimeError("Unexpected managed project resource")
-                    self.docker(kind, "rm", name, stdout=subprocess.DEVNULL)
-        super().cleanup()
-        if self.network_created:
-            owner = subprocess.check_output(["docker", "network", "inspect", "--format", '{{index .Labels "hindsight-bridge.test"}}', self.network], text=True).strip()
-            if owner != self.owner:
-                raise RuntimeError("External test network ownership mismatch")
-            self.docker("network", "rm", self.network, stdout=subprocess.DEVNULL)
-
 
 def main():
     parser = argparse.ArgumentParser()

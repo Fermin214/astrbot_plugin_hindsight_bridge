@@ -55,4 +55,25 @@ CI 面向项目回归与社区兼容，按新增提交涉及的文件选择检�
 
 提交问题时提供版本、复现步骤、预期、实际结果和脱敏日志。不要提交账号凭据、真实聊天记录、运行数据库或本地环境文件。
 
+## 人工预览与资源清理
+
+人工预览复用 `tools/run-live-e2e.py` 的 `Environment`。容器通过 `launch()` 创建，配套项目通过 `register_project()` 登记；隧道和模型代理通过 `start_process()` 启动。资源归属保存在输出目录的 `acceptance-resources.json`，日志、账号资料与验收报告留在该目录。
+
+`verify()` 在浏览器启动前检查 AstrBot hostname 唯一，并从目标容器实际请求所选聊天模型。浏览器与 AstrBot 使用独立 hostname。
+
+已有验收环境可附加隧道或代理，例如：
+
+```bash
+python tools/run-live-e2e.py --attach /tmp/验收目录 --role dashboard-tunnel -- \
+  cloudflared tunnel --url http://127.0.0.1:面板端口
+```
+
+结束预览后执行：
+
+```bash
+python tools/run-live-e2e.py --cleanup /tmp/验收目录
+```
+
+该命令清理登记的进程、专属配套项目及带有该环境标签的容器、网络和数据卷，保留输出目录中的账号资料和报告。自动验收在退出时执行同一清理流程。
+
 恢复业务快照不得覆盖更新的独立控制记录。

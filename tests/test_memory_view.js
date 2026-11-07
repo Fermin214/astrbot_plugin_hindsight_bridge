@@ -245,6 +245,65 @@ test("managed connection fields are readonly and saving the browser address cann
   assert.equal(context.settingsRevision, "saved");
 });
 
+test("installation commands remain available after copying, closing and reloading before connection", async () => {
+  let calls = 0;
+  const installation = { installation_id: "stable-installation", api_url: "http://owned-service:8888" };
+  const setup = { has_installation: true, ...installation };
+  const bootstrap = { config: { configured: true, managed: false }, has_installation: true };
+  const open = () => {
+    const context = harness();
+    for (const name of ["controlPlaneUrl", "perform", "prepareInstallation", "copyCommand", "loadManagedSetup"]) {
+      vm.runInContext(declaration(name), context);
+    }
+    context.document.querySelector = () => ({ value: "managed" });
+    context.data = structuredClone(bootstrap);
+    context.settingsRevision = "saved";
+    context.navigator = { clipboard: { writeText: async (value) => { assert.match(value, /^install-command-/); } } };
+    context.bridge = { apiPost: async (route, payload) => {
+      if (route === "managed/options") return setup;
+      assert.equal(route, "install/prepare");
+      assert.equal(payload.mode, "managed");
+      assert.equal(payload.repair, false);
+      return { ...installation, command: `install-command-${++calls}`, config_revision: "saved" };
+    } };
+    const prepare = context.prepareInstallation;
+    context.prepareInstallation = (...args) => (context.preparing = prepare(...args));
+    const begin = source.indexOf('$("generate-deployment").addEventListener("click",');
+    vm.runInContext(source.slice(begin, source.indexOf('\n$("check-deployment")', begin)), context);
+    context.updateConnectionMode();
+    return context;
+  };
+  let context = open();
+  await context.loadManagedSetup();
+  assert.equal(context.$("setup-intro").hidden, false);
+  await context.prepareInstallation(context.$("prepare"));
+  const first = context.$("install-command").value;
+  assert.equal(context.$("generate-deployment").hidden, false);
+  context.$("generate-deployment").listeners.click();
+  await context.preparing;
+  assert.notEqual(context.$("install-command").value, first);
+  assert.equal(context.managedSetup.installation_id, installation.installation_id);
+  await context.copyCommand("install-command", "installation", "copied");
+  assert.equal(context.$("install-command").value, "");
+  context.$("deployment-dialog").close();
+  context.updateConnectionMode();
+  assert.equal(context.$("setup-intro").hidden, false);
+  await context.prepareInstallation(context.$("prepare"));
+  assert.notEqual(context.$("install-command").value, first);
+  assert.equal(context.managedSetup.installation_id, installation.installation_id);
+
+  context = open();
+  await context.loadManagedSetup();
+  assert.equal(context.$("setup-intro").hidden, false);
+  await context.prepareInstallation(context.$("prepare"));
+  assert.equal(context.managedSetup.installation_id, installation.installation_id);
+  assert.equal(context.$("deployment-dialog").open, true);
+  assert.equal(context.$("check-deployment").hidden, true);
+  context.data.config.managed = true;
+  context.updateConnectionMode();
+  assert.equal(context.$("setup-intro").hidden, true);
+});
+
 test("version notices show upgrades only for the connected managed service", () => {
   const context = harness();
   vm.runInContext(declaration("renderServiceVersion"), context);
