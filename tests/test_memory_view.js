@@ -752,7 +752,7 @@ test("connection errors retain specific guidance and existing services hide mode
 
 function backgroundHarness() {
   const context = harness();
-  for (const name of ["backgroundSnapshot", "renderBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
+  for (const name of ["backgroundSnapshot", "backgroundPages", "renderBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
     vm.runInContext(declaration(name), context);
   }
   context.renderScope = context.renderBackground;
@@ -880,11 +880,11 @@ test("background save carries original revisions and closing does not delete a p
   context.data.config_revision = "new-config";
   await context.saveBackground();
   assert.equal(calls[0].payload.config_revision, "config-1");
-  assert.equal(calls[0].payload.page_id, "kp-2");
+  assert.equal(JSON.stringify(calls[0].payload.page_ids), '["kp-1","kp-2"]');
   context.$("background-page").value = "";
   await context.saveBackground();
   assert.equal(calls[1].payload.enabled, false);
-  assert.equal(calls[1].payload.page_id, "kp-1");
+  assert.equal(JSON.stringify(calls[1].payload.page_ids), '["kp-1"]');
   assert.equal(calls[1].endpoint, "scopes/one/background");
   assert.equal("bank" in calls[1].payload, false);
 });
@@ -909,7 +909,7 @@ test("settings refresh invalidates old drafts and allows closing during maintena
     apiPost: async (route, payload) => {
       assert.equal(route, "scopes/one/background");
       assert.equal(payload.config_revision, "config-2");
-      assert.equal(payload.page_id, "kp-1");
+      assert.equal(JSON.stringify(payload.page_ids), '["kp-1"]');
       assert.equal(payload.enabled, false);
       next.scopes[0].background = { ...next.scopes[0].background, enabled: false, revision: 2 };
       return { message: "saved" };
@@ -942,6 +942,36 @@ test("configuration change drops a pending old page list and unsaved choice rath
   assert.equal(context.backgroundDraft.page_id, "kp-1");
   assert.equal(context.backgroundDraft.pages.length, 0);
   assert.equal(context.$("background-page").value, "kp-1");
+});
+
+test("multiple pages render usage per page and persist ordering and removal", async () => {
+  const context = backgroundHarness();
+  const saved = context.data.scopes[0].background;
+  saved.pages = [{ page_id: "kp-1" }, { page_id: "kp-2" }];
+  saved.status = { message: "上次聊天使用 1/2 篇知识页。", pages: [
+    { page_id: "kp-1", message: "上次聊天已使用。" },
+    { page_id: "kp-2", message: "知识页太长。" },
+  ] };
+  context.backgroundDraft.pages = [
+    { page_id: "kp-1", path: "First", index_stale: false },
+    { page_id: "kp-2", path: "<b>Second</b>", index_stale: true },
+  ];
+  context.renderBackground();
+  const rows = context.$("background-selected").children;
+  assert.equal(rows[1].children[0].textContent, "2. <b>Second</b>");
+  assert.equal(rows[1].children[0].innerHTML, undefined);
+  assert.equal(rows[1].children[1].textContent, "知识页太长。");
+  assert.equal(rows[0].children.at(-1).children[0].disabled, true);
+  assert.equal(rows[1].children.at(-1).children[1].disabled, true);
+  const writes = [];
+  context.bridge = { apiPost: async (route, payload) => { writes.push(payload); return {}; } };
+  rows[1].children.at(-1).children[0].listeners.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(JSON.stringify(writes[0].page_ids), '["kp-2","kp-1"]');
+  rows[0].children.at(-1).children[2].listeners.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(JSON.stringify(writes[1].page_ids), '["kp-2"]');
+  assert.equal(writes[1].enabled, true);
 });
 
 test("removed accounts stay out of user choices even while their Banks are retained", () => {

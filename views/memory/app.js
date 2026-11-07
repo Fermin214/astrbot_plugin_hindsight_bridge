@@ -690,6 +690,10 @@ function backgroundSnapshot(scope) {
   ]);
 }
 
+function backgroundPages(selection) {
+  return selection?.pages || (selection?.page_id ? [{ page_id: selection.page_id }] : []);
+}
+
 function renderBackground() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
@@ -698,18 +702,50 @@ function renderBackground() {
     backgroundReadRevision++;
     backgroundDraft = { snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
       revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
-      pages: [], check: null, loaded: false, loading: false, attempted: false };
+      pages: [], check: null, checks: [], loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
   const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
   const select = $("background-page");
+  const selected = backgroundPages(saved);
   select.disabled = !!unavailable || locks.has("memory") || (blocked && !saved.enabled);
   const options = [option("", "不使用知识页")];
   backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path, !!blocked)));
   if (saved.page_id && !backgroundDraft.pages.some((page) => page.page_id === saved.page_id)) options.push(option(saved.page_id, saved.page_id, !!blocked));
   select.replaceChildren(...options);
   select.value = saved.enabled ? saved.page_id : "";
+  const draft = backgroundDraft;
+  const rows = selected.map((page, index) => {
+    const row = el("li", "knowledge-page");
+    const native = draft.pages.find((item) => item.page_id === page.page_id);
+    row.append(el("div", "knowledge-page-title", `${index + 1}. ${native?.path || page.page_id}`));
+    const check = saved.enabled ? draft.checks.find((item) => item.page_id === page.page_id) : null;
+    if (check?.message) row.append(el("p", "field-help", check.message));
+    const usage = saved.status?.pages?.find((item) => item.page_id === page.page_id);
+    if (usage?.message && saved.enabled) row.append(el("p", "field-help", usage.message));
+    if (native && saved.enabled) row.append(el("p", "field-help", native.index_stale === true ? "目录标记：有新记忆待刷新。"
+      : native.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。"));
+    const actions = el("div", "knowledge-page-actions");
+    for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
+      const button = el("button", "text-button", label);
+      button.type = "button";
+      button.setAttribute("aria-label", `${label}第 ${index + 1} 篇知识页`);
+      button.disabled = !!blocked || locks.has("memory") || (direction === -1 && index === 0)
+        || (direction === 1 && index === selected.length - 1);
+      button.addEventListener("click", () => {
+        if (backgroundDraft !== draft) return;
+        const ids = selected.map((item) => item.page_id);
+        if (direction === 0) ids.splice(index, 1);
+        else [ids[index], ids[index + direction]] = [ids[index + direction], ids[index]];
+        void saveBackground({ pageIds: ids, enabled: saved.enabled && ids.length > 0 });
+      });
+      actions.append(button);
+    }
+    row.append(actions);
+    return row;
+  });
+  $("background-selected").replaceChildren(...rows);
   const messages = [saved.error || saved.message || ""];
   if (!unavailable && scope.summary?.maintenance) messages.push("插件读写已暂停，知识页不会传入聊天。");
   else if (!unavailable && scope.mode === "paused" && saved.enabled) messages.push("停用记忆模式下，知识页不会传入聊天。");
@@ -720,10 +756,10 @@ function renderBackground() {
   const status = messages.filter(Boolean).join(" ");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
-  const check = saved.enabled && !saved.invalidated ? backgroundDraft.check?.message || "" : "";
+  const check = saved.enabled && !saved.invalidated && selected.length <= 1 ? backgroundDraft.check?.message || "" : "";
   $("background-check").textContent = check;
   $("background-check").hidden = !check;
-  const indexed = saved.enabled && !saved.invalidated
+  const indexed = saved.enabled && !saved.invalidated && selected.length <= 1
     ? backgroundDraft.pages.find((page) => page.page_id === saved.page_id) : null;
   const index = indexed ? (indexed.index_stale === true ? "目录标记：有新记忆待刷新。"
     : indexed.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。")
@@ -747,6 +783,7 @@ async function loadBackground() {
     if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
     draft.check = response.check || null;
+    draft.checks = response.checks || [];
     draft.loaded = true;
     $("background-feedback").hidden = true;
     renderBackground();
@@ -762,12 +799,19 @@ async function loadBackground() {
   }
 }
 
-async function saveBackground() {
+async function saveBackground({ pageIds, enabled } = {}) {
   const draft = backgroundDraft;
   if (!draft) return;
   const saved = data.scopes.find((scope) => scope.scope_id === draft.id)?.background;
   const selected = $("background-page").value;
-  const payload = { page_id: selected || saved?.page_id || "", enabled: !!selected,
+  const ids = pageIds || backgroundPages(saved).map((page) => page.page_id);
+  if (!pageIds && selected && !ids.includes(selected)) ids.push(selected);
+  if (ids.length > 8) {
+    notify("最多选择 8 篇知识页，请先移除不需要的页面。", true, "background-feedback");
+    renderBackground();
+    return;
+  }
+  const payload = { page_ids: ids, enabled: enabled ?? !!selected,
     revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision };
   await perform(null, "memory", async () => {
     const response = await bridge.apiPost(endpoint("background", draft.id), payload);
@@ -775,6 +819,7 @@ async function saveBackground() {
     await refreshBootstrap();
     if (backgroundDraft?.id === draft.id && response.selection?.revision === backgroundDraft.revision) {
       backgroundDraft.check = response.check || null;
+      backgroundDraft.checks = response.checks || [];
       renderBackground();
     }
     notify(response.message || "知识页选择已保存。", false, "background-feedback");
