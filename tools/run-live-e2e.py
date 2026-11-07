@@ -88,6 +88,7 @@ class Gateway(ThreadingHTTPServer):
         super().__init__((getattr(state, "gateway_host", "127.0.0.1"), port), GatewayHandler)
         self.state = state
         self.recall_delay = 0
+        self.background_delay = 0
         self.extraction_gate = threading.Event()
         self.extraction_gate.set()
         self.extraction_held = 0
@@ -165,11 +166,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             try:
                 body = json.loads(raw or b"{}")
-                if body["action"] == "delay_recall":
+                if body["action"] in {"delay_recall", "delay_background"}:
                     delay = float(body["seconds"])
                     if not 0 <= delay <= 15:
                         raise ValueError
-                    self.server.recall_delay = delay
+                    if body["action"] == "delay_background":
+                        self.server.background_delay = delay
+                    else:
+                        self.server.recall_delay = delay
                 elif body["action"] == "hold_extraction":
                     self.server.extraction_gate.clear()
                 elif body["action"] == "release_extraction":
@@ -206,6 +210,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             url = state.settings["hindsight_url"] + path
             if path.endswith("/recall") and self.command == "POST":
                 response_delay = self.server.recall_delay
+            if "/mental-models/" in path and self.command == "GET":
+                response_delay = self.server.background_delay
             if path.endswith("/memories") and self.command == "POST":
                 self.server.record("retain-trace", {"path": path, "body": json.loads(raw)})
             if self.command == "DELETE" and not self.server.cleanup_gate.is_set():
@@ -368,7 +374,7 @@ class Environment:
             self.start_hindsight(rrf=True)
         else:
             command = "restart" if action.startswith("restart") else "stop" if action.startswith("stop") else "start"
-            self.docker(command, *( ["-t", "90"] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
+            self.docker(command, *( ["-t", str(self.settings.get("stop_timeout", 90))] if command in {"restart", "stop"} else []), name, stdout=subprocess.DEVNULL)
 
     def wait(self, predicate, timeout=240):
         deadline = time.monotonic() + timeout
@@ -419,7 +425,7 @@ class Environment:
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
                   "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", "/tmp/hindsight-bridge-token-cache:/token-cache:ro"]
         self.docker("run", "--rm", "--network", "none", *mounts, self.astrbot_image, "python", "/candidate-source/tests/integration/live_astrbot_setup.py")
-        self.launch("astrbot", self.astrbot_image, "--memory", "1536m", *mounts)
+        self.launch("astrbot", self.astrbot_image, "--memory", "1536m", *mounts, *getattr(self, "astrbot_mounts", ()))
         dashboard = f'http://127.0.0.1:{self.settings["dashboard_port"]}'
         self.wait(lambda: self.ready_http(dashboard + "/api/v1/auth/setup-status"))
         print("Real AstrBot dashboard is ready", flush=True)

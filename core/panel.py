@@ -636,20 +636,39 @@ class MemoryPanel:
                     result[-1]["background"] = {
                         **selection, "scope_revision": scope["revision"],
                     }
+                    if selection.get("invalidated"):
+                        result[-1]["background"]["message"] = self.error_message("background_scope_changed")
                     state = getattr(plugin, "background_outcomes", {}).get(
                         (queue.connection_id, scope["owner_id"]), {},
                     )
                     if (
                         state.get("bank") == scope["bank"] and state.get("revision") == scope["revision"]
                         and state.get("selection_revision") == selection["revision"]
+                        and selection["enabled"] and not selection.get("invalidated")
                         and not summary.get("maintenance") and not scope.get("historical")
                     ):
                         result[-1]["background"]["status"] = {
                             "used": state["used"], "checked_at": state["checked_at"],
-                            "message": "上次聊天未使用知识页：" + self.error_message(state["code"]) if state["code"] else "",
+                            "message": "上次聊天已使用知识页。" if state["used"] else (
+                                "上次聊天未使用知识页：" + self.error_message(state["code"])
+                                if state["code"] else "上次聊天未使用知识页。"
+                            ),
                         }
                 except QueueError as exc:
                     result[-1]["background"] = {"error": self.error_message(str(exc))}
+        changed_accounts = {
+            (row["platform_instance_id"], row["user_id"]) for row in result
+            if row.get("background", {}).get("invalidated")
+        }
+        for row in result:
+            if (
+                not row["historical"] and not row.get("background", {}).get("revision", 0)
+                and (row["platform_instance_id"], row["user_id"]) in changed_accounts
+            ):
+                row["background"] = {
+                    **row.get("background", {}), "enabled": False, "invalidated": True,
+                    "message": self.error_message("background_scope_changed"),
+                }
         return result
 
     async def bot_id(self, platform):

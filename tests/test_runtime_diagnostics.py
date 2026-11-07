@@ -68,7 +68,7 @@ def bridge_class(directory, logger):
     bridge = next(node for node in tree.body if isinstance(node, ast.ClassDef))
     selected = {
         "__init__", "initialize", "diagnostic", "error_code", "refresh_permissions",
-        "control_directory", "warning", "monitor_connection", "record_recall",
+        "control_root", "control_directory", "warning", "monitor_connection", "record_recall",
         "recall_status", "recall_text", "recall_background", "conversation_history", "add_memory",
         "record_history", "_close_resources", "using_resources", "terminate",
         "prepare_sources",
@@ -93,6 +93,7 @@ def bridge_class(directory, logger):
         StarTools=SimpleNamespace(get_data_dir=lambda name: directory / (
             "control" if name.endswith("_control") else "runtime"
         )),
+        get_astrbot_data_path=lambda: str(directory),
     )
     exec(compile(ast.Module(body=[bridge], type_ignores=[]), str(source), "exec"), namespace)
     return namespace["HindsightBridge"]
@@ -160,7 +161,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin = bridge_class(self.directory, self.logger)(self.context, self.config)
         self.plugin.outbox = Outbox(
             self.directory / "runtime", "test-service", "http://memory.test",
-            credential_fingerprint=sha256("key"), control_directory=self.directory / "control",
+            credential_fingerprint=sha256("key"), control_directory=self.plugin.control_directory(),
         )
         self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
         self.results = []
@@ -346,6 +347,77 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.plugin.client)
             self.assertIsNone(self.plugin.outbox)
             self.assertNotIn("secret", str(self.logger.mock_calls))
+
+    async def test_control_paths_are_confined_before_initialization_opens_resources(self):
+        await self.plugin._close_resources()
+        root = self.plugin.control_directory()
+        self.config["control_state_dir"] = str(root / "nested" / ".." / "journal")
+        self.assertEqual(self.plugin.control_directory(), root / "journal")
+        self.assertFalse((root / "journal").exists())
+        outside = self.directory / "other-plugin"
+        outside.mkdir(mode=0o755)
+        (root / "escape").symlink_to(outside, target_is_directory=True)
+        (root / "inside").symlink_to(root, target_is_directory=True)
+        self.config["control_state_dir"] = str(root / "inside" / "journal")
+        self.assertEqual(self.plugin.control_directory(), root / "journal")
+        for path, code in (
+            ("relative", "control_directory_must_be_absolute"),
+            (str(outside), "control_directory_outside_plugin"),
+            (str(root / ".." / "other-plugin"), "control_directory_outside_plugin"),
+            (str(root) + "-suffix", "control_directory_outside_plugin"),
+            (str(root / "escape" / "new"), "control_directory_outside_plugin"),
+        ):
+            self.config["control_state_dir"] = path
+            await self.plugin.initialize()
+            self.assertIn(code, self.plugin.status)
+            self.assertIsNone(self.plugin.client)
+            self.assertIsNone(self.plugin.outbox)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+
+    async def test_control_root_replaced_during_tokenizer_load_is_rejected_at_open(self):
+        await self.plugin._close_resources()
+        root = self.plugin.control_directory()
+        outside = self.directory / "other-plugin"
+        outside.mkdir(mode=0o755)
+        async def replace_root(name):
+            root.rename(root.with_name("original-control"))
+            root.symlink_to(outside, target_is_directory=True)
+        namespace = self.plugin.initialize.__func__.__globals__
+        with patch.dict(namespace, load_encoding=replace_root):
+            await self.plugin.initialize()
+        self.assertIn("control_directory_outside_plugin", self.plugin.status)
+        self.assertIsNone(self.plugin.outbox)
+        self.assertIsNone(self.plugin.client)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+
+    async def test_default_control_allocation_is_independent_of_business_directory_alias(self):
+        root = self.plugin.control_directory()
+        namespace = self.plugin.control_root.__func__.__globals__
+        with patch.dict(namespace, StarTools=SimpleNamespace(
+            get_data_dir=lambda name: self.directory / "external-business",
+        )):
+            self.assertEqual(self.plugin.control_directory(), root)
+
+    async def test_control_file_links_cannot_write_outside_the_allocated_root(self):
+        await self.plugin._close_resources()
+        root = self.plugin.control_directory()
+        external = self.directory / "external-file"
+        external.write_text("outside")
+        external.chmod(0o644)
+        namespace = self.plugin.initialize.__func__.__globals__
+        for name in ("control.lock", "control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm"):
+            directory = root / name.replace(".", "-")
+            directory.mkdir()
+            (directory / name).symlink_to(external)
+            self.config["control_state_dir"] = str(directory)
+            with patch.dict(namespace, load_encoding=AsyncMock()):
+                await self.plugin.initialize()
+            self.assertIn("control_directory_outside_plugin", self.plugin.status)
+            self.assertIsNone(self.plugin.outbox)
+            self.assertEqual(external.read_text(), "outside")
+            self.assertEqual(external.stat().st_mode & 0o777, 0o644)
 
     async def test_background_probe_retries_then_cancels_without_leaking_resources(self):
         await self.plugin.client.close()

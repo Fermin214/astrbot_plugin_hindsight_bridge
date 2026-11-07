@@ -17,10 +17,18 @@ class QueueError(ValueError):
 
 
 class Control:
-    def __init__(self, directory: Path, deployment_id="", *, required=False):
+    def __init__(self, directory: Path, deployment_id="", *, required=False, root=None):
         self.directory = Path(directory)
         self.db = self.lock = None
         self._transaction_id = 0
+        if root is not None:
+            root = Path(root)
+            self.directory = self.directory.resolve()
+            names = ("", "control.lock", "control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm")
+            if root.resolve() != root or any(
+                not (self.directory / name).resolve().is_relative_to(root) for name in names
+            ):
+                raise QueueError("control_directory_outside_plugin")
         if required and not (self.directory / "control.sqlite3").is_file():
             raise QueueError("recovery_required:control_missing")
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -353,7 +361,8 @@ class Control:
             previous = self.setting(key)
             if previous:
                 try:
-                    revision = json.loads(previous)["revision"]
+                    previous = json.loads(previous)
+                    revision = previous["revision"]
                     if type(revision) is not int or revision < 1:
                         raise ValueError
                 except (ValueError, KeyError, TypeError):
@@ -361,6 +370,7 @@ class Control:
                 self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
                     "format": 1, "revision": revision + 1, "enabled": False,
                     "page_id": "", "mental_model_id": "",
+                    "invalidated": bool(previous.get("page_id") or previous.get("invalidated")),
                 }), key))
             self.bump()
         return self.db.execute(

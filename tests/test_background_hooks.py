@@ -1,6 +1,7 @@
 """Actual bridge methods with controlled native HTTP and host I/O."""
 
 import asyncio
+from dataclasses import replace
 import json
 import sys
 import time
@@ -79,6 +80,10 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Native background marker.", row["payload"])
         self.assertEqual(row["state"], "ready")
         self.assertEqual(self.plugin.hooks, 0)
+        panel = self.panel(SimpleNamespace(method="GET", query={}, username="admin"))
+        status = (await panel.user_scopes())[0]["background"]["status"]
+        self.assertTrue(status["used"])
+        self.assertEqual(status["message"], "上次聊天已使用知识页。")
         await self.plugin.add_memory(event, req)
         self.assertEqual(len(req.extra_user_content_parts), 1)
 
@@ -100,6 +105,10 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Full surviving fact.", req.extra_user_content_parts[0].text)
         self.assertNotIn("Native background marker.", req.extra_user_content_parts[0].text)
         self.assertEqual(self.plugin.outbox.db.execute("SELECT state FROM outbox").fetchone()[0], "ready")
+        panel = self.panel(SimpleNamespace(method="GET", query={}, username="admin"))
+        status = (await panel.user_scopes())[0]["background"]["status"]
+        self.assertFalse(status["used"])
+        self.assertIn("读取知识页超时", status["message"])
 
     async def test_recall_timeout_preserves_completed_background_with_failure_status(self):
         self.select()
@@ -200,6 +209,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                 await task
                 self.assertEqual(req.extra_user_content_parts, [])
                 self.assertEqual(self.plugin.hooks, 0)
+                self.assertEqual(self.plugin.background_outcomes, {})
 
     async def test_authentication_delay_does_not_start_page_or_second_full_deadline(self):
         self.select()
@@ -211,6 +221,48 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         await self.plugin.add_memory(event, req)
         self.assertFalse(any("mental-models" in str(call.url) for call in self.requests))
         self.assertEqual(self.plugin.recall_status(self.scope())["code"], "auth_timeout")
+        self.assertEqual(next(iter(self.plugin.background_outcomes.values()))["code"], "auth_timeout")
+
+    async def test_older_slow_chat_cannot_overwrite_newer_page_usage(self):
+        self.select()
+        self.plugin.outbox.set_mode(self.scope()["scope_id"], "readonly")
+        entered, release = asyncio.Event(), asyncio.Event()
+        reads = 0
+        async def gate():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                entered.set()
+                await release.wait()
+        self.page_gate = gate
+        old_event, old_request = self.turn("older")
+        older = asyncio.create_task(self.plugin.add_memory(old_event, old_request))
+        await entered.wait()
+        new_event, new_request = self.turn("newer")
+        await self.plugin.add_memory(new_event, new_request)
+        key = next(iter(self.plugin.background_outcomes))
+        newer = dict(self.plugin.background_outcomes[key])
+        self.assertTrue(newer["used"])
+        self.page_content = "large old page " * 1000
+        release.set()
+        await older
+        self.assertEqual(self.plugin.background_outcomes[key], newer)
+
+    async def test_new_bot_scope_prompts_reselection_without_copying_old_page_ids(self):
+        self.select()
+        queue = self.plugin.outbox
+        queue.access.observe_bot("qq", "aiocqhttp", "457")
+        incoming = replace(self.incoming, bot_id="457")
+        queue.activate(incoming, queue.access.authorization("qq", "123")["revision"])
+        scope = queue.scope(incoming)
+        panel = self.panel(SimpleNamespace(method="GET", query={}, username="admin"))
+        panel.bot_id = AsyncMock(return_value="457")
+        rows = await panel.user_scopes()
+        current = next(row for row in rows if row["scope_id"] == scope["scope_id"])
+        self.assertTrue(current["background"]["invalidated"])
+        self.assertIn("选择已失效", current["background"]["message"])
+        self.assertFalse(current["background"]["page_id"])
+        self.assertFalse(reference(queue, scope)["enabled"])
 
     async def test_cancelled_parallel_read_leaves_no_running_tasks_or_notice(self):
         self.select()

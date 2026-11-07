@@ -15,12 +15,12 @@ def definition(schema, value):
     return value
 
 
-def arguments(name):
+def arguments(name, content=MARKER):
     if name == "done":
         return {
-            "answer": MARKER, "markdown": MARKER, "answer_found": True,
+            "answer": content, "markdown": content, "answer_found": bool(content),
             "memory_ids": [], "observation_ids": [], "mental_model_ids": [],
-            "document": {"sections": [{"heading": "Background", "level": 2, "blocks": [MARKER]}]},
+            "document": {"sections": [{"heading": "Background", "level": 2, "blocks": [content]}] if content else []},
         }
     return {"query": "Cedar-120", "reason": "synthetic fixture", "max_tokens": 256}
 
@@ -46,7 +46,9 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.headers.get("Authorization") != "Bearer " + self.server.token:
+        local_chat = (getattr(self.server, "local_chat", False) and self.path == "/v1/chat/completions"
+                      and self.headers.get("Authorization") is None)
+        if self.headers.get("Authorization") != "Bearer " + self.server.token and not local_chat:
             self.send_error(401)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -61,6 +63,12 @@ class Handler(BaseHTTPRequestHandler):
             result = {"data": [{"index": i, "embedding": [0.01] * 64} for i in range(len(items))],
                       "usage": {"prompt_tokens": 1, "total_tokens": 1}}
         else:
+            request_text = json.dumps(body)
+            page_content = MARKER
+            if "HB-FEEDBACK-EMPTY" in request_text:
+                time.sleep(20)
+            elif "HB-FEEDBACK-LONG" in request_text:
+                page_content = "HB-FEEDBACK-LONG complete paragraph. " * 120
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):
@@ -90,23 +98,31 @@ class Handler(BaseHTTPRequestHandler):
             elif "creates" in properties:
                 self.server.counts["consolidation"] += 1
                 content = '{"creates":[],"updates":[],"deletes":[]}'
-            elif body.get("tools"):
+            elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):
                 choice = body.get("tool_choice")
                 name = choice.get("function", {}).get("name") if isinstance(choice, dict) else "done"
+                searched = any(
+                    call.get("function", {}).get("name") == "recall"
+                    for message in body.get("messages", []) for call in message.get("tool_calls", [])
+                )
+                if not isinstance(choice, dict) and not searched and any(
+                    tool.get("function", {}).get("name") == "recall" for tool in body["tools"]
+                ):
+                    name = "recall"
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": "fixture-call", "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments(name))},
+                    "function": {"name": name, "arguments": json.dumps(arguments(name, page_content))},
                 }]}
                 finish = "tool_calls"
                 self.server.counts["page"] += 1
             elif "call" in properties:
-                content = json.dumps({"call": {"name": "done", "arguments": arguments("done")}})
+                content = json.dumps({"call": {"name": "done", "arguments": arguments("done", page_content)}})
                 self.server.counts["page"] += 1
             elif "query" in properties:
                 content = json.dumps(arguments("search"))
                 self.server.counts["page"] += 1
             elif "answer_found" in properties or "markdown" in properties:
-                content = json.dumps(arguments("done"))
+                content = json.dumps(arguments("done", page_content))
                 self.server.counts["page"] += 1
             if finish != "tool_calls":
                 message = {"role": "assistant", "content": content}

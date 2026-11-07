@@ -681,6 +681,36 @@ test("background polling retains saved selection and clears references after Ban
   assert.equal(context.$("background-page").value, "");
 });
 
+test("chat usage and failures remain visible after index loading and polling", async () => {
+  const context = backgroundHarness();
+  const saved = context.data.scopes[0].background;
+  context.bridge = { apiGet: async () => ({ pages: [{ page_id: "kp-1", path: "Page" }],
+    selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1" }) };
+  for (const message of ["上次聊天已使用知识页。", "上次聊天未使用知识页：知识页太长。",
+    "上次聊天未使用知识页：读取知识页超时。", "上次聊天未使用知识页：知识页还没有正文。",
+    "上次聊天未使用知识页：找不到所选知识页。"]) {
+    saved.status = { message };
+    context.renderBackground();
+    assert.equal(context.$("background-status").textContent, message);
+    await context.loadBackground();
+    context.renderBackground();
+    assert.equal(context.$("background-status").textContent, message);
+    assert.equal(context.$("background-status").hidden, false);
+  }
+  context.scopeId = "two";
+  context.data.scopes.push({ scope_id: "two", bank: "bank-2", summary: {}, background: { revision: 0, enabled: false } });
+  context.renderBackground();
+  assert.equal(context.$("background-status").textContent, "");
+  context.scopeId = "one";
+  saved.invalidated = true;
+  saved.enabled = false;
+  saved.page_id = "";
+  saved.message = "身份或记忆库已变化，知识页选择已失效，请重新选择。";
+  context.renderBackground();
+  assert.equal(context.$("background-page").value, "");
+  assert.equal(context.$("background-status").textContent, saved.message);
+});
+
 test("historical and maintenance scopes never offer page reads; maintenance permits closing", () => {
   const context = backgroundHarness();
   context.data.scopes[0].summary.maintenance = {};

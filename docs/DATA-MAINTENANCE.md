@@ -14,7 +14,7 @@
 
 官方页面中的 Bank 是每个用户的记忆库，插件页用“记忆库 ID”标明归属。首次保存聊天时自动建库，无需在官方页面另建。
 
-填写过 `control_state_dir` 时，控制数据在指定目录中。默认两个插件目录随 AstrBot 的 `data` 持久保存；无需为了首次安装另加控制目录挂载。
+`control_state_dir` 留空使用默认控制目录，自定义绝对路径只能位于该目录及其子目录内，符号链接不能指向外部或其他插件。默认两个插件目录随 AstrBot 的 `data` 持久保存；无需为了首次安装另加控制目录挂载。
 
 通过向导安装的服务文件位于执行安装命令者的 `~/.local/share/astrbot-memory-<id>/`，`<id>` 为服务编号；自定义过安装目录时，以安装输出的路径为准。该目录包含 `.env` 和 `compose.yaml`，需要一同备份；在这个目录中操作数据库时，数据库服务名为 `memory-db`。`setup.json` 保存配套服务身份和 Key，应与插件配置一起保存。数据库存放在 `memory_postgres` 数据卷中，模型配置与凭据存放在 `memory_settings` 数据卷的 `models.json` 中，两个卷都需要备份。
 
@@ -163,18 +163,29 @@ docker compose up -d memory-api
 
 `accepted_operation_missing` 等故障不能只靠重试消除。保留原提交内容、operation ID 与最新控制数据，找回匹配的后端备份；无法确认旧任务时保持暂停。决定舍弃旧记忆时按清空记忆流程处理，清空无法恢复，清理后需重新开启，AstrBot 聊天记录不删除。官方管理地址与记忆库 ID可在插件页复制，网页登录密钥和 API Key 不放入普通用户诊断。
 
-## 自定义控制目录与搬迁
+## 控制目录挂载与旧路径迁移
 
-需要让业务与控制数据由不同备份任务管理时，可为 AstrBot 增加独立挂载：
+需要让业务与控制数据由不同备份任务管理时，将独立挂载放到专属控制目录，不通过插件配置指定外部路径：
 
 ```yaml
 services:
   astrbot:
     volumes:
       - ./astrbot-data:/AstrBot/data
-      - ./hindsight-control:/AstrBot/hindsight-control
+      - ./hindsight-control:/AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control
 ```
 
-插件填写 `control_state_dir=/AstrBot/hindsight-control`。两个主机目录都须允许 AstrBot 读写。已有控制数据时，停止插件后将原控制目录完整迁到新位置，再修改配置和挂载。
+`control_state_dir` 留空；也可填写专属目录内的绝对路径，例如 `/AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control/journal`。两个主机目录都须允许 AstrBot 读写。
+
+升级至 0.2.7 时，原外部路径会被拒绝，插件显示 `control_directory_outside_plugin`，不会自动创建替代控制库。迁移步骤：
+
+1. 保存插件配置、业务快照和最新控制库副本，记录业务库与控制库的 `deployment_id`、`control_id` 和控制修订号。
+2. 停止 AstrBot，确保插件 Worker 和 SQLite 连接全部退出。不要只暂停某个用户的记忆模式。
+3. 将旧控制目录完整复制到专属控制目录或其子目录，包含 `control.sqlite3` 和仍存在的 `control.sqlite3-wal`、`control.sqlite3-shm`；不要覆盖另一份控制库，也不要用指向外部目录的符号链接代替复制。目标目录已含数据时，先确认两份数据的身份和修订，选择匹配业务库的最新控制数据。
+4. 使用独立挂载时先将数据复制到对应主机目录，再更新挂载。目标目录权限设为 `0700`，控制库设为 `0600`，所有者须为 AstrBot 运行用户。
+5. 修改插件自身配置中的 `control_state_dir`：默认目录留空，子目录填写容器内的绝对路径。保持 `agent_id`、`service_id`、账号配置和业务库不变。
+6. 启动 AstrBot，查看插件状态，核对部署身份、控制库身份、Bank、代次、模式和清空记录，再完成必要的暂停进度检查。路径有效但数据缺失时仍会报告 `recovery_required:control_missing`，必须找回匹配的最新控制库，不能新建空库绕过。
+
+迁移完成并核对备份后，才可移除旧目录。恢复旧业务快照时仍须保留迁移后的最新控制库，不将控制库与业务库一起回滚。
 
 搬迁同一服务时沿用 `service_id`；API 地址发生变化，更新 `api_url` 并递增 `service_address_revision`。更换成另一套服务时使用新的服务标识。账号转移或合并历史记忆空间需要单独的数据迁移，不能靠修改 Agent 名称完成。
