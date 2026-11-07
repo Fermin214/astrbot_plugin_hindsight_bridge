@@ -40,8 +40,10 @@ window.AstrBotPluginView = {
     window.fixtureCalls.push({route, payload});
     if (!route.endsWith('/background') || 'bank' in payload) throw new Error('Unsafe payload');
     if (payload.revision !== window.fixtureScope.background.revision) throw new Error('Stale selection');
-    window.fixtureScope.background = {...window.fixtureScope.background, ...payload, revision: payload.revision + 1};
-    return {message: 'Saved'};
+    const pages = payload.page_ids.map(page_id => ({page_id, mental_model_id: 'mm-fixture'}));
+    window.fixtureScope.background = {...window.fixtureScope.background, ...payload, pages,
+      page_id: payload.page_ids[0] || '', revision: payload.revision + 1};
+    return {selection: structuredClone(window.fixtureScope.background), message: 'Saved'};
   }
 };
 """
@@ -79,14 +81,16 @@ async def main(port):
                 await page.goto(f"http://127.0.0.1:{port}/index.html" + ("?sandbox=1" if sandboxed else ""))
                 await page.locator('#background-page option[value="kp-fixture"]').wait_for(state="attached")
                 await page.locator("#background-page").select_option("kp-fixture")
+                await page.locator("#background-save").click()
                 await page.wait_for_function("window.fixtureScope.background.enabled === true")
                 await page.locator("#background-page").wait_for(state="visible")
                 await page.wait_for_function("!document.getElementById('background-page').disabled")
                 await page.locator("#background-page").select_option("")
+                await page.locator("#background-save").click()
                 await page.wait_for_function("window.fixtureScope.background.enabled === false")
                 calls = await page.evaluate("window.fixtureCalls")
                 assert len(calls) == 2 and all(call["route"] == "scopes/one/background" for call in calls)
-                assert calls[-1]["payload"]["page_id"] == "kp-fixture"
+                assert calls[-1]["payload"]["page_ids"] == ["kp-fixture"]
                 assert await page.evaluate("window.fixtureScope.mode") == "active"
                 assert await page.evaluate("window.fixtureCalls.length") == 2
                 assert not errors, errors

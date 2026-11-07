@@ -1551,8 +1551,6 @@ class MemoryPanel:
                     or payload.get("config_revision") != revision
                 ):
                     raise QueueError("reading_changed")
-                if payload["mode"] == "tools" and not await plugin.read_tools.availability(scope):
-                    raise PanelError("请先发送一条普通私聊，确认内置执行器、模型工具支持及会话工具列表。配置了回退模型或子代理交接时，按需工具不可用，可使用自动召回。")
                 await plugin.prepare_sources()
                 if (
                     not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
@@ -1594,8 +1592,6 @@ class MemoryPanel:
                     or payload.get("config_revision") != revision
                 ):
                     raise QueueError("reflect_changed")
-                if payload["enabled"] and not await plugin.read_tools.availability(scope, reflect=True):
-                    raise PanelError("请先发送一条普通私聊，确认模型与会话支持 Reflect 工具；回退模型或子代理交接不开放此功能。")
                 await plugin.prepare_sources()
                 if (
                     not guard.valid(plugin, metadata=closing) or self.config_revision() != revision

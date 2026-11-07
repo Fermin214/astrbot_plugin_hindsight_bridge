@@ -71,6 +71,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.dismiss_host_notice(page)
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
     await frame.locator("#reading-mode").select_option("tools")
+    await frame.locator("#reading-save").click()
     start = len(jsonl("reflect-trace"))
     shared = results(await chat("HB-REFLECT-SHARED"))
     assert any(item.get("kind") == "reflect" for item in shared)
@@ -79,6 +80,7 @@ async def verify(acceptance, page, frame, bank):
     assert (await acceptance.scope())["reflect"]["status"]["calls"] == 1
     assert len(jsonl("reflect-trace")) == start + 1
     await frame.locator("#reading-mode").select_option("automatic")
+    await frame.locator("#reading-save").click()
     acceptance.passed("reflect_is_per_user_and_shares_the_original_round_budget_with_read_tools")
 
     await acceptance.control("hold_reflect")
