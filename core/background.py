@@ -215,18 +215,18 @@ class ReadGuard:
         )
 
 
-def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None, on_demand=False):
+def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None, on_demand=False, prefix=""):
     """Keep whole native facts and a whole short page inside one shared budget."""
     diagnostics = {} if diagnostics is None else diagnostics
 
     def fits(value):
-        return len(value) <= chars and token_count(value, tokenizer) <= tokens
+        return len(prefix + value) <= chars and token_count(prefix + value, tokenizer) <= tokens
 
     def overflow(value):
         exceeded = diagnostics.setdefault("exceeded", [])
         for name, over in (
-            ("共享 token 上限", token_count(value, tokenizer) > tokens),
-            ("共享字符上限", len(value) > chars),
+            ("共享 token 上限", token_count(prefix + value, tokenizer) > tokens),
+            ("共享字符上限", len(prefix + value) > chars),
         ):
             if over and name not in exceeded:
                 exceeded.append(name)
@@ -259,7 +259,7 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
             return compose_background(
                 None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
                 page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
-                on_demand=on_demand,
+                on_demand=on_demand, prefix=prefix,
             )
     selected = []
     previous_block = ""
@@ -278,7 +278,7 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
         return compose_background(
             None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
             page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
-            on_demand=on_demand,
+            on_demand=on_demand, prefix=prefix,
         )
     if fits(result):
         return result.strip(), page_code, bool(block), bool(background)
@@ -286,7 +286,7 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
     return (fallback if fits(fallback) else ""), page_code or "background_too_large", False, False
 
 
-def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", on_demand=False):
+def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", on_demand=False, prefix=""):
     """Fit complete pages in selection order, then complete native recall items."""
     outcomes = [{
         **read["reference"], "code": read["code"], "used": False, "exceeded": [],
@@ -297,18 +297,18 @@ def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens
             reads[0]["page"], results, tokens=tokens, chars=chars, tokenizer=tokenizer,
             page_tokens=page_tokens, recall_code=recall_code, page_code=reads[0]["code"],
             diagnostics=diagnostics,
-            on_demand=on_demand,
+            on_demand=on_demand, prefix=prefix,
         )
         outcomes[0].update(code=code, used=used, exceeded=diagnostics.get("exceeded", []))
         return block, facts_used, outcomes
 
     def fits(text):
-        return len(text) <= chars and token_count(text, tokenizer) <= tokens
+        return len(prefix + text) <= chars and token_count(prefix + text, tokenizer) <= tokens
 
     def exceeded(text):
         return [label for label, over in (
-            ("共享 token 上限", token_count(text, tokenizer) > tokens),
-            ("共享字符上限", len(text) > chars),
+            ("共享 token 上限", token_count(prefix + text, tokenizer) > tokens),
+            ("共享字符上限", len(prefix + text) > chars),
         ) if over]
 
     candidates = {}

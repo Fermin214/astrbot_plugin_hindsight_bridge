@@ -4,6 +4,7 @@ import asyncio
 import copy
 from dataclasses import dataclass, field
 import json
+import secrets
 import time
 import weakref
 
@@ -118,9 +119,11 @@ class ToolTurn:
     output_tokens: int = 0
     output_bytes: int = 0
     request_ref: object = None
+    toolset_ref: object = None
     event_ref: object = None
     context_ref: object = None
     selected_provider: str | None = None
+    prefix: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -202,6 +205,28 @@ class MemoryTools:
         handoff = any(getattr(tool, "agent", None) is not None or tool.name.startswith("transfer_to_") for tool in tools)
         return bool(self.active() and provided == NAMES and not handoff)
 
+    def light_entry(self, tool):
+        original = self.owned.get(tool.name)
+        return bool(original and not getattr(tool, "handler_module_path", None)
+                    and getattr(tool, "handler", None) is None
+                    and tool.parameters == {"type": "object", "properties": {}}
+                    and tool.description == original.description)
+
+    def turn_tools_available(self, turn, request):
+        source = turn.toolset_ref()
+        current = getattr(request, "func_tool", None)
+        if self.eligible_tools(current):
+            return True
+        if not self.eligible_tools(source):
+            return False
+        # Native skills_like schemas lose handler identity; the retained request copy
+        # supplies ownership, while the public light schema supplies visibility.
+        tools = getattr(current, "tools", [])
+        return bool(
+            {tool.name for tool in tools if self.light_entry(tool) and getattr(tool, "active", False)} == NAMES
+            and not any(tool.name.startswith("transfer_to_") for tool in tools)
+        )
+
     def filter_request(self, event, request, original=None, *, enable=False):
         original = original if original is not None else getattr(request, "func_tool", None)
         if original is None:
@@ -251,6 +276,8 @@ class MemoryTools:
         actual = getattr(context, "context", None)
         if getattr(actual, "context", None) is not self.plugin.context or getattr(actual, "event", None) is not event:
             return
+        if not self.matches_request(turn, context):
+            return
         if turn.context_ref is not None:
             return
         if not self.valid(turn, event):
@@ -261,16 +288,48 @@ class MemoryTools:
 
     def finish(self, event, context):
         turn = self.turns.get(event)
-        if turn and turn.context_ref and turn.context_ref() is context:
+        if turn is None:
+            return True
+        actual = getattr(context, "context", None)
+        if getattr(actual, "context", None) is not self.plugin.context or getattr(actual, "event", None) is not event:
+            return False
+        if (turn.context_ref and turn.context_ref() is context) or (
+            turn.context_ref is None and self.matches_request(turn, context)
+        ):
             self.retire(turn)
+            self.turns.pop(event, None)
+            return True
+        return False
+
+    @staticmethod
+    def matches_request(turn, context):
+        if not turn.prefix:
+            return False
+        for message in getattr(context, "messages", []):
+            if getattr(message, "role", None) != "user":
+                continue
+            for part in getattr(message, "content", []):
+                if getattr(part, "_no_save", False) and getattr(part, "text", "").startswith(turn.prefix):
+                    return True
+        return False
+
+    def request_prefix(self, event):
+        turn = self.turns.get(event)
+        return turn.prefix if turn else ""
 
     def retire(self, turn):
         event, request = turn.event_ref(), turn.request_ref()
         turn.expires = 0
         if event is not None and self.turns.get(event) is turn:
-            self.turns.pop(event)
             if request is not None:
-                self.filter_request(event, request)
+                original = getattr(request, "func_tool", None)
+                if original is not None:
+                    selected = copy.copy(original)
+                    selected.tools = [tool for tool in original.tools if not self.own_entry(tool) and not self.light_entry(tool)]
+                    request.func_tool = selected
+            source = turn.toolset_ref()
+            if source is not None:
+                source.tools = [tool for tool in source.tools if not self.own_entry(tool)]
 
     async def prepare(self, event, request, incoming, scope, original):
         guard = ReadGuard.freeze(self.plugin, scope)
@@ -303,14 +362,16 @@ class MemoryTools:
         }
         if options["mode"] == "tools" and available:
             limits = context_limits(self.plugin.config)
-            self.turns[event] = ToolTurn(
+            turn = self.turns[event] = ToolTurn(
                 guard, options, incoming_digest(incoming, guard.queue.deployment_id), incoming.iso_timestamp,
                 event.unified_msg_origin, fingerprint, model, sequence, time.monotonic() + 120,
                 limits["tokens"], limits["chars"],
                 request_ref=request_ref, event_ref=weakref.ref(event),
                 selected_provider=selected_provider,
+                prefix="<hb-read-request:" + secrets.token_hex(12) + ">\n",
             )
             self.filter_request(event, request, original, enable=True)
+            turn.toolset_ref = weakref.ref(request.func_tool)
         return options
 
     def valid(self, turn, event):
@@ -320,7 +381,7 @@ class MemoryTools:
             self.closed or time.monotonic() >= turn.expires or not self.active()
             or request is None or getattr(request, "model", None) != turn.model
             or self.selected_provider(event) != turn.selected_provider
-            or not self.eligible_tools(getattr(request, "func_tool", None))
+            or not self.turn_tools_available(turn, request)
             or not turn.guard.valid(plugin, event)
             or not local_runner(plugin.context.get_config(turn.umo))
             or plugin.context.get_config(turn.umo).get("agent_runner", {}).get("config", {}).get("model", {}).get("fallback_provider_ids")
@@ -434,6 +495,7 @@ class MemoryTools:
         if (
             turn is None or getattr(actual, "context", None) is not self.plugin.context
             or turn.context_ref is None or turn.context_ref() is not context
+            or turn.expires == 0
         ):
             return canonical({"error": "tool_context_unavailable"})
         try:
@@ -442,7 +504,7 @@ class MemoryTools:
                 asyncio.timeout(min(3, recall_timeout(self.plugin.config))),
                 turn.lock,
             ):
-                if self.turns.get(event) is not turn or turn.context_ref is None:
+                if self.turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
                     return canonical({"error": "tool_context_unavailable"})
                 if turn.context_ref() is not context or not self.valid(turn, event):
                     self.record(turn, "unavailable", "reading_changed")
@@ -493,11 +555,11 @@ class MemoryTools:
                     self.record(turn, "error", "tool_read_failed")
                     return self.deliver(turn, {"error": "tool_read_failed"})
         except QueueError as exc:
-            if self.turns.get(event) is not turn:
+            if self.turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
             return self.deliver(turn, {"error": str(exc)})
         except TimeoutError:
-            if self.turns.get(event) is not turn:
+            if self.turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
             self.record(turn, "error", "tool_read_timeout")
             return self.deliver(turn, {"error": "tool_read_timeout"})

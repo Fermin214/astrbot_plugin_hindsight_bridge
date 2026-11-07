@@ -458,7 +458,7 @@ class HindsightBridge(Star):
                 client.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
 
-    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts=True):
+    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts=True, prefix=""):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
         limits = context_limits(self.config)
@@ -521,6 +521,7 @@ class HindsightBridge(Star):
                     reads, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
                     page_tokens=limits["page_tokens"], recall_code=recall_code,
                     on_demand=not include_facts,
+                    prefix=prefix,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
@@ -591,7 +592,8 @@ class HindsightBridge(Star):
 
     @filter.on_agent_done()
     async def remember_assistant(self, event, run_context, response):
-        self.read_tools.finish(event, run_context)
+        if not self.read_tools.finish(event, run_context):
+            return
         turn = self.turns.pop(event, None)
         if (
             turn is None
@@ -679,6 +681,7 @@ class HindsightBridge(Star):
         content = ""
         read_guard = None
         background_status = None
+        request_prefix = ""
         started = time.monotonic()
         try:
             self.refresh_permissions()
@@ -744,6 +747,7 @@ class HindsightBridge(Star):
                     }
             read_guard = ReadGuard.freeze(self, scope)
             options = await self.read_tools.prepare(event, req, incoming, scope, original_tools)
+            request_prefix = self.read_tools.request_prefix(event)
             on_demand = options["mode"] == "tools"
             history = [
                     ("用户" if m.role == "user" else "助手", m.text)
@@ -753,6 +757,7 @@ class HindsightBridge(Star):
                 memory, code, has_facts, background_status = await self.recall_background(
                     event, read_guard, incoming.text, history, timestamp=incoming.iso_timestamp,
                     include_facts=not on_demand,
+                    prefix=request_prefix,
                 )
                 outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
                 if code:
@@ -797,7 +802,7 @@ class HindsightBridge(Star):
                         self.record_recall(scope, outcome, started, code)
                         if not content:
                             content = recall_notice(code)
-                        req.extra_user_content_parts.append(TextPart(text=content).mark_as_temp())
+                        req.extra_user_content_parts.append(TextPart(text=request_prefix + content).mark_as_temp())
                         if (
                             read_guard is not None and read_guard.selection["enabled"]
                             and self.background_sequences.get(background_key) == sequence

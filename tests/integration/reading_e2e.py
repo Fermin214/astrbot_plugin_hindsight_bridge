@@ -32,6 +32,7 @@ def results(requests):
 
 
 async def verify(acceptance, page, frame, bank):
+    acceptance.report["tool_schema_mode"] = acceptance.settings.get("tool_schema_mode", "full")
     scope = await acceptance.scope()
     identifier = scope["scope_id"]
     before_options = scope["reading"]
@@ -131,6 +132,9 @@ async def verify(acceptance, page, frame, bank):
         archive.writestr(probe_name + "/metadata.yaml", "name: " + probe_name + "\ndesc: Native reading boundary probe\nversion: 1.0.0\nauthor: fixture\n")
     await acceptance.install("reading-guard-probe.zip")
     try:
+        await acceptance.action(identifier, "mode", mode="active")
+        await asyncio.sleep(1.1)
+        boundary_retains = len(jsonl("retain-trace"))
         boundary_recalls = len(jsonl("recall-trace"))
         guarded = await chat("HB-TOOLS-GUARDS")
         guard_results = results(guarded)
@@ -139,7 +143,14 @@ async def verify(acceptance, page, frame, bank):
         assert len(jsonl("recall-trace")) == boundary_recalls + 1
         probe = json.loads((ROOT / "reading-guard-probe.json").read_text())
         assert probe["secondary_agent_cannot_claim_or_consume_main_ledger"]
+        assert probe["secondary_main_hooks_cannot_claim_request_before_primary_agent"]
         assert probe["finished_agent_cannot_reuse_ledger"]
+        await acceptance.drained()
+        captured = [item for trace in jsonl("retain-trace")[boundary_retains:] for item in trace["body"]["items"]]
+        assert {item["metadata"]["role"] for item in captured} == {"user", "assistant"}
+        assert any("HB-TOOLS-GUARDS" in item["content"] for item in captured if item["metadata"]["role"] == "user")
+        assert not any("<hb-read-request:" in item["content"] for item in captured)
+        await acceptance.action(identifier, "mode", mode="readonly")
         await chat("HB-TOOLS-IDLE")
         probe = json.loads((ROOT / "reading-guard-probe.json").read_text())
         assert probe["unused_agent_ledger_is_closed_by_host_completion"]
@@ -194,6 +205,7 @@ async def verify(acceptance, page, frame, bank):
 
     stored = json.dumps(database(acceptance.history, "SELECT content FROM conversations"))
     assert "HB-TOOLS-V1-LINE-000" in stored and PREFIX + "read_page" in stored
+    assert "<hb-read-request:" not in stored
     retained = json.dumps(jsonl("retain-trace"))
     assert "HB-TOOLS-V1-LINE-000" not in retained
     assert "HB-TOOLS-V2-LINE-000" not in retained

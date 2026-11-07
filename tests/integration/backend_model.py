@@ -41,6 +41,9 @@ def bridge_tool_reply(body):
     messages = body.get("messages", [])
     last_user = next((index for index in range(len(messages) - 1, -1, -1)
                       if messages[index].get("role") == "user"), -1)
+    if last_user >= 0 and str(messages[last_user].get("content", "")).startswith("You have decided to call tool(s):"):
+        last_user = next((index for index in range(last_user - 1, -1, -1)
+                          if messages[index].get("role") == "user"), -1)
     query = json.dumps(messages[last_user].get("content", "")) if last_user >= 0 else ""
     current = [message for message in messages[last_user + 1:] if message.get("role") == "tool"]
     history = [tool_value(message) for message in messages if message.get("role") == "tool"]
@@ -64,7 +67,7 @@ def bridge_tool_reply(body):
         kind, params = "read_page", {"page_id": page["page_id"], "start_line": page["next_line"], "version": page["version"]}
     elif "HB-TOOLS-QUOTA" in query and len(current) < 6:
         kind, params = "recall", {"query": "Cedar-120 quota " + str(len(current))}
-    elif "HB-TOOLS-PROBE-BACKGROUND" in query and not current:
+    elif "HB-TOOLS-PROBE-" in query and not current:
         kind, params = "recall", {"query": "Cedar-120"}
     if not kind:
         return {"role": "assistant", "content": "HB-TOOLS-ANSWER"}, "stop"

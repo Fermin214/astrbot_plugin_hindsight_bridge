@@ -13,12 +13,20 @@ import test_runtime_diagnostics as runtime
 import test_background_hooks as hooks
 from plugins.astrbot_plugin_hindsight_bridge.core import reading
 from plugins.astrbot_plugin_hindsight_bridge.core.agent_tools import NAMES, read_options, save_options
+from plugins.astrbot_plugin_hindsight_bridge.core.background import compose_backgrounds
 from plugins.astrbot_plugin_hindsight_bridge.core.client import BACKGROUND_MAX_BYTES, HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.control import QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import canonical
 
 
 class ReadContracts(unittest.IsolatedAsyncioTestCase):
+    def test_request_marker_is_inside_the_shared_background_budget(self):
+        prefix = "<hb-read-request:" + "a" * 24 + ">\n"
+        rows = [{"text": "complete fact " * 20}]
+        block, _, _ = compose_backgrounds([], rows, tokens=100, chars=170, tokenizer="o200k_base", prefix=prefix)
+        self.assertLessEqual(len(prefix + block), 170)
+        self.assertLessEqual(reading.token_count(prefix + block, "o200k_base"), 100)
+
     async def test_history_array_is_bounded_before_projection_and_does_not_expose_failure_details(self):
         rows = [{"changed_at": "2026-11-07T00:00:00+00:00", "kind": "refresh_failed",
                  "previous_content": None, "error_message": "private provider key"}]
@@ -75,6 +83,11 @@ class ToolRequest:
     pass
 
 
+class ToolSet:
+    def __init__(self, tools):
+        self.tools = tools
+
+
 class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = runtime.RuntimeDiagnostics.asyncTearDown
     turn = runtime.RuntimeDiagnostics.turn
@@ -86,7 +99,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.tools = self.plugin.read_tools
         self.provider = SimpleNamespace(provider_config={"id": "fixture", "modalities": ["tool_use"]}, get_model=lambda: "fixture")
         self.context.get_using_provider_async = AsyncMock(return_value=self.provider)
-        self.tools.owned = {name: SimpleNamespace(name=name, active=True, handler_module_path="bridge.main") for name in NAMES}
+        self.tools.owned = {name: SimpleNamespace(name=name, description=name, active=True, handler_module_path="bridge.main") for name in NAMES}
         self.tools.manager = SimpleNamespace(get_func=lambda name: self.tools.owned.get(name), remove_func=lambda name: None)
 
     async def ready(self):
@@ -95,13 +108,16 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         request.model = None
         scope = self.scope()
         save_options(self.plugin.outbox, scope, revision=0, mode="tools")
-        request.func_tool = SimpleNamespace(tools=list(self.tools.owned.values()))
+        request.func_tool = ToolSet(list(self.tools.owned.values()))
         original = self.tools.filter_request(event, request)
         self.assertEqual(request.func_tool.tools, [])
         await self.tools.prepare(event, request, self.incoming, scope, original)
         self.assertEqual(len(request.func_tool.tools), len(NAMES))
         context = RunContext()
         context.context = SimpleNamespace(context=self.context, event=event)
+        context.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(
+            text=self.tools.request_prefix(event) + "notice", _no_save=True,
+        )])]
         await self.plugin.bind_memory_tools(event, context)
         return event, context
 
@@ -121,15 +137,21 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("tool_budget_exhausted" in (item or "") for item in results))
         self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
         self.assertEqual(self.request.func_tool.tools, [])
+        self.assertEqual(turn.expires, 0)
+        self.tools.finish(event, context)
         self.assertNotIn(event, self.tools.turns)
 
     async def test_only_agent_begin_binds_context_and_agent_done_retires_unused_turn(self):
         event, context = await self.ready()
         foreign = RunContext()
         foreign.context = context.context
+        foreign.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(text="independent task", _no_save=False)])]
         turn = self.tools.turns[event]
         turn.context_ref = None
         with patch.object(self.tools, "read", AsyncMock()) as read:
+            self.tools.begin(event, foreign)
+            self.assertIsNone(turn.context_ref)
+            self.assertFalse(self.tools.finish(event, foreign))
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
             self.tools.begin(event, context)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
@@ -155,9 +177,31 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
             self.assertIn("tool_context_unavailable", await self.tools.execute(context, "recall", {"query": "q"}))
             read.assert_not_awaited()
         self.request.func_tool.tools = list(self.tools.owned.values())
+        self.tools.finish(event, context)
         await self.tools.prepare(event, self.request, self.incoming, self.scope(), self.request.func_tool)
         self.assertFalse(self.tools.public(self.scope())["observed_available"])
         self.assertNotIn(event, self.tools.turns)
+
+    async def test_native_light_schemas_preserve_request_ownership_and_retire_cached_source_tools(self):
+        event, context = await self.ready()
+        turn = self.tools.turns[event]
+        turn.context_ref = None
+        source = self.request.func_tool
+        foreign = SimpleNamespace(name="foreign", description="foreign", active=True, handler_module_path="other.main")
+        source.tools.append(foreign)
+        self.request.func_tool = ToolSet([SimpleNamespace(
+            name=tool.name, description=tool.description, parameters={"type": "object", "properties": {}},
+            handler=None, handler_module_path=None, active=True,
+        ) for tool in source.tools])
+        self.tools.begin(event, context)
+        self.assertIs(turn.context_ref(), context)
+        with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "items": []})) as read:
+            results = [await self.tools.execute(context, "recall", {"query": "q"}) for _ in range(5)]
+        self.assertEqual(read.await_count, 4)
+        self.assertIn("tool_budget_exhausted", results[-1])
+        self.assertEqual([tool.name for tool in self.request.func_tool.tools], ["foreign"])
+        self.assertEqual(source.tools, [foreign])
+        self.assertTrue(self.tools.active())
 
     async def test_output_exhaustion_returns_a_notice_and_never_ends_host_chat_with_none(self):
         event, context = await self.ready()
