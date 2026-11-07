@@ -152,6 +152,7 @@ class LiveHarnessTests(unittest.TestCase):
             state = object.__new__(harness.Environment)
             state.output, state.owner = Path(directory), "hb-live-12345678"
             state.resources = {"owner": state.owner, "projects": [], "processes": []}
+            state.save_resources()
             process = state.start_process("model-proxy", [sys.executable, "-c", "import time; time.sleep(30)"])
             unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
             try:
@@ -176,6 +177,66 @@ class LiveHarnessTests(unittest.TestCase):
                     attached.wait()
                 unrelated.terminate()
                 unrelated.wait()
+
+    def test_cleanup_stops_a_child_after_its_launcher_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = object.__new__(harness.Environment)
+            state.output, state.owner = Path(directory), "hb-live-12345678"
+            state.resources = {"owner": state.owner, "projects": [], "processes": []}
+            state.save_resources()
+            marker = state.output / "child.pid"
+            child = ("import os,signal,time;from pathlib import Path;"
+                     "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                     f"Path({str(marker)!r}).write_text(str(os.getpid()));time.sleep(30)")
+            launcher = f"import subprocess,sys;subprocess.Popen([sys.executable,'-c',{child!r}])"
+            process = state.start_process("proxy-launcher", [sys.executable, "-c", launcher])
+            try:
+                process.wait(timeout=3)
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                pid = int(marker.read_text())
+                self.assertIsNotNone(harness.Environment.process_start(pid))
+                with patch.object(state, "remove_resources"):
+                    state.cleanup()
+                self.assertIsNone(harness.Environment.process_start(pid))
+            finally:
+                try:
+                    harness.os.killpg(process.pid, harness.signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_cleanup_closes_registration_before_removing_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = object.__new__(harness.Environment)
+            state.output, state.owner = Path(directory), "hb-live-12345678"
+            state.resources = {"owner": state.owner, "projects": [], "processes": []}
+            state.save_resources()
+            started, release = threading.Event(), threading.Event()
+            failures = []
+            def removing(*args, **kwargs):
+                started.set()
+                release.wait(3)
+            def clean():
+                try:
+                    state.cleanup()
+                except Exception as error:
+                    failures.append(error)
+            with patch.object(state, "remove_resources", side_effect=removing):
+                worker = threading.Thread(target=clean)
+                worker.start()
+                try:
+                    self.assertTrue(started.wait(3))
+                    attached = harness.Environment.load_resources(state.output)
+                    with patch.object(harness.subprocess, "Popen") as launch:
+                        with self.assertRaisesRegex(RuntimeError, "closed"):
+                            attached.start_process("late-proxy", [sys.executable, "-c", "pass"])
+                        launch.assert_not_called()
+                finally:
+                    release.set()
+                    worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
 
     def test_cleanup_attempts_other_owned_resources_after_one_project_fails(self):
         with tempfile.TemporaryDirectory() as directory:

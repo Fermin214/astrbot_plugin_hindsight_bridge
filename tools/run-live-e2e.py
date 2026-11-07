@@ -389,6 +389,8 @@ class Environment:
         with resource_lock(self.output):
             if path.exists():
                 saved = json.loads(path.read_text())
+                if saved.get("closed"):
+                    raise RuntimeError("Acceptance environment is closed")
                 self.resources["projects"] = sorted(set(saved["projects"] + self.resources["projects"]))
                 processes = {(item["pid"], item["start"]): item
                              for item in saved["processes"] + self.resources["processes"]}
@@ -413,14 +415,34 @@ class Environment:
     def start_process(self, role, command):
         if not re.fullmatch(r"[a-z0-9-]+", role):
             raise ValueError("Invalid acceptance process role")
-        with (self.output / (role + ".log")).open("wb") as log:
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
-        self.resources["processes"].append({
-            "role": role, "pid": process.pid, "start": self.process_start(process.pid),
-        })
-        self.save_resources()
+        with resource_lock(self.output):
+            self.resources = json.loads((self.output / "acceptance-resources.json").read_text())
+            if self.resources.get("closed"):
+                raise RuntimeError("Acceptance environment is closed")
+            with (self.output / (role + ".log")).open("wb") as log:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                           stderr=subprocess.STDOUT, start_new_session=True,
+                                           env={**os.environ, "HINDSIGHT_BRIDGE_ACCEPTANCE_OWNER": self.owner})
+            self.resources["processes"].append({
+                "role": role, "pid": process.pid, "start": self.process_start(process.pid),
+            })
+            private_json(self.output / "acceptance-resources.json", self.resources)
         return process
+
+    def owned_process_group(self, resource):
+        current = self.process_start(resource["pid"])
+        if current is not None:
+            return current == resource["start"]
+        marker = ("HINDSIGHT_BRIDGE_ACCEPTANCE_OWNER=" + self.owner).encode()
+        for path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = path.read_text().rsplit(")", 1)[1].split()
+                if fields[0] != "Z" and int(fields[2]) == resource["pid"]:
+                    if marker in path.with_name("environ").read_bytes().split(b"\0"):
+                        return True
+            except OSError:
+                continue
+        return False
 
     def owned(self, name):
         label = subprocess.check_output(["docker", "inspect", "--format", '{{index .Config.Labels "hindsight-bridge.test"}}', name], text=True).strip()
@@ -590,19 +612,28 @@ class Environment:
                 self.docker(kind, "rm", *names, stdout=subprocess.DEVNULL)
 
     def cleanup(self):
-        self.resources = self.load_resources(self.output).resources
+        with resource_lock(self.output):
+            path = self.output / "acceptance-resources.json"
+            self.resources = json.loads(path.read_text())
+            self.resources["closed"] = True
+            private_json(path, self.resources)
         failures = []
         for resource in reversed(self.resources["processes"]):
             pid = resource["pid"]
-            if not resource["start"] or self.process_start(pid) != resource["start"]:
+            if not self.owned_process_group(resource):
                 continue
             try:
                 os.killpg(pid, signal.SIGTERM)
                 deadline = time.monotonic() + 3
-                while self.process_start(pid) == resource["start"] and time.monotonic() < deadline:
+                while self.owned_process_group(resource) and time.monotonic() < deadline:
                     time.sleep(0.05)
-                if self.process_start(pid) == resource["start"]:
+                if self.owned_process_group(resource):
                     os.killpg(pid, signal.SIGKILL)
+                    deadline = time.monotonic() + 1
+                    while self.owned_process_group(resource) and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    if self.owned_process_group(resource):
+                        failures.append("Process group did not stop: " + resource["role"])
             except ProcessLookupError:
                 pass
         for label, project in [
