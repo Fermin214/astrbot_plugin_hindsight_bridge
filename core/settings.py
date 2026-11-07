@@ -68,7 +68,8 @@ def snapshot(plugin):
         effective["query_tokenizer"] = getattr(plugin.client, "tokenizer", stored["query_tokenizer"])
     if plugin.outbox:
         effective["queue_max_tasks"] = getattr(plugin.outbox, "max_tasks", stored["queue_max_tasks"])
-        effective["queue_max_mib"] = getattr(plugin.outbox, "max_bytes", stored["queue_max_mib"] * 1024 * 1024) // (1024 * 1024)
+        max_bytes = getattr(plugin.outbox, "max_bytes", None)
+        effective["queue_max_mib"] = max_bytes // (1024 * 1024) if max_bytes is not None else stored["queue_max_mib"]
     return {
         "values": stored,
         "effective": effective,

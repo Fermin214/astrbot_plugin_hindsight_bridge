@@ -170,10 +170,21 @@ class ReadGuard:
         )
 
 
-def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code=""):
+def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None):
     """Keep whole native facts and a whole short page inside one shared budget."""
+    diagnostics = {} if diagnostics is None else diagnostics
+
     def fits(value):
         return len(value) <= chars and token_count(value, tokenizer) <= tokens
+
+    def overflow(value):
+        exceeded = diagnostics.setdefault("exceeded", [])
+        for name, over in (
+            ("共享 token 上限", token_count(value, tokenizer) > tokens),
+            ("共享字符上限", len(value) > chars),
+        ):
+            if over and name not in exceeded:
+                exceeded.append(name)
 
     background = ""
     if page and page.get("content", "").strip():
@@ -182,6 +193,9 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
             background = candidate
         else:
             page_code = "background_too_large"
+            if token_count(candidate, tokenizer) > page_tokens:
+                diagnostics.setdefault("exceeded", []).append("知识页 token 上限")
+            overflow(candidate)
     elif page is not None:
         page_code = "background_empty"
     status = []
@@ -194,9 +208,10 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
     suffix = "\n" + " ".join(status) if status else ""
     if not fits(background + suffix):
         if background:
+            overflow(background + suffix)
             return compose_background(
                 None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
-                page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large",
+                page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
             )
     selected = []
     previous_block = ""
@@ -211,9 +226,10 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
     block = memory_block(selected, limit=chars)
     result = "\n\n".join(filter(None, (background, block))) + suffix
     if not fits(result) and background:
+        overflow(result)
         return compose_background(
             None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
-            page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large",
+            page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
         )
     if fits(result):
         return result.strip(), page_code, bool(block), bool(background)

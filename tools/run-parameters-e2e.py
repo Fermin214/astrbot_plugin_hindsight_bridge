@@ -47,6 +47,7 @@ def main():
         args.model_environment = Path(directory) / "environment.json"
         args.model_environment.write_text(json.dumps({"ASTRBOT_MEMORY_MODEL_CONFIG": "{}"}))
         state = FixtureManaged(args)
+        state.model_environment = args.model_environment
         state.driver = "parameters_e2e.py"
         state.settings.update(parameter_managed=True, stop_timeout=10, chat_tokens=512)
         try:

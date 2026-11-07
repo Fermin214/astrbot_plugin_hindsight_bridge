@@ -361,7 +361,8 @@ function renderParameters({ discard = false } = {}) {
   const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
     service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
   $("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
-    [el("dt", "", labels[key] || key), el("dd", "", value || "默认专属目录")]));
+    [el("dt", "", labels[key] || key), el("dd", "", value || (key === "control_state_dir"
+      ? "data/plugin_data/astrbot_plugin_hindsight_bridge_control" : "未设置"))]));
   renderParameterLimits();
 }
 
@@ -1213,6 +1214,7 @@ async function prepareForget(button, id) {
 $("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void (managedMode() ? saveAccess() : saveSettings()).catch((error) => notify(errorMessage(error), true)); });
 $("parameters-form").addEventListener("input", () => {
   if (parameterDraft) parameterDraft.dirty = true;
+  $("parameters-feedback").hidden = true;
   renderParameterLimits();
 });
 $("parameters-form").addEventListener("submit", (event) => {

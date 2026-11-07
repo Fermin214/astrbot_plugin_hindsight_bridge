@@ -281,6 +281,18 @@ class References(unittest.TestCase):
 
 
 class ContextComposition(unittest.TestCase):
+    def test_state_text_reports_shared_overflow_when_the_page_alone_fits(self):
+        page = native_model(content="An entire page.")
+        check = check_page(page, tokens=8192, chars=32768, page_tokens=8192, tokenizer="o200k_base")
+        diagnostics = {}
+        _, code, _, used = compose_background(
+            page, [], tokens=8192, chars=check["chars"], page_tokens=8192,
+            tokenizer="o200k_base", diagnostics=diagnostics,
+        )
+        self.assertEqual(code, "background_too_large")
+        self.assertFalse(used)
+        self.assertEqual(diagnostics["exceeded"], ["共享字符上限"])
+
     def test_page_budget_is_independent_and_larger_shared_limits_preserve_whole_content(self):
         page = native_model(content="完整知识页。预算独立。" * 140)
         limits = context_limits({
@@ -300,13 +312,15 @@ class ContextComposition(unittest.TestCase):
         self.assertLessEqual(token_count(block), 6000)
         self.assertLessEqual(len(block), 24000)
         for tokens, chars, page_tokens in ((1200, 24000, 4096), (6000, 256, 4096), (6000, 24000, 400)):
+            diagnostics = {}
             block, code, _, used = compose_background(
                 page, [{"text": "Whole fact survives."}], tokenizer="o200k_base",
-                tokens=tokens, chars=chars, page_tokens=page_tokens,
+                tokens=tokens, chars=chars, page_tokens=page_tokens, diagnostics=diagnostics,
             )
             self.assertFalse(used)
             self.assertEqual(code, "background_too_large")
             self.assertIn("Whole fact survives.", block)
+            self.assertEqual(len(diagnostics["exceeded"]), 1)
         medium = native_model(content="neutral " * 210)
         block, code, _, used = compose_background(
             medium, [{"text": "fact"}], tokens=600, chars=4000, tokenizer="o200k_base",

@@ -40,6 +40,7 @@ jobs:
           python-version: "3.12"
       - run: python tools/build-test-package.py --output "${{ runner.temp }}/hindsight-delivery"
       - name: Official AstrBot archive installation, requests, history and upgrade
+        shell: bash
         run: |
           docker run --rm --name hindsight-bridge-delivery-astrbot \
             --label hindsight-bridge.test=delivery --memory 1536m \
@@ -121,6 +122,7 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: docker build -t hindsight-bridge-delivery-postgres:17 deploy/postgres
       - name: Native parameter save, long-page chat and reload persistence
+        shell: bash
         run: |
           python tools/run-parameters-e2e.py \
             --mode "${{ matrix.mode }}" \
