@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .client import HindsightClient, HindsightError
-from .background import ReadGuard, reference, save_reference
+from .background import ReadGuard, check_page, context_limits, reference, save_reference
 from .diagnostics import (
     ConfigurationError, configuration_message, connection_fields, missing_connection,
     recall_timeout,
@@ -1266,6 +1266,7 @@ class MemoryPanel:
         plugin = self.plugin
         try:
             recall_timeout(plugin.config)
+            context_limits(plugin.config)
         except ConfigurationError as exc:
             raise PanelError(self.error_message(str(exc))) from None
         control_plane_url = self.control_plane_url(
@@ -1496,6 +1497,8 @@ class MemoryPanel:
 
             pages = []
             model_id = ""
+            check = None
+            limits = context_limits(plugin.config)
             if reading or (page_id and not closing):
                 await guard.client.ensure_auth()
                 await recheck()
@@ -1513,17 +1516,43 @@ class MemoryPanel:
                 model = await guard.client.background_page(scope["bank"], model_id)
                 if page["body"] != model["content"]:
                     raise QueueError("background_changed")
+                check = check_page(model, tokenizer=guard.client.tokenizer, **{
+                    k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                })
+            elif reading and guard.selection["enabled"]:
+                selected = next((page for page in pages if page["page_id"] == guard.selection["page_id"]), None)
+                if selected:
+                    if selected["mental_model_id"] != guard.selection["mental_model_id"]:
+                        raise QueueError("background_changed")
+                    try:
+                        model = await guard.client.background_page(scope["bank"], selected["mental_model_id"])
+                        check = check_page(model, tokenizer=guard.client.tokenizer, **{
+                            k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                        })
+                    except HindsightError as exc:
+                        if exc.authentication or exc.code == "bank_missing":
+                            raise
+                        check = {"code": exc.code, "message": self.error_message(exc.code)}
+                else:
+                    check = {"code": "background_missing", "message": self.error_message("background_missing")}
+            if check is not None and "tokens" in check:
+                check["message"] = (
+                    f"含说明与元数据：{check['tokens']} token、{check['chars']} 字符"
+                    f"（知识页上限 {limits['page_tokens']} token，共享 {limits['tokens']} token / {limits['chars']} 字符）。"
+                    + (self.error_message(check["code"]) if check["code"] else "长度检查通过；聊天时仍与检索结果共用总预算。")
+                )
             await recheck()
             if not reading:
                 selection = save_reference(
                     guard.queue, scope, revision=payload["revision"], page_id=page_id,
                     model_id=model_id, enabled=payload["enabled"],
                 )
-                return {"selection": selection, "message": "知识页选择已保存。"}
+                return {"selection": selection, "check": check, "message": "知识页选择已保存。"}
             return {
                 "pages": [{k: page[k] for k in ("page_id", "path", "index_stale")} for page in pages],
                 "selection": guard.selection, "scope_revision": scope["revision"],
                 "config_revision": revision,
+                "check": check, "budget": limits,
             }
 
     async def action(self, scope_id):

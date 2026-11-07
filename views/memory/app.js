@@ -612,7 +612,7 @@ function renderBackground() {
     backgroundReadRevision++;
     backgroundDraft = { snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
       revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
-      pages: [], loaded: false, loading: false, attempted: false };
+      pages: [], check: null, loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
@@ -634,6 +634,16 @@ function renderBackground() {
   const status = messages.filter(Boolean).join(" ");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
+  const check = saved.enabled && !saved.invalidated ? backgroundDraft.check?.message || "" : "";
+  $("background-check").textContent = check;
+  $("background-check").hidden = !check;
+  const indexed = saved.enabled && !saved.invalidated
+    ? backgroundDraft.pages.find((page) => page.page_id === saved.page_id) : null;
+  const index = indexed ? (indexed.index_stale === true ? "目录标记：有新记忆待刷新。"
+    : indexed.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。")
+    + "目录标记不保证正文已包含全部记忆；刷新请在官方面板操作。" : "";
+  $("background-index").textContent = index;
+  $("background-index").hidden = !index;
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
 
@@ -649,6 +659,7 @@ async function loadBackground() {
     if (!Array.isArray(response.pages) || !response.selection) throw new Error("知识页列表无法读取，请刷新页面重试。");
     if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
+    draft.check = response.check || null;
     draft.loaded = true;
     $("background-feedback").hidden = true;
     renderBackground();
@@ -675,6 +686,10 @@ async function saveBackground() {
     const response = await bridge.apiPost(endpoint("background", draft.id), payload);
     if (backgroundDraft !== draft || scopeId !== draft.id) return;
     await refreshBootstrap();
+    if (backgroundDraft?.id === draft.id && response.selection?.revision === backgroundDraft.revision) {
+      backgroundDraft.check = response.check || null;
+      renderBackground();
+    }
     notify(response.message || "知识页选择已保存。", false, "background-feedback");
   }, "background-feedback");
 }

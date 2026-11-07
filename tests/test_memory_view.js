@@ -722,6 +722,26 @@ test("historical and maintenance scopes never offer page reads; maintenance perm
   assert.equal(context.$("background-page").disabled, true);
 });
 
+test("page length and index checks stay separate from chat usage and clear on scope change", async () => {
+  const context = backgroundHarness();
+  context.data.scopes[0].background.status = { message: "上次聊天已使用知识页。" };
+  for (const [stale, label] of [[true, "有新记忆待刷新"], [false, "未标记待刷新"], [null, "更新状态未知"]]) {
+    context.bridge = { apiGet: async () => ({
+      pages: [{ page_id: "kp-1", path: "Page", index_stale: stale }],
+      selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1",
+      check: { message: "含说明与元数据：1800 token、4000 字符。知识页太长。" },
+    }) };
+    await context.loadBackground();
+    assert.match(context.$("background-index").textContent, new RegExp(label));
+    assert.match(context.$("background-check").textContent, /1800 token/);
+    assert.equal(context.$("background-status").textContent, "上次聊天已使用知识页。");
+  }
+  context.data.scopes[0].background.enabled = false;
+  context.renderBackground();
+  assert.equal(context.$("background-check").hidden, true);
+  assert.equal(context.$("background-index").hidden, true);
+});
+
 test("late background index cannot overwrite another user's draft", async () => {
   const context = backgroundHarness();
   let release;
