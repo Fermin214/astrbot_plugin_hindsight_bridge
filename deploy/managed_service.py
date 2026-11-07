@@ -222,16 +222,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self.send(200, {"ok": True})
-        if self.path.startswith("/identity/"):
-            challenge = self.path.removeprefix("/identity/")
-            if not re.fullmatch(r"[0-9a-f]{64}", challenge):
-                return self.send(400, {"message": "身份请求无效。"})
-            identity = self.server.runtime.identity
-            signature = hmac.new(
-                self.server.management_key.encode(),
-                ("astrbot-memory-identity:" + identity + ":" + challenge).encode(), hashlib.sha256,
-            ).hexdigest()
-            return self.send(200, {"installation_id": identity, "signature": signature})
         if not self.authorized():
             return self.send(401, {"message": "连接凭据无效。"})
         if self.path != "/status":

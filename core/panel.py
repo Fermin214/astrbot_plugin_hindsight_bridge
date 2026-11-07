@@ -931,19 +931,6 @@ class MemoryPanel:
                 trust_env=False, follow_redirects=False, timeout=360 if environment is not None else 3,
             ) as http:
                 headers = {"Authorization": "Bearer " + key}
-                if endpoints:
-                    # Prove ownership before sending credentials to a Docker-assigned address.
-                    challenge = secrets.token_hex(32)
-                    response = await http.get(url + "/identity/" + challenge)
-                    response.raise_for_status()
-                    proof = response.json()
-                    expected = hmac.new(key.encode(), (
-                        "astrbot-memory-identity:" + state["id"] + ":" + challenge
-                    ).encode(), hashlib.sha256).hexdigest()
-                    if (proof.get("installation_id") != state["id"]
-                            or not isinstance(proof.get("signature"), str)
-                            or not hmac.compare_digest(proof["signature"], expected)):
-                        raise PanelError("配套服务标识不匹配，请重新执行安装命令。")
                 response = await http.get(url + "/status", headers=headers)
                 response.raise_for_status()
                 status = response.json()
@@ -996,8 +983,9 @@ class MemoryPanel:
                 container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
                 setup_path=str(self.directory() / "setup.json"),
             )
-            state.setdefault("api_url", result["api_url"])
-            state.setdefault("management_url", result["management_url"])
+            for field in ("api_url", "management_url"):
+                if not Path("/.dockerenv").exists() or not state.get(field):
+                    state[field] = result[field]
             control_plane_url = self.control_plane_url(result.get("control_plane_url", ""))
             if control_plane_url:
                 state["control_plane_url"] = control_plane_url
@@ -1137,14 +1125,11 @@ class MemoryPanel:
             async with self.lock:
                 state = self.check_connection_job(job)
                 previous_url = state["api_url"]
-                previous_service = self.plugin.config.get("service_id") if self.managed_connection(state) else None
                 status = await self.managed_request(state)
+                self.check_connection_job(job)
                 if state["api_url"] != previous_url or state.get("management_url") != self.state().get("management_url"):
                     self.store_state(state)
-                    self.persist_connection_job(
-                        job, expected_revision=self.config_revision(),
-                        managed_service_id=previous_service or job.get("managed_service_id", ""),
-                    )
+                    self.persist_connection_job(job, expected_revision=self.config_revision())
                 if status.get("configuration_fingerprint") is None:
                     raise PanelError("配套组件不支持接入结果核对，请先重新部署配套服务文件，再保存并连接。")
                 deadline = time.monotonic() + 360
@@ -1488,13 +1473,7 @@ class MemoryPanel:
         if old_url and old_service:
             connections[old_url] = old_service
         service = connections.get(client.url)
-        same_managed_service = (
-            mode == "managed" and job is not None and job.get("managed_service_id") == old_service
-            and old_service and key == state.get("api_key") and client.url == self.connection_url(state.get("api_url", ""))
-        )
-        if same_managed_service:
-            service = old_service
-        elif not service or (client.url != old_url and service == old_service):
+        if not service or (client.url != old_url and service == old_service):
             service = "memory-" + secrets.token_hex(6)
         connections[client.url] = service
         if mode is not None:

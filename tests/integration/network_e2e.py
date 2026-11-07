@@ -47,7 +47,7 @@ class Network(Connection):
         async with self.session.get(api_url + "/v1/default/banks") as response:
             assert response.status == 401
         self.report["host_bindings"] = self.settings["verified_host_bindings"]
-        self.passed("api_and_management_reject_missing_credentials_and_host_bindings_use_loopback")
+        self.passed("api_and_management_reject_missing_credentials_and_host_bindings_match_network")
 
         bootstrap = await self.bootstrap()
         result = await self.http("POST", self.prefix + "/install/prepare", payload={

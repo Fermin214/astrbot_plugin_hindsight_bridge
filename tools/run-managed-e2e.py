@@ -128,12 +128,15 @@ class Managed(live.Environment):
         if action != "managed_uninstall":
             name = subprocess.check_output(["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=" + project,
                                             "--filter", "label=com.docker.compose.service=memory-api"], text=True).strip()
-            api_network = project + "-clients" if self.network_mode == "host" else self.network
+            api_network = self.network if self.network_mode == "custom" else project + "-clients"
             address = subprocess.check_output(["docker", "inspect", "--format", '{{(index .NetworkSettings.Networks "' + api_network + '").IPAddress}}', name], text=True).strip()
             bindings = json.loads(subprocess.check_output(["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", name], text=True))
-            expected_ports = {"9999/tcp"} | ({"8888/tcp", "8766/tcp"} if self.network_mode == "host" else set())
+            expected_ports = {"9999/tcp"} | ({"8888/tcp", "8766/tcp"} if self.network_mode != "custom" else set())
             published = {port for port, entries in bindings.items() if entries}
-            if published != expected_ports or any(entry["HostIp"] != "127.0.0.1" for entries in bindings.values() if entries for entry in entries):
+            if published != expected_ports or any(
+                entry["HostIp"] != (self.gateway_host if self.network_mode == "bridge" and port != "9999/tcp" else "127.0.0.1")
+                for port, entries in bindings.items() if entries for entry in entries
+            ):
                 raise RuntimeError("Unexpected managed host port exposure")
             self.settings["verified_host_bindings"] = bindings
             self.settings.update(hindsight_url="http://" + address + ":8888", memory_key=state["api_key"], managed_project=project)

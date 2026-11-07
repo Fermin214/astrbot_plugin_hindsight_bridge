@@ -195,57 +195,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await self.panel.model_task
         return result, self.panel.saved_state["connection_job"]
 
-    async def test_authenticated_network_change_keeps_managed_service_identity(self):
-        payload = self.configure_managed_connect()
-        self.config.update(api_url=self.panel.saved_state["api_url"], api_key="managed-key")
-        self.panel.saved_state["connection_mode"] = "managed"
-
-        async def moved(state, environment=None):
-            state.update(api_url="http://172.17.0.5:8888", management_url="http://172.17.0.5:8766")
-            return await self.managed(state, environment)
-
-        self.panel.managed_request.side_effect = moved
-        _, job = await self.connect_managed(payload)
-        self.assertEqual(job["status"], "succeeded", job)
-        self.assertEqual(self.config["service_id"], "old-service-id")
-        self.assertEqual(self.config["api_url"], "http://172.17.0.5:8888")
-
-    async def test_network_identity_proof_precedes_credentials_and_rejects_wrong_service(self):
-        import httpx
-
-        state = {"id": "012345abcdef", "api_key": "api-secret", "management_key": "management-secret",
-                 "api_url": "http://old:8888", "management_url": "http://old:8766"}
-        endpoints = {"api_url": "http://172.17.0.5:8888", "management_url": "http://172.17.0.5:8766"}
-        for correct in (False, True):
-            with self.subTest(correct=correct):
-                requests = []
-
-                def serve(request):
-                    requests.append(request)
-                    if request.url.path.startswith("/identity/"):
-                        self.assertNotIn("authorization", request.headers)
-                        challenge = request.url.path.rsplit("/", 1)[1]
-                        signature = hmac.new(
-                            state["management_key"].encode(),
-                            ("astrbot-memory-identity:" + state["id"] + ":" + challenge).encode(), hashlib.sha256,
-                        ).hexdigest()
-                        return httpx.Response(200, json={"installation_id": state["id"],
-                                                        "signature": signature if correct else "0" * 64})
-                    self.assertEqual(request.headers["authorization"], "Bearer management-secret")
-                    return httpx.Response(200, json={"installation_id": state["id"], "protocol": 1})
-
-                client = httpx.AsyncClient(transport=httpx.MockTransport(serve))
-                with patch.object(self.panel, "network_endpoints", return_value=endpoints), \
-                        patch.object(module.httpx, "AsyncClient", return_value=client):
-                    if correct:
-                        await self.panel.managed_request(state)
-                        self.assertEqual(state["api_url"], endpoints["api_url"])
-                        self.assertEqual(len(requests), 2)
-                    else:
-                        with self.assertRaisesRegex(module.PanelError, "标识不匹配"):
-                            await self.panel.managed_request(state)
-                        self.assertEqual(len(requests), 1)
-
     async def test_managed_connect_from_existing_service_persists_connection_once_and_keeps_legacy_boundary(self):
         payload = self.configure_managed_connect()
         initial_revision = self.panel.config_revision()

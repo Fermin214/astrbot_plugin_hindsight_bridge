@@ -161,6 +161,7 @@ if [ -f "$target/.env" ]; then
   mv "$stage/.env.saved" "$stage/.env"
 fi
 connection_mode=native
+bind_host=127.0.0.1
 if [ -n "$astrbot_id" ]; then
   existing="$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$astrbot_id")"
   selected=''
@@ -183,11 +184,15 @@ if [ -n "$astrbot_id" ]; then
     printf 'services:\n  memory-api:\n    networks:\n      astrbot:\n        aliases: [ALIAS_VALUE]\nnetworks:\n  astrbot:\n    external: true\n    name: "%s"\n' "$selected" > "$stage/compose.override.yaml"
   elif [ "$selected" = bridge ]; then
     connection_mode=bridge
+    bind_host="$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' bridge)"
+    [[ "$bind_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail '无法获取默认 bridge 的网关地址。'
   elif [ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$astrbot_id")" = host ] && [ -z "${HINDSIGHT_ASTRBOT_NETWORK:-}" ]; then
     connection_mode=host
-    sed -i '/^    ports:$/a\      - "127.0.0.1:API_PORT_VALUE:8888"\n      - "127.0.0.1:MANAGEMENT_PORT_VALUE:8766"' "$stage/compose.yaml"
   else
     fail 'AstrBot 需要 host、默认 bridge 或可出站的自定义桥接网络；可用 HINDSIGHT_ASTRBOT_NETWORK 选择已连接的桥接网络。'
+  fi
+  if [ "$connection_mode" = bridge ] || [ "$connection_mode" = host ]; then
+    sed -i "/^    ports:$/a\\      - \"$bind_host:API_PORT_VALUE:8888\"\n      - \"$bind_host:MANAGEMENT_PORT_VALUE:8766\"" "$stage/compose.yaml"
   fi
 fi
 owned_ports=''
@@ -196,12 +201,14 @@ for container in $(docker ps -q --filter "label=com.docker.compose.project=$proj
 $(docker inspect --format '{{range .NetworkSettings.Ports}}{{range .}}{{println .HostIp .HostPort}}{{end}}{{end}}' "$container")"
 done
 host_ports='CP_PORT_VALUE'
-if [ "$connection_mode" = native ] || [ "$connection_mode" = host ]; then
+if [ "$connection_mode" != custom ]; then
   host_ports="$host_ports API_PORT_VALUE MANAGEMENT_PORT_VALUE"
 fi
 for port in $host_ports; do
-  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-    printf '%s\n' "$owned_ports" | grep -qx "127.0.0.1 $port" ||
+  listener_host="$bind_host"
+  [ "$port" != CP_PORT_VALUE ] || listener_host=127.0.0.1
+  if (exec 3<>"/dev/tcp/$listener_host/$port") 2>/dev/null; then
+    printf '%s\n' "$owned_ports" | grep -qx "$listener_host $port" ||
       fail "主机端口 $port 已占用。请释放该端口，或修改安装状态中的端口后重新生成命令；已有安装需同步修改 .env 中的端口。"
   fi
 done
@@ -235,21 +242,11 @@ docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 
 if [ "$service_changed" = 1 ]; then
   docker compose --project-name "$project" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 600 memory-api || fail '配套管理组件更新失败，请检查容器日志后重新执行安装命令；原配置与数据保留。'
 fi
-api_url='http://127.0.0.1:API_PORT_VALUE'
-management_url='http://127.0.0.1:MANAGEMENT_PORT_VALUE'
+api_url="http://$bind_host:API_PORT_VALUE"
+management_url="http://$bind_host:MANAGEMENT_PORT_VALUE"
 if [ "$connection_mode" = custom ]; then
   api_url='http://ALIAS_VALUE:8888'
   management_url='http://ALIAS_VALUE:8766'
-elif [ "$connection_mode" = bridge ]; then
-  api_id="$(docker compose --project-name "$project" ps -q memory-api)"
-  address="$(docker inspect --format '{{with index .NetworkSettings.Networks "bridge"}}{{.IPAddress}}{{end}}' "$api_id")"
-  if [ -z "$address" ]; then
-    docker network connect bridge "$api_id"
-    address="$(docker inspect --format '{{with index .NetworkSettings.Networks "bridge"}}{{.IPAddress}}{{end}}' "$api_id")"
-  fi
-  [[ "$address" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail '无法获取配套服务在默认 bridge 中的地址。'
-  api_url="http://$address:8888"
-  management_url="http://$address:8766"
 fi
 docker compose --project-name "$project" exec -T memory-api python -c "import json,os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8766/status',headers={'Authorization':'Bearer '+os.environ['ASTRBOT_MEMORY_MANAGEMENT_KEY']}); s=json.load(urllib.request.urlopen(r,timeout=5)); assert s.get('installation_id')==os.environ['HINDSIGHT_SETUP_ID'] and s.get('protocol')==1, '配套管理接口身份不匹配'" < /dev/null || fail '配套管理接口检查失败，请检查安装身份与服务日志后重试。'
 if [ -n "$astrbot_id" ] && [ -n "$setup_path" ]; then

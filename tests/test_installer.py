@@ -64,10 +64,9 @@ case "$*" in
   "inspect --format {{.Config.Hostname}}"*) printf '%s\\n' astrbot-host ;;
   'inspect --format {{range $k,$v := .NetworkSettings.Networks}}'*) printf '%s\\n' "${TEST_NETWORKS:-first second}" ;;
   "inspect --format {{.HostConfig.NetworkMode}}"*) printf '%s\\n' "${TEST_NETWORK_MODE:-default}" ;;
-  'inspect --format {{with index .NetworkSettings.Networks "bridge"}}'*) printf '%s\\n' "${TEST_BRIDGE_ADDRESS:-172.17.0.5}" ;;
-  *"ps -q memory-api") printf '%s\\n' memory-api ;;
   "inspect --format {{range .NetworkSettings.Ports}}"*) printf '127.0.0.1 %s\\n' "$TEST_OWNED_PORT" ;;
   "network inspect --format {{.Driver}} {{.Internal}} host") printf '%s\\n' 'host false' ;;
+  "network inspect --format {{(index .IPAM.Config 0).Gateway}} bridge") printf '%s\\n' '172.17.0.1' ;;
   "network inspect"*) printf '%s\\n' 'bridge false' ;;
 esac
 exit 0
@@ -81,7 +80,7 @@ exit 0
 
 
 class InstallerTests(unittest.TestCase):
-    def test_host_and_default_bridge_preserve_astrbot_network_and_limit_host_ports(self):
+    def test_host_and_default_bridge_bind_stable_addresses_without_changing_astrbot_network(self):
         for mode in ("host", "bridge"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -100,11 +99,11 @@ class InstallerTests(unittest.TestCase):
                     self.assertIn(f"127.0.0.1:{state['management_port']}:8766", compose)
                     self.assertNotIn("network connect", calls)
                 else:
-                    self.assertNotIn(":8888\"", compose)
-                    self.assertNotIn(":8766\"", compose)
-                    self.assertIn("http://172.17.0.5:8888", calls)
+                    self.assertIn(f"172.17.0.1:{state['api_port']}:8888", compose)
+                    self.assertIn(f"172.17.0.1:{state['management_port']}:8766", compose)
+                    self.assertIn(f"http://172.17.0.1:{state['api_port']}", calls)
                 self.assertIn("managed-network.json", calls)
-                self.assertNotIn("network connect bridge astrbot", calls)
+                self.assertNotIn("network connect", calls)
                 self.assertNotIn("network disconnect", calls)
 
     def test_first_start_failure_resumes_same_identity_and_checks_extensions_before_api(self):
