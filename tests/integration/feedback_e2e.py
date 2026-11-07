@@ -322,11 +322,17 @@ class Feedback(Acceptance):
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 if self.settings.get("multi_page"):
-                    from multiple_pages import verify
+                    from multiple_pages import verify, verify_recovery
 
-                    await verify(self, page, frame, bank, short)
+                    recovery_only = self.settings.get("multi_page_recovery_only")
+                    await (verify_recovery(self, page, frame, bank, short) if recovery_only
+                           else verify(self, page, frame, bank, short))
                     assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
-                    self.report.update(complete=True, acceptance_scope="0.2.8 upgrade, native ordered pages, shared budget, lifecycle and erasure")
+                    self.report.update(
+                        complete=True,
+                        acceptance_scope="native recovery of multiple deleted page references" if recovery_only
+                        else "0.2.8 upgrade, native ordered pages, shared budget, lifecycle and erasure",
+                    )
                     self.save()
                     return
                 if self.settings.get("parameters_only"):

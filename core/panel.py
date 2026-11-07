@@ -1560,14 +1560,16 @@ class MemoryPanel:
             if not reading and payload["enabled"] and not page_ids:
                 raise QueueError("background_missing")
 
-            async def recheck():
-                await plugin.prepare_sources()
+            def unchanged():
                 if not guard.valid(plugin, metadata=closing) or self.config_revision() != revision:
                     raise QueueError("background_changed")
-                if (
-                    await self.bot_id(source.platform_instance_id) != source.bot_id
-                    or not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
-                ):
+
+            async def recheck():
+                await plugin.prepare_sources()
+                unchanged()
+                bot = await self.bot_id(source.platform_instance_id)
+                unchanged()
+                if bot != source.bot_id:
                     raise QueueError("background_changed")
 
             pages = []
@@ -1583,45 +1585,79 @@ class MemoryPanel:
                 selected_refs = guard.selection["pages"] if page_ids else []
             elif not reading or guard.selection["enabled"]:
                 by_id = {page["page_id"]: page for page in pages}
+                saved_refs = {page["page_id"]: page for page in guard.selection["pages"]}
                 slots = asyncio.Semaphore(4)
 
-                async def inspect(page_id):
+                mapped = []
+                for page_id in page_ids:
                     selected = by_id.get(page_id)
                     if selected is None:
-                        if not reading:
+                        if not reading and page_id not in saved_refs:
                             raise QueueError("background_missing")
-                        return {"page_id": page_id, "code": "background_missing"}
-                    model_id = selected["mental_model_id"]
-                    if reading and {"page_id": page_id, "mental_model_id": model_id} not in guard.selection["pages"]:
+                        continue
+                    if reading and {
+                        "page_id": page_id, "mental_model_id": selected["mental_model_id"],
+                    } not in guard.selection["pages"]:
                         raise QueueError("background_changed")
+                    mapped.append(page_id)
+
+                async def fetch(page_id, *, body):
                     try:
                         async with slots:
-                            await recheck()
-                            page = None if reading else await guard.client.knowledge_page(scope["bank"], page_id)
-                            await recheck()
-                            model = await guard.client.background_page(scope["bank"], model_id)
-                            await recheck()
-                        if page is not None and page["body"] != model["content"]:
-                            raise QueueError("background_changed")
-                        return {"page_id": page_id, **check_page(model, tokenizer=guard.client.tokenizer, **{
-                            k: limits[k] for k in ("tokens", "chars", "page_tokens")
-                        })}
+                            unchanged()
+                            value = (
+                                await guard.client.knowledge_page(scope["bank"], page_id) if body else
+                                await guard.client.background_page(scope["bank"], by_id[page_id]["mental_model_id"])
+                            )
+                            unchanged()
+                            return value
                     except HindsightError as exc:
-                        if not reading or exc.authentication or exc.code == "bank_missing":
+                        if (
+                            exc.authentication or exc.code == "bank_missing"
+                            or (not reading and (
+                                saved_refs.get(page_id, {}).get("mental_model_id") != by_id[page_id]["mental_model_id"]
+                                or exc.code != "background_missing"
+                            ))
+                        ):
                             raise
-                        return {"page_id": page_id, "code": exc.code}
+                        return exc
 
-                tasks = [asyncio.create_task(inspect(page_id)) for page_id in page_ids]
-                try:
-                    checks = await asyncio.gather(*tasks)
-                finally:
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                async def batch(identities, *, body):
+                    if not identities:
+                        return {}
+                    tasks = [asyncio.create_task(fetch(page_id, body=body)) for page_id in identities]
+                    try:
+                        values = await asyncio.gather(*tasks)
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    # Refresh native identity once between whole page/model phases.
+                    await recheck()
+                    return dict(zip(identities, values))
+
+                bodies = await batch(mapped, body=True) if not reading else {}
+                models = await batch([page_id for page_id in mapped
+                                      if not isinstance(bodies.get(page_id), HindsightError)], body=False)
+                for page_id in page_ids:
+                    if page_id not in by_id:
+                        checks.append({"page_id": page_id, "code": "background_missing"})
+                        continue
+                    page, model = bodies.get(page_id), models.get(page_id)
+                    error = next((value for value in (page, model) if isinstance(value, HindsightError)), None)
+                    if error:
+                        checks.append({"page_id": page_id, "code": error.code})
+                        continue
+                    if page is not None and page["body"] != model["content"]:
+                        raise QueueError("background_changed")
+                    checks.append({"page_id": page_id, **check_page(model, tokenizer=guard.client.tokenizer, **{
+                        k: limits[k] for k in ("tokens", "chars", "page_tokens")
+                    })})
                 selected_refs = [
                     {k: by_id[page_id][k] for k in ("page_id", "mental_model_id")}
-                    for page_id in page_ids if page_id in by_id
+                    if page_id in by_id else saved_refs[page_id]
+                    for page_id in page_ids
                 ]
             for check in checks:
                 if "tokens" not in check:

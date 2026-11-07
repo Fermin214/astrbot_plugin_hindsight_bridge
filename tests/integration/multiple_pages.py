@@ -1,9 +1,93 @@
 """Native ordered selection, shared budgets and upgrade using synthetic peers."""
 
 import json
+import time
 
 from live_e2e import ALICE, NAME, database, until
 from parameter_panel import save_parameters
+
+
+async def verify_recovery(acceptance, page, frame, bank, short):
+    initial = await acceptance.scope()
+    route = acceptance.prefix + "/scopes/" + initial["scope_id"] + "/background"
+    ids = [short, await acceptance.page(bank, "Recovery second page"),
+           await acceptance.page(bank, "Recovery third page")]
+    await frame.locator("#background-recheck").click()
+
+    async def selection_is(expected):
+        value = (await acceptance.scope())["background"]
+        return value if [item["page_id"] for item in value["pages"]] == expected else None
+
+    for position, identity in enumerate(ids[1:], 1):
+        await frame.locator(f'#background-page option[value="{identity}"]').wait_for(state="attached", timeout=20000)
+        await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
+        await frame.locator("#background-page").select_option(identity)
+        await until(lambda: selection_is(ids[:position + 1]), timeout=20)
+    await frame.locator("#background-selected > li").nth(2).wait_for()
+    for identity in ids:
+        await acceptance.native("DELETE", bank + "/knowledge-base/nodes/" + identity)
+    await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await until(lambda: selection_is(ids[1:]), timeout=20)
+    assert (await acceptance.scope())["background"]["enabled"]
+    acceptance.passed("enabled_selection_can_remove_one_deleted_page_while_other_pages_are_also_deleted")
+
+    await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
+    await frame.locator("#background-page").select_option("")
+
+    async def disabled():
+        return not (await acceptance.scope())["background"]["enabled"]
+    await until(disabled, timeout=20)
+    await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await until(lambda: selection_is(ids[2:]), timeout=20)
+    assert not (await acceptance.scope())["background"]["enabled"]
+    acceptance.passed("disabled_selection_can_remove_one_deleted_page_without_reading_or_dropping_the_other_reference")
+
+    before = await acceptance.http("GET", route)
+    try:
+        await acceptance.http("POST", route, payload={
+            "page_ids": ["unknown-page"], "enabled": True,
+            "revision": before["selection"]["revision"], "scope_revision": before["scope_revision"],
+            "config_revision": before["config_revision"],
+        })
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Unknown page was accepted")
+    assert (await acceptance.http("GET", route))["selection"] == before["selection"]
+    await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
+    await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await until(lambda: selection_is([]), timeout=20)
+    latest = await acceptance.scope()
+    assert not latest["background"]["enabled"]
+    assert all(latest[key] == initial[key] for key in ("bank", "owner_id", "generation", "mode"))
+    assert (await acceptance.native("GET", bank + "/knowledge-base/tree"))["roots"] == []
+    acceptance.report["measurements"]["deleted_reference_recovery"] = {
+        "original_page_ids": ids, "final_selection": latest["background"], "bank": bank,
+    }
+    acceptance.passed("last_missing_reference_can_be_removed_unknown_references_are_rejected_and_native_pages_stay_deleted")
+
+    eight = []
+    for position in range(8):
+        identity, _ = await acceptance.page(bank, f"Eight-page identity timing {position}", wait=False)
+        eight.append(identity)
+    measurements = []
+    acceptance.bot.login_info_delay = 0.3
+    try:
+        for identities in (eight, list(reversed(eight))):
+            snapshot = await acceptance.http("GET", route)
+            started = time.monotonic()
+            saved = await acceptance.http("POST", route, payload={
+                "page_ids": identities, "enabled": True,
+                "revision": snapshot["selection"]["revision"], "scope_revision": snapshot["scope_revision"],
+                "config_revision": snapshot["config_revision"],
+            })
+            measurements.append(round(time.monotonic() - started, 3))
+            assert [item["page_id"] for item in saved["selection"]["pages"]] == identities
+            assert len(saved["checks"]) == 8
+    finally:
+        acceptance.bot.login_info_delay = 0
+    acceptance.report["measurements"]["eight_page_save_and_reorder_seconds_with_300ms_native_identity"] = measurements
+    acceptance.passed("eight_pages_save_and_reorder_under_the_eight_second_api_deadline_with_slow_native_identity_queries")
 
 
 async def verify(acceptance, page, frame, bank, short):
@@ -111,6 +195,20 @@ async def verify(acceptance, page, frame, bank, short):
     assert "Hindsight 知识页" not in acceptance.latest_wire()
     assert (await acceptance.native("GET", bank + "/knowledge-base/pages/" + medium))["id"] == medium
     acceptance.passed("disabling_keeps_order_and_native_pages_but_stops_automatic_injection")
+
+    await acceptance.native("DELETE", bank + "/knowledge-base/nodes/" + medium)
+    await frame.locator("#background-selected > li").nth(0).get_by_role("button", name="移除第 1 篇知识页", exact=True).click()
+    await until(lambda: selected([short]), timeout=20)
+    assert not (await acceptance.scope())["background"]["enabled"]
+    await until(lambda: frame.locator("#background-page").is_enabled(), timeout=20)
+    await frame.locator("#background-page").select_option(short)
+
+    async def enabled_missing():
+        return (await acceptance.scope())["background"]["enabled"]
+    await until(enabled_missing, timeout=20)
+    _, status = await chat()
+    assert status["pages"][0]["code"] == "background_missing" and not status["pages"][0]["used"]
+    acceptance.passed("multiple_deleted_pages_can_be_removed_individually_while_disabled_and_retained_missing_reference_stays_explicit")
 
     # Inspect only Bridge queues: automatic page bodies must never become material.
     payloads = json.dumps(database(acceptance.runtime, "SELECT payload FROM outbox"))

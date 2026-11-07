@@ -101,6 +101,7 @@ class OneBot:
             self.actions.append(body)
             result = {}
             if action == "get_login_info":
+                await asyncio.sleep(getattr(self, "login_info_delay", 0))
                 result = {"user_id": self.bot_id, "nickname": "Delivery bot"}
             elif action == "get_status":
                 result = {"online": True, "good": True}
