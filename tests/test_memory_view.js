@@ -1049,6 +1049,29 @@ test("Reflect keeps dirty values across polling, detects conflicts and ignores a
   assert.doesNotMatch(context.$("reflect-feedback").textContent, /saved-former-user/);
 });
 
+test("an enabled Reflect shows detected model unavailability and still allows disabling", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderReflect"), context);
+  const reflect = { revision: 1, scope_revision: 1, enabled: true, timeout: 12,
+    observed_available: true, status: { state: "success" } };
+  context.data = { config_revision: "one", status: {}, scopes: [
+    { scope_id: "one", bank: "bank", mode: "active", summary: {}, reflect },
+  ] };
+  context.scopeId = "one";
+  context.renderReflect();
+  assert.equal(context.$("reflect-status").hidden, true);
+  reflect.observed_available = false;
+  reflect.status = { state: "unavailable" };
+  context.renderReflect();
+  assert.equal(context.$("reflect-enabled").checked, true);
+  assert.equal(context.$("reflect-enabled").disabled, false);
+  assert.equal(context.$("reflect-status").hidden, false);
+  assert.match(context.$("reflect-status").textContent, /此会话暂不支持 Reflect/);
+  reflect.enabled = false;
+  context.renderReflect();
+  assert.equal(context.$("reflect-status").hidden, true);
+});
+
 test("removed accounts stay out of user choices even while their Banks are retained", () => {
   const context = harness();
   context.data = maintenanceBootstrap();

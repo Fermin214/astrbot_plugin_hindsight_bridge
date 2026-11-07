@@ -741,12 +741,15 @@ function renderReflect({ discard = false } = {}) {
   $("reflect-save").disabled = !!unavailable || conflict || !reflectDraft.dirty;
   $("reflect-reload").disabled = locks.has("memory") || !scope;
   $("reflect-conflict").hidden = !conflict;
-  $("reflect-enabled").title = saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
+  const unsupported = saved.enabled && saved.status?.state === "unavailable";
+  $("reflect-enabled").title = unsupported ? "此会话暂不支持 Reflect"
+    : saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
   const messages = [];
   if (saved.error) messages.push("Reflect 设置读取失败");
   else if (saved.invalidated) messages.push("记忆库已变化，Reflect 已关闭。");
   if (saved.unknown) messages.push("请求状态待确认，暂时无法清空记忆。");
   else if (saved.pending) messages.push("Reflect 处理中…");
+  else if (unsupported) messages.push("此会话暂不支持 Reflect");
   else if (saved.enabled && ["error", "budget"].includes(saved.status?.state)) {
     messages.push(saved.status.message || "Reflect 调用失败");
   }
