@@ -20,6 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
 from .core.background import ReadGuard, compose_backgrounds, context_limits, reference
+from .core.agent_tools import MemoryTools
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -68,6 +69,8 @@ class HindsightBridge(Star):
         self.idle = asyncio.Event()
         self.idle.set()
         self.confirmations = {}
+        self.read_tools = MemoryTools(self)
+        self.read_tools.register()
         self.panel = MemoryPanel(self)
 
     @staticmethod
@@ -129,6 +132,19 @@ class HindsightBridge(Star):
             "background_timeout": "读取知识页超时，请检查记忆服务，或调整知识页读取与记忆检索的等待时间",
             "background_too_large": "知识页太长，超出使用上限；请缩短官方页面，或增加知识页长度上限及共享 token、字符上限；记忆检索继续执行",
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
+            "reading_settings_invalid": "记忆读取方式无法读取，请检查最新控制库",
+            "reading_changed": "记忆读取方式、账号或模型已变化，请重新发起查询",
+            "tool_read_timeout": "按需读取超时，可重试或使用官方面板查看",
+            "tool_budget_exhausted": "本条消息的记忆工具额度已用完，请发送新消息继续",
+            "invalid_read_position": "阅读行号无效，请从知识页第一行重新读取",
+            "invalid_read_version": "续读需要上一段返回的版本和下一行号，请从第一行重新读取",
+            "read_version_changed": "知识页已更新，请从新版第一行重新读取",
+            "read_line_too_large": "这一整行超过工具读取上限，请通过官方面板查看完整内容",
+            "tool_result_too_large": "读取结果超过工具输出上限，请缩小查询范围或通过官方面板查看",
+            "history_response_too_large": "知识页历史超过传输上限，正文仍可单独读取；完整历史请通过官方面板查看",
+            "tool_read_failed": "按需读取失败，请检查服务后重试，或使用官方面板查看",
+            "bank_not_created": "记忆库尚未建立，请先在读写记忆模式下保存一条普通聊天",
+            "invalid_query_budget": "查询问题过长，请缩短后重试",
             "local_OperationalError": "本地数据库不可写，请检查磁盘空间与目录权限",
             "control_directory_must_be_absolute": "控制目录须填写绝对路径，或留空使用默认目录",
             "control_directory_outside_plugin": "控制目录须位于 AstrBot 的 data/plugin_data/astrbot_plugin_hindsight_bridge_control 内；旧外部目录请先按备份与恢复指南停机迁移，再修改配置并重载",
@@ -142,6 +158,7 @@ class HindsightBridge(Star):
         if self.panel.closed or self.stopping:
             return
         self.confirmations.clear()
+        self.read_tools.invalidate()
         self.source_accounts.clear()
         fields = connection_fields(self.config)
         url, key, service = (fields[name] for name in ("api_url", "api_key", "service_id"))
@@ -441,7 +458,7 @@ class HindsightBridge(Star):
                 client.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
 
-    async def recall_background(self, event, guard, current, history, *, timestamp):
+    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts=True):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
         limits = context_limits(self.config)
@@ -469,6 +486,8 @@ class HindsightBridge(Star):
             return await asyncio.gather(*(read_page(selected) for selected in guard.selection["pages"]))
 
         async def read_facts(query):
+            if not include_facts:
+                return [], ""
             try:
                 async with asyncio.timeout_at(deadline - min(0.02, timeout / 10)):
                     rows = await guard.client.recall(
@@ -501,6 +520,7 @@ class HindsightBridge(Star):
                 block, facts_used, outcomes = compose_backgrounds(
                     reads, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
                     page_tokens=limits["page_tokens"], recall_code=recall_code,
+                    on_demand=not include_facts,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
@@ -631,6 +651,7 @@ class HindsightBridge(Star):
 
     @filter.on_llm_request()
     async def add_memory(self, event: AstrMessageEvent, req: ProviderRequest):
+        original_tools = self.read_tools.filter_request(event, req)
         if self.outbox is None or self.client is None or event in self.handled:
             return
         incoming = self.incoming.pop(event, None)
@@ -717,6 +738,8 @@ class HindsightBridge(Star):
                         "started": time.monotonic(),
                     }
             read_guard = ReadGuard.freeze(self, scope)
+            options = await self.read_tools.prepare(event, req, incoming, scope, original_tools)
+            on_demand = options["mode"] == "tools"
             history = [
                     ("用户" if m.role == "user" else "助手", m.text)
                     for m in capture.history
@@ -724,12 +747,16 @@ class HindsightBridge(Star):
             if read_guard.selection["enabled"]:
                 memory, code, has_facts, background_status = await self.recall_background(
                     event, read_guard, incoming.text, history, timestamp=incoming.iso_timestamp,
+                    include_facts=not on_demand,
                 )
-                outcome = "error" if code else "success" if has_facts else "empty"
+                outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
                 if code:
                     if HindsightError(code).authentication:
                         self.outbox.pause_connection(code)
                     self.warning(code)
+            elif on_demand:
+                memory = self.read_tools.notice(scope)
+                outcome = "on_demand"
             else:
                 memory = await self.recall_text(
                     scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp,
@@ -1313,7 +1340,7 @@ class HindsightBridge(Star):
                 yield event.plain_result(
                     f"用户：{event.get_platform_id()} / {event.get_sender_id()}。\n"
                     "将删除这个用户在 Hindsight 中的全部记忆、知识页及其历史、用于生成记忆的聊天内容，"
-                    "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录保留。"
+                    "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录、工具历史和日志保留。"
                     "如果其他账号共用此记忆库，它们的记忆也会一起清空。\n"
                     f"确认请在 120 秒内发送：/hindsight forget {token}"
                 )
@@ -1374,6 +1401,7 @@ class HindsightBridge(Star):
 
     async def terminate(self):
         self.stopping = True
+        await self.read_tools.close()
         self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()

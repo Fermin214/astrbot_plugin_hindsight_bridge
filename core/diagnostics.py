@@ -45,7 +45,7 @@ def recall_description(value):
         return "尚未检索"
     label = {
         "success": "检索成功", "empty": "无相关结果", "error": "检索失败",
-        "skipped": "本轮已跳过",
+        "skipped": "本轮已跳过", "on_demand": "按需工具，未自动召回",
     }[value["outcome"]]
     if value["outcome"] == "error" and "timeout" in value.get("code", ""):
         label = "检索超时"
