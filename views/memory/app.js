@@ -195,8 +195,7 @@ async function loadManagedSetup() {
 
 function updateConnectionMode() {
   const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
-  $("setup-intro").hidden = !managed || (data?.config.configured === true
-    && !!(managedSetup?.has_installation || data?.has_installation));
+  $("setup-intro").hidden = !managed || (data?.config.managed === true && data?.config.configured === true);
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
   $("maintenance").hidden = !managed || !data?.has_installation;
@@ -482,7 +481,10 @@ function renderStatus() {
   const setup = $("panel-setup");
   const connection = $("setup-fields");
   if (connected === true || data.config.configured) {
-    if (setup.lastElementChild !== connection) setup.append(connection);
+    const deployment = $("deployment-info");
+    if (setup.lastElementChild !== deployment || deployment.previousElementSibling !== connection) {
+      setup.append(connection, deployment);
+    }
   } else if (setup.firstElementChild !== connection) setup.prepend(connection);
   const attention = !!status.recovering || !data.config.configured || connected !== true;
   $("service-alert").hidden = !attention;
@@ -1251,7 +1253,9 @@ async function prepareInstallation(button, redeploy = false) {
     if (response.api_url) $("api-url").value = response.api_url;
     if (response.control_plane_url && !$("control-plane-url").value.trim()) $("control-plane-url").value = controlPlaneUrl(response.control_plane_url);
     updateConnectionMode();
-    $("generate-deployment").hidden = !redeploy;
+    $("generate-deployment").hidden = false;
+    $("generate-deployment").textContent = "重新生成命令";
+    $("deployment-dialog").dataset.redeploy = String(redeploy);
     $("check-deployment").hidden = !redeploy;
     $("deployment-heading").textContent = redeploy ? "重新部署" : "安装配套服务";
     $("deployment-description").textContent = redeploy
@@ -1411,11 +1415,15 @@ $("reinstall").addEventListener("click", () => {
   $("deployment-heading").textContent = "重新部署";
   $("deployment-description").textContent = "在原服务器、原安装目录执行。";
   $("generate-deployment").hidden = false;
+  $("generate-deployment").textContent = "生成部署命令";
+  $("deployment-dialog").dataset.redeploy = "true";
   $("check-deployment").hidden = true;
   $("deployment-feedback").hidden = true;
   $("deployment-dialog").showModal();
 });
-$("generate-deployment").addEventListener("click", () => void prepareInstallation($("generate-deployment"), true));
+$("generate-deployment").addEventListener("click", () => void prepareInstallation(
+  $("generate-deployment"), $("deployment-dialog").dataset.redeploy === "true",
+));
 $("check-deployment").addEventListener("click", () => void perform($("check-deployment"), "setup", () => checkConnection({}, "deployment-feedback"), "deployment-feedback"));
 $("service-version-check").addEventListener("click", () => void perform($("service-version-check"), "setup", checkServiceVersion));
 $("view-upgrade").addEventListener("click", openUpgrade);
