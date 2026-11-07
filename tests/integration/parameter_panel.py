@@ -10,7 +10,7 @@ async def save_parameters(acceptance, frame, **updates):
     before = await acceptance.config()
     await frame.locator("#tab-setup").click()
     for key, value in updates.items():
-        await frame.locator("#memory-" + key).fill("\n".join(value) if isinstance(value, list) else str(value))
+        await frame.locator("#memory-" + key).fill(", ".join(value) if isinstance(value, list) else str(value))
     await frame.locator("#save-parameters").click()
     await until(lambda: frame.locator("#save-parameters").is_enabled(), timeout=40)
     feedback = await frame.locator("#parameters-feedback").inner_text()

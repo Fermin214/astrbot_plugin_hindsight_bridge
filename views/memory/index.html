@@ -126,7 +126,7 @@
             <label>分词编码<input id="memory-query_tokenizer" required spellcheck="false" autocomplete="off"></label>
             <label>队列数量上限<input id="memory-queue_max_tasks" type="number" required min="1" step="1"></label>
             <label>队列容量（MiB）<input id="memory-queue_max_mib" type="number" required min="1" step="1"></label>
-            <label>排除前缀（每行一个）<textarea id="memory-command_prefixes" rows="2" spellcheck="false"></textarea></label>
+            <label>排除前缀（逗号分隔）<input id="memory-command_prefixes" type="text" placeholder="例如：!, #" spellcheck="false" autocomplete="off"></label>
           </div>
           <p id="parameters-conflict" class="operation-status error" role="status" hidden>设置已更新，请刷新页面。</p>
           <p id="parameters-limits" class="operation-status" role="status" hidden></p>

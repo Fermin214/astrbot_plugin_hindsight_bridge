@@ -348,7 +348,7 @@ function renderParameters({ discard = false } = {}) {
     parameterDraft = { revision: data.config_revision, dirty: false };
     for (const key of parameterKeys) {
       $("memory-" + key).value = key === "command_prefixes"
-        ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join("\n") : "") : String(snapshot.values[key] ?? "");
+        ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join(", ") : "") : String(snapshot.values[key] ?? "");
     }
   }
   $("parameters-fields").disabled = locks.has("parameters");
@@ -377,7 +377,7 @@ function parameterPayload() {
   const parameters = {};
   for (const key of parameterKeys) {
     const raw = $("memory-" + key).value;
-    if (key === "command_prefixes") parameters[key] = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (key === "command_prefixes") parameters[key] = raw.split(/[,，\r\n]+/).map((prefix) => prefix.trim()).filter(Boolean);
     else if (key === "query_tokenizer") parameters[key] = raw.trim();
     else {
       const value = Number(raw);

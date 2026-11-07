@@ -120,7 +120,7 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   const context = parameterHarness();
   context.$("api-url").value = "http://unsaved-connection";
   context.$("memory-background_max_tokens").value = "4096";
-  context.$("memory-command_prefixes").value = "!\n#\n";
+  context.$("memory-command_prefixes").value = " !, ，# , ";
   context.parameterDraft.dirty = true;
   context.bridge = { apiPost: async (route, payload) => {
     assert.equal(route, "parameters/save");
@@ -137,6 +137,9 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   assert.equal(context.parameterDraft.revision, "b");
   assert.equal(context.parameterDraft.dirty, false);
   assert.equal(context.data.parameters.effective.background_max_tokens, 4096);
+  assert.equal(context.$("memory-command_prefixes").value, "!, #");
+  context.$("memory-command_prefixes").value = "";
+  assert.equal(JSON.stringify(context.parameterPayload().parameters.command_prefixes), "[]");
   assert.match(context.$("parameters-feedback").textContent, /已保存/);
   assert.equal(context.locks.size, 0);
 });
