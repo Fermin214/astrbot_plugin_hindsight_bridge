@@ -58,7 +58,8 @@ def main():
                          "--output", str(state.output))
                 with (state.output / "baseline-install.zip").open("wb") as archive:
                     live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
-                             "0.2.7" if args.scope == "single-page" else "v0.2.6", cwd=ROOT, stdout=archive)
+                             "66c0e1118a61a721a23b4bed220c6922f6a5b887" if args.scope == "single-page" else "v0.2.6",
+                             cwd=ROOT, stdout=archive)
                 state.verify()
         finally:
             state.cleanup()
