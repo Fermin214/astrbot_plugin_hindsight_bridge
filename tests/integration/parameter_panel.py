@@ -9,8 +9,6 @@ from live_e2e import ALICE, database, jsonl, until
 async def save_parameters(acceptance, frame, **updates):
     before = await acceptance.config()
     await frame.locator("#tab-setup").click()
-    await frame.locator("#reload-parameters").click()
-    await until(lambda: frame.locator("#reload-parameters").is_enabled(), timeout=30)
     for key, value in updates.items():
         await frame.locator("#memory-" + key).fill("\n".join(value) if isinstance(value, list) else str(value))
     await frame.locator("#save-parameters").click()

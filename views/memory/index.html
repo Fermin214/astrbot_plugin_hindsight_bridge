@@ -47,13 +47,13 @@
           <div class="bank-row"><span>Bank ID</span><input id="scope-bank" readonly spellcheck="false" aria-label="Bank ID"><button id="copy-bank" type="button">复制 ID</button></div>
           <p id="bank-state" class="operation-status" hidden></p>
           <section class="memory-feature" aria-labelledby="reading-heading">
-            <div class="knowledge-row"><label id="reading-heading" for="reading-mode">细节记忆</label><select id="reading-mode"><option value="automatic">自动召回</option><option value="tools">按需工具</option></select></div>
+            <div class="knowledge-row reading-row"><label id="reading-heading" for="reading-mode">细节记忆</label><select id="reading-mode"><option value="automatic">自动召回</option><option value="tools">按需工具</option></select><button id="reading-save" type="button" class="primary">保存</button></div>
             <p id="reading-status" class="operation-status" role="status" hidden></p>
             <p id="reading-feedback" class="operation-status" role="status" hidden></p>
           </section>
           <section class="memory-feature" aria-labelledby="reflect-heading">
-            <div class="reflect-controls"><label id="reflect-heading" class="check-label"><input id="reflect-enabled" type="checkbox">Reflect</label><label class="reflect-timeout" for="reflect-timeout">超时（秒）<input id="reflect-timeout" type="number" min="3" max="30" step="1" value="12" inputmode="numeric"></label><div class="actions reflect-actions"><button id="reflect-save" type="button">保存</button><button id="reflect-reload" type="button">撤销修改</button></div></div>
-            <p id="reflect-conflict" class="operation-status" role="status" hidden>设置已更新，请撤销修改后重试。</p>
+            <div class="reflect-controls"><label id="reflect-heading" class="check-label"><input id="reflect-enabled" type="checkbox">Reflect</label><label class="reflect-timeout" for="reflect-timeout">超时（秒）<input id="reflect-timeout" type="number" min="3" max="30" step="1" value="12" inputmode="numeric"></label><div class="actions reflect-actions"><button id="reflect-save" type="button" class="primary">保存</button></div></div>
+            <p id="reflect-conflict" class="operation-status" role="status" hidden>设置已更新，请刷新页面。</p>
             <p id="reflect-status" class="operation-status" role="status" hidden></p>
             <p id="reflect-feedback" class="operation-status" role="status" hidden></p>
           </section>
@@ -62,7 +62,7 @@
             <ol id="background-selected" class="knowledge-pages" aria-label="知识页顺序"></ol>
             <p id="background-status" class="operation-status" role="status" hidden></p>
             <p id="background-feedback" class="operation-status" role="status" hidden></p>
-            <div class="actions"><button id="background-recheck" type="button">检查长度</button><button id="background-settings" type="button">调整长度</button></div>
+            <div class="actions"><button id="background-save" type="button" class="primary">保存</button><button id="background-recheck" type="button">刷新知识页</button><button id="background-settings" type="button">调整长度</button></div>
           </section>
         </section>
         <section class="content-section">
@@ -128,10 +128,10 @@
             <label>队列容量（MiB）<input id="memory-queue_max_mib" type="number" required min="1" step="1"></label>
             <label>排除前缀（每行一个）<textarea id="memory-command_prefixes" rows="2" spellcheck="false"></textarea></label>
           </div>
-          <p id="parameters-conflict" class="operation-status error" role="status" hidden>设置已更新，请撤销修改后重试。</p>
+          <p id="parameters-conflict" class="operation-status error" role="status" hidden>设置已更新，请刷新页面。</p>
           <p id="parameters-limits" class="operation-status" role="status" hidden></p>
           <p id="parameters-feedback" class="operation-status" role="status" hidden></p>
-          <div class="actions"><button id="save-parameters" type="submit" class="primary">保存</button><button id="reload-parameters" type="button">撤销修改</button></div>
+          <div class="actions"><button id="save-parameters" type="submit" class="primary">保存</button></div>
         </fieldset>
       </form>
       <section class="surface" id="deployment-info">
@@ -152,9 +152,9 @@
   <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>删除这套配套服务的专属容器、全部记忆和专属数据卷，无法撤销。</p><label class="check-label"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="backup-dialog" aria-labelledby="backup-heading">
     <div class="dialog-header"><h2 id="backup-heading">备份与恢复</h2><button type="button" data-close="backup-dialog" aria-label="关闭">×</button></div>
-    <ol class="guide-steps">
-      <li><h3>停止写入</h3><p>暂停所有写入，等待任务结束。手工备份时停止 Hindsight，保留数据库运行。</p></li>
-      <li><h3>备份插件数据</h3><p>在 AstrBot 中执行，替换路径与备份时间。输出目录使用新目录。</p>
+    <ol class="guide-steps" data-managed-backup hidden>
+      <li><h3>暂停 Bridge 读写</h3><p>暂停插件读写，等待保存任务结束。</p></li>
+      <li><h3>备份 Bridge 数据</h3><p>在 AstrBot 的 Python 环境执行，替换安装路径、控制目录和备份时间。输出目录使用新目录。</p>
         <textarea id="backup-command" aria-label="插件数据备份命令示例" rows="8" readonly spellcheck="false">python /AstrBot/data/plugins/astrbot_plugin_hindsight_bridge/scripts/backup.py \
   --data-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge \
   --control-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control \
@@ -163,9 +163,10 @@
         <button type="button" data-copy="backup-command" data-feedback="backup-feedback">复制命令</button>
         <p>另存插件配置和 setup.json。</p>
       </li>
-      <li><h3>备份配套服务数据和配置</h3><p>导出 PostgreSQL 数据库，保存部署文件和 models.json。</p></li>
-      <li><h3>核对恢复与保存副本</h3><p>在独立环境检查备份，并保存异机副本。</p><p>恢复检查通过后，再恢复写入。</p><p>恢复业务快照时沿用最新控制库、原 service_id 和账号对应关系。</p></li>
+      <li><h3>备份配套服务</h3><p>停止配套 Hindsight 的写入，等待任务结束。导出 PostgreSQL 数据库，保存部署文件和 models.json。命令见操作文档。</p></li>
+      <li><h3>检查恢复</h3><p>在独立环境检查 Bridge 备份，并保存异机副本。恢复业务快照时沿用最新控制库、原 service_id 和账号对应关系。</p></li>
     </ol>
+    <div id="backup-existing-service"><p>Bridge 备份内容：业务数据、最新控制库和插件配置。</p><p>Hindsight 数据由服务管理员按原部署方案备份与恢复。</p></div>
     <label>操作文档<input id="backup-doc-url" readonly value="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md"></label>
     <div class="actions"><button type="button" data-copy="backup-doc-url" data-feedback="backup-feedback">复制文档地址</button></div>
     <p id="backup-feedback" class="operation-status" role="status" hidden></p>

@@ -78,7 +78,8 @@ def check_page(page, *, tokens, chars, page_tokens, tokenizer):
         exceeded.append("共享 token 上限")
     if len(block) > chars:
         exceeded.append("共享字符上限")
-    return {"tokens": count, "chars": len(block), "code": code, "exceeded": exceeded}
+    return {"tokens": count, "chars": len(block), "code": code, "exceeded": exceeded,
+            "limits": {"tokens": min(page_tokens, tokens), "chars": chars}}
 
 
 def reference_key(connection, owner):

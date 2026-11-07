@@ -399,22 +399,16 @@ async function saveParameters() {
     if (!response.saved || !response.parameters || !response.config_revision) throw new Error(response.message || "记忆设置未保存，请重试。");
     if (data.config_revision !== payload.config_revision && data.config_revision !== response.config_revision) {
       await refreshBootstrap({ automatic: true, pollMaintenance: false });
-      throw new Error("设置已更新，请撤销修改后重试。");
+      throw new Error("设置已更新，请刷新页面。");
     }
     if (settingsRevision === payload.config_revision) settingsRevision = response.config_revision;
     data.parameters = response.parameters;
     data.config_revision = response.config_revision;
     renderParameters({ discard: true });
-    backgroundDraft = null;
+    if (!backgroundDraft?.dirty) backgroundDraft = null;
     notify("已保存", false, "parameters-feedback");
     await refreshBootstrap({ automatic: true, pollMaintenance: false });
   }, "parameters-feedback");
-}
-
-async function reloadParameters() {
-  await refreshBootstrap({ automatic: true, pollMaintenance: false });
-  renderParameters({ discard: true });
-  notify("已撤销修改", false, "parameters-feedback");
 }
 
 function accountKey(account) {
@@ -685,20 +679,21 @@ function renderReading() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const saved = scope?.reading || { revision: 0, mode: "automatic" };
   const snapshot = JSON.stringify([scopeId, scope?.bank, saved.revision, saved.scope_revision, data?.config_revision]);
-  if (readingDraft?.snapshot !== snapshot) {
-    readingDraft = { snapshot, id: scopeId, revision: saved.revision,
-      scope_revision: saved.scope_revision, config_revision: data?.config_revision };
-    $("reading-feedback").hidden = true;
+  if (!readingDraft || readingDraft.id !== scopeId || readingDraft.bank !== scope?.bank || !readingDraft.dirty) {
+    if (!readingDraft || readingDraft.id !== scopeId || readingDraft.bank !== scope?.bank) $("reading-feedback").hidden = true;
+    readingDraft = { snapshot, id: scopeId, bank: scope?.bank, revision: saved.revision,
+      scope_revision: saved.scope_revision, config_revision: data?.config_revision, dirty: false };
+    $("reading-mode").value = saved.mode || "automatic";
   }
   const select = $("reading-mode");
-  select.value = saved.mode || "automatic";
   select.disabled = !scope || !!scope.pending || !!scope.historical || !!data?.status?.recovering
     || !!saved.error || locks.has("memory");
-  select.options[1].disabled = !saved.observed_available && saved.mode !== "tools";
-  select.title = saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
+  const conflict = readingDraft.snapshot !== snapshot;
+  $("reading-save").disabled = select.disabled || conflict || !readingDraft.dirty;
   const status = saved.status || {};
   const messages = [];
-  if (saved.error) messages.push(saved.error);
+  if (conflict) messages.push("设置已更新，请刷新页面。");
+  else if (saved.error) messages.push(saved.error);
   else if (saved.invalidated) messages.push("记忆库已变化，已切回自动召回。");
   else if (saved.mode === "tools") {
     if (status.state === "error") messages.push(status.message || "工具读取失败");
@@ -712,14 +707,17 @@ function renderReading() {
 async function saveReading() {
   const draft = readingDraft;
   if (!draft) return;
+  let saved = false;
   const payload = { mode: $("reading-mode").value, revision: draft.revision,
     scope_revision: draft.scope_revision, config_revision: draft.config_revision };
-  await perform(null, "memory", async () => {
+  await perform($("reading-save"), "memory", async () => {
     const response = await bridge.apiPost(endpoint("reading", draft.id), payload);
     if (readingDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
     await refreshBootstrap();
-    if (scopeId === draft.id) notify("已保存", false, "reading-feedback");
+    saved = true;
   }, "reading-feedback");
+  if (saved && scopeId === draft.id) notify("已保存", false, "reading-feedback");
 }
 
 function renderReflect({ discard = false } = {}) {
@@ -736,14 +734,11 @@ function renderReflect({ discard = false } = {}) {
   }
   const conflict = reflectDraft.snapshot !== snapshot;
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error || locks.has("memory");
-  $("reflect-enabled").disabled = !!unavailable || (!saved.enabled && (!saved.observed_available || !!scope?.summary?.maintenance));
+  $("reflect-enabled").disabled = !!unavailable || (!saved.enabled && !!scope?.summary?.maintenance);
   $("reflect-timeout").disabled = !!unavailable;
   $("reflect-save").disabled = !!unavailable || conflict || !reflectDraft.dirty;
-  $("reflect-reload").disabled = locks.has("memory") || !scope;
   $("reflect-conflict").hidden = !conflict;
   const unsupported = saved.enabled && saved.status?.state === "unavailable";
-  $("reflect-enabled").title = unsupported ? "此会话暂不支持 Reflect"
-    : saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
   const messages = [];
   if (saved.error) messages.push("Reflect 设置读取失败");
   else if (saved.invalidated) messages.push("记忆库已变化，Reflect 已关闭。");
@@ -789,35 +784,45 @@ function renderBackground() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
   const snapshot = backgroundSnapshot(scope);
-  if (!backgroundDraft || backgroundDraft.snapshot !== snapshot) {
+  const changedScope = !backgroundDraft || backgroundDraft.id !== scopeId || backgroundDraft.bank !== scope?.bank;
+  if (changedScope || (!backgroundDraft.dirty && backgroundDraft.snapshot !== snapshot)) {
     backgroundReadRevision++;
-    backgroundDraft = { snapshot, id: scopeId, page_id: saved.page_id || "", enabled: saved.enabled === true,
+    backgroundDraft = { snapshot, id: scopeId, bank: scope?.bank, page_id: saved.page_id || "", enabled: saved.enabled === true,
       revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
+      selected: backgroundPages(saved).map((page) => ({ ...page })), dirty: false,
       pages: [], check: null, checks: [], loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
   const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
   const select = $("background-page");
-  const selected = backgroundPages(saved);
+  const draft = backgroundDraft;
+  const conflict = draft.snapshot !== snapshot;
+  const selected = draft.selected;
   select.disabled = !!unavailable || locks.has("memory") || (blocked && !saved.enabled);
   const options = [option("", "不使用知识页")];
   backgroundDraft.pages.forEach((page) => options.push(option(page.page_id, page.path, !!blocked)));
-  if (saved.page_id && !backgroundDraft.pages.some((page) => page.page_id === saved.page_id)) options.push(option(saved.page_id, saved.page_id, !!blocked));
+  if (draft.page_id && !draft.pages.some((page) => page.page_id === draft.page_id)) options.push(option(draft.page_id, draft.page_id, !!blocked));
   select.replaceChildren(...options);
-  select.value = saved.enabled ? saved.page_id : "";
-  const draft = backgroundDraft;
+  select.value = draft.enabled ? draft.page_id : "";
   const rows = selected.map((page, index) => {
     const row = el("li", "knowledge-page");
     const native = draft.pages.find((item) => item.page_id === page.page_id);
     row.append(el("div", "knowledge-page-title", `${index + 1}. ${native?.path || page.page_id}`));
-    const check = saved.enabled ? draft.checks.find((item) => item.page_id === page.page_id) : null;
+    const check = draft.enabled ? draft.checks.find((item) => item.page_id === page.page_id) : null;
     const usage = saved.status?.pages?.find((item) => item.page_id === page.page_id);
-    if (check?.tokens != null) row.append(el("span", "page-metrics", `${check.tokens} token / ${check.chars} 字符`));
-    if (check?.exceeded?.length) row.append(el("p", "operation-status error", `超出${check.exceeded.join("、")}`));
-    else if (check?.code) row.append(el("p", "operation-status error", check.message));
-    if (saved.enabled && usage) row.append(el("span", "page-status", usage.used ? "已使用" : usage.message));
-    if (native?.index_stale === true && saved.enabled) row.append(el("span", "page-status", "有新记忆待刷新"));
+    if (check?.tokens != null) {
+      const limit = check.limits?.tokens;
+      const exceeded = limit != null && check.tokens > limit;
+      row.append(el("span", `page-metrics${exceeded ? " error" : ""}`, limit == null
+        ? `${check.tokens} token` : `${check.tokens} / ${limit} token${exceeded ? "（超限）" : ""}`));
+      if (check.limits?.chars != null && check.chars > check.limits.chars) {
+        row.append(el("span", "page-metrics error", `${check.chars} / ${check.limits.chars} 字符（超限）`));
+      }
+    }
+    if (check?.code && check.code !== "background_too_large") row.append(el("p", "operation-status error", check.message));
+    if (!draft.dirty && saved.enabled && usage) row.append(el("span", "page-status", usage.used ? "已使用" : usage.message));
+    if (native?.index_stale === true && draft.enabled) row.append(el("span", "page-status", "有新记忆待刷新"));
     const actions = el("div", "knowledge-page-actions");
     for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
       const button = el("button", "", label);
@@ -827,10 +832,13 @@ function renderBackground() {
         || (direction === 1 && index === selected.length - 1);
       button.addEventListener("click", () => {
         if (backgroundDraft !== draft) return;
-        const ids = selected.map((item) => item.page_id);
-        if (direction === 0) ids.splice(index, 1);
-        else [ids[index], ids[index + direction]] = [ids[index + direction], ids[index]];
-        void saveBackground({ pageIds: ids, enabled: saved.enabled && ids.length > 0 });
+        if (direction === 0) draft.selected.splice(index, 1);
+        else [draft.selected[index], draft.selected[index + direction]] = [draft.selected[index + direction], draft.selected[index]];
+        draft.page_id = draft.selected[0]?.page_id || "";
+        draft.enabled = draft.enabled && draft.selected.length > 0;
+        draft.dirty = true;
+        $("background-feedback").hidden = true;
+        renderBackground();
       });
       actions.append(button);
     }
@@ -838,19 +846,22 @@ function renderBackground() {
     return row;
   });
   $("background-selected").replaceChildren(...rows);
-  const status = saved.error || (saved.invalidated ? saved.message || "知识页选择已失效" : "");
+  const status = conflict ? "设置已更新，请刷新页面。" : saved.error || (saved.invalidated ? saved.message || "知识页选择已失效" : "");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
   $("background-recheck").disabled = !!blocked || backgroundDraft.loading || locks.has("memory");
+  $("background-recheck").textContent = draft.loading ? "刷新中…" : "刷新知识页";
+  $("background-save").disabled = !!unavailable || locks.has("memory") || conflict || !draft.dirty;
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
 
-async function loadBackground() {
+async function loadBackground({ manual = false } = {}) {
   const draft = backgroundDraft;
   if (!draft || draft.loading) return;
   const revision = ++backgroundReadRevision;
   draft.loading = true;
   draft.attempted = true;
+  renderBackground();
   try {
     const response = await withTimeout(bridge.apiGet(endpoint("background", draft.id)), 8500, "获取知识页列表超时，请刷新页面重试。");
     if (revision !== backgroundReadRevision || backgroundDraft !== draft || scopeId !== draft.id) return;
@@ -860,8 +871,8 @@ async function loadBackground() {
     draft.check = response.check || null;
     draft.checks = response.checks || [];
     draft.loaded = true;
-    $("background-feedback").hidden = true;
     renderBackground();
+    if (manual) notify(response.pages.length ? `已刷新 ${response.pages.length} 篇` : "暂无知识页", false, "background-feedback");
   } catch (error) {
     if (revision === backgroundReadRevision && backgroundDraft === draft && scopeId === draft.id) {
       notify(`知识页读取失败：${errorMessage(error)}`, true, "background-feedback");
@@ -874,31 +885,45 @@ async function loadBackground() {
   }
 }
 
-async function saveBackground({ pageIds, enabled } = {}) {
+function changeBackground() {
   const draft = backgroundDraft;
   if (!draft) return;
-  const saved = data.scopes.find((scope) => scope.scope_id === draft.id)?.background;
-  const selected = $("background-page").value;
-  const ids = pageIds || backgroundPages(saved).map((page) => page.page_id);
-  if (!pageIds && selected && !ids.includes(selected)) ids.push(selected);
-  if (ids.length > 8) {
-    notify("最多选择 8 篇知识页，请先移除不需要的页面。", true, "background-feedback");
-    renderBackground();
-    return;
+  const pageId = $("background-page").value;
+  if (pageId && !draft.selected.some((page) => page.page_id === pageId)) {
+    if (draft.selected.length >= 8) {
+      notify("最多选择 8 篇知识页", true, "background-feedback");
+      renderBackground();
+      return;
+    }
+    draft.selected.push({ page_id: pageId });
   }
-  const payload = { page_ids: ids, enabled: enabled ?? !!selected,
+  draft.enabled = !!pageId;
+  draft.page_id = draft.selected[0]?.page_id || "";
+  draft.dirty = true;
+  $("background-feedback").hidden = true;
+  renderBackground();
+}
+
+async function saveBackground() {
+  const draft = backgroundDraft;
+  if (!draft) return;
+  let saved = false;
+  const payload = { page_ids: draft.selected.map((page) => page.page_id), enabled: draft.enabled,
     revision: draft.revision, scope_revision: draft.scope_revision, config_revision: draft.config_revision };
-  await perform(null, "memory", async () => {
+  await perform($("background-save"), "memory", async () => {
     const response = await bridge.apiPost(endpoint("background", draft.id), payload);
     if (backgroundDraft !== draft || scopeId !== draft.id) return;
+    draft.dirty = false;
     await refreshBootstrap();
+    renderBackground();
     if (backgroundDraft?.id === draft.id && response.selection?.revision === backgroundDraft.revision) {
       backgroundDraft.check = response.check || null;
       backgroundDraft.checks = response.checks || [];
       renderBackground();
     }
-    notify("已保存", false, "background-feedback");
+    saved = true;
   }, "background-feedback");
+  if (saved && scopeId === draft.id) notify("已保存", false, "background-feedback");
 }
 
 function pendingScopeHelp(scope) {
@@ -1341,8 +1366,8 @@ $("parameters-form").addEventListener("submit", (event) => {
   event.preventDefault();
   void saveParameters().catch((error) => notify(errorMessage(error), true, "parameters-feedback"));
 });
-$("reload-parameters").addEventListener("click", () => void perform($("reload-parameters"), "parameters", reloadParameters, "parameters-feedback"));
-$("background-recheck").addEventListener("click", () => void loadBackground());
+$("background-recheck").addEventListener("click", () => void loadBackground({ manual: true }));
+$("background-save").addEventListener("click", () => void saveBackground());
 $("background-settings").addEventListener("click", () => {
   activateTab("setup");
   $("memory-background_max_tokens").focus();
@@ -1405,6 +1430,12 @@ $("copy-upgrade").addEventListener("click", () => void perform($("copy-upgrade")
 $("copy-command").addEventListener("click", () => void perform($("copy-command"), "copy", () => copyCommand("install-command", "installation", "部署命令已复制，请在运行 AstrBot 的服务器执行。")));
 for (const button of document.querySelectorAll("[data-guide]")) button.addEventListener("click", () => {
   const dialog = $(button.dataset.guide);
+  if (button.dataset.guide === "backup-dialog") {
+    const managed = data?.config.managed === true;
+    for (const item of dialog.querySelectorAll("[data-managed-backup]")) item.hidden = !managed;
+    $("backup-existing-service").hidden = managed;
+    $("backup-heading").textContent = managed ? "备份与恢复" : "Bridge 备份与恢复";
+  }
   if (!dialog.open) dialog.showModal();
 });
 for (const button of document.querySelectorAll("[data-copy]")) button.addEventListener("click", () => void perform(
@@ -1454,14 +1485,18 @@ $("dismiss-feedback").addEventListener("click", () => { $("feedback").hidden = t
 $("scope-picker").addEventListener("change", () => { selectedAccount = $("scope-picker").value; scopeId = ""; updateUserChoices(); selectScope(scopeId); });
 $("bank-picker").addEventListener("change", () => selectScope($("bank-picker").value));
 for (const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void setMode(button, button.dataset.mode));
-$("background-page").addEventListener("change", () => void saveBackground());
-$("reading-mode").addEventListener("change", () => void saveReading());
+$("background-page").addEventListener("change", changeBackground);
+$("reading-mode").addEventListener("change", () => {
+  if (readingDraft) readingDraft.dirty = true;
+  $("reading-feedback").hidden = true;
+  renderReading();
+});
+$("reading-save").addEventListener("click", () => void saveReading());
 for (const id of ["reflect-enabled", "reflect-timeout"]) $(id).addEventListener("input", () => {
   if (reflectDraft) reflectDraft.dirty = true;
   renderReflect();
 });
 $("reflect-save").addEventListener("click", () => void saveReflect());
-$("reflect-reload").addEventListener("click", () => renderReflect({ discard: true }));
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
 $("copy-control-plane").addEventListener("click", () => void perform($("copy-control-plane"), "copy",
