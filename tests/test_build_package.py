@@ -44,7 +44,7 @@ class CandidatePackaging(unittest.TestCase):
             with zipfile.ZipFile(install) as archive:
                 names = {name.removeprefix("astrbot_plugin_hindsight_bridge/") for name in archive.namelist()}
                 self.assertEqual(names, set(manifest["files"]))
-                self.assertTrue({"main.py", "core/background.py", "views/memory/app.js", "deploy/compose.yaml"} <= names)
+                self.assertTrue({"main.py", "core/background.py", "core/settings.py", "views/memory/app.js", "deploy/compose.yaml"} <= names)
                 self.assertFalse(any(name.split("/")[0] in {"tests", "tools", ".local", ".github"} for name in names))
                 self.assertNotIn("requirements-dev.txt", names)
                 for name in names:

@@ -51,6 +51,8 @@
           <p id="background-check" class="operation-status" role="status" hidden></p>
           <p id="background-index" class="operation-status" role="status" hidden></p>
           <p id="background-feedback" class="operation-status" role="status" hidden></p>
+          <button id="background-recheck" type="button">重新检查长度</button>
+          <button id="background-settings" type="button" class="text-button">调整知识页预算</button>
         </section>
         <section class="content-section">
           <h3>记忆状态</h3>
@@ -97,6 +99,40 @@
         </form>
         <section id="maintenance" class="surface" hidden><h2>服务管理</h2><div class="service-ops"><button id="backup-guide" type="button" data-guide="backup-dialog">备份指南</button><button id="go-upgrade" type="button" hidden>升级服务</button><button id="reinstall" type="button">重新部署</button><button id="prepare-uninstall" type="button" class="danger-quiet">卸载服务</button></div></section>
       </fieldset>
+      <form id="parameters-form" class="surface">
+        <h2>记忆与知识页设置</h2>
+        <fieldset id="parameters-fields" disabled>
+          <legend class="sr-only">记忆参数</legend>
+          <p class="field-help">知识页正文、说明与元数据同时受以下三个长度上限约束。放不下时整页跳过；增加上限会提高聊天模型的上下文用量。</p>
+          <div class="form-grid">
+            <label>知识页长度上限（token）<input id="memory-background_max_tokens" type="number" required min="64" max="8192" step="1"><span class="field-help">默认 400，范围 64–8192。</span><span id="effective-background_max_tokens" class="field-help"></span></label>
+            <label>共享 token 上限<input id="memory-recall_max_tokens" type="number" required min="256" max="8192" step="1"><span class="field-help">默认 1200，范围 256–8192，与检索结果及状态说明共用。</span><span id="effective-recall_max_tokens" class="field-help"></span></label>
+            <label>共享字符上限<input id="memory-context_max_chars" type="number" required min="256" max="32768" step="1"><span class="field-help">默认 4000，范围 256–32768。</span><span id="effective-context_max_chars" class="field-help"></span></label>
+            <label>记忆检索等待时间（秒）<input id="memory-recall_timeout" type="number" required min="0.2" max="30" step="any"><span class="field-help">默认 10，范围 0.2–30，限制整轮检索与知识页读取。</span><span id="effective-recall_timeout" class="field-help"></span></label>
+            <label>知识页读取等待时间（秒）<input id="memory-background_timeout" type="number" required min="0.05" max="10" step="any"><span class="field-help">默认 1，范围 0.05–10；实际不超过认证后剩余检索等待时间的四分之一。</span><span id="effective-background_timeout" class="field-help"></span></label>
+          </div>
+          <details class="advanced-settings">
+            <summary>高级设置</summary>
+            <div class="form-grid">
+              <label>查询 token 上限<input id="memory-recall_query_tokens" type="number" required min="32" max="400" step="1"><span class="field-help">默认 380，范围 32–400，优先保留用户消息。</span><span id="effective-recall_query_tokens" class="field-help"></span></label>
+              <label>查询分词编码<input id="memory-query_tokenizer" required spellcheck="false" autocomplete="off"><span class="field-help">默认 o200k_base。填写 tiktoken 编码名称，保存时检查并加载。</span><span id="effective-query_tokenizer" class="field-help"></span></label>
+              <label>待保存记录数量上限<input id="memory-queue_max_tasks" type="number" required min="1" step="1"><span class="field-help">默认 10000。达到上限后停止接收新记录，已有记录继续处理。</span><span id="effective-queue_max_tasks" class="field-help"></span></label>
+              <label>待保存内容容量上限（MiB）<input id="memory-queue_max_mib" type="number" required min="1" step="1"><span class="field-help">默认 64。调低后不丢弃积压，容量释放后继续接收。</span><span id="effective-queue_max_mib" class="field-help"></span></label>
+              <label class="full-width">额外排除的命令前缀<textarea id="memory-command_prefixes" rows="3" spellcheck="false"></textarea><span class="field-help">默认留空，每行一个。以 / 开头的消息始终排除；修改只影响后续消息。</span><span id="effective-command_prefixes" class="field-help"></span></label>
+            </div>
+          </details>
+          <p id="parameters-conflict" class="operation-status error" role="status" hidden>设置已被更新，草稿保留。请重新加载记忆设置后再保存。</p>
+          <p id="parameters-limits" class="operation-status" role="status" hidden></p>
+          <p id="parameters-feedback" class="operation-status" role="status" hidden></p>
+          <div class="actions"><button id="save-parameters" type="submit" class="primary">保存记忆设置</button><button id="reload-parameters" type="button">重新加载记忆设置</button></div>
+        </fieldset>
+      </form>
+      <details class="surface">
+        <summary>部署与迁移信息</summary>
+        <p class="field-help">这些项目影响服务身份、记忆归属和控制数据位置。修改请使用标准插件配置，并按备份与恢复指南执行迁移。</p>
+        <dl id="deployment-values" class="deployment-values"></dl>
+        <button type="button" data-guide="backup-dialog">查看备份与迁移步骤</button>
+      </details>
     </section>
     <div id="feedback" class="feedback" role="status" aria-live="polite" hidden><span id="feedback-message"></span><button id="dismiss-feedback" type="button" aria-label="关闭提示">关闭</button></div>
   </main>

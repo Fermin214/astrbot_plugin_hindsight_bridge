@@ -95,7 +95,7 @@
     "description": "查询 token 上限",
     "type": "int",
     "default": 380,
-    "hint": "限制发送给 Hindsight 的查询长度，优先保留当前消息。默认 380，最多 400 token。"
+    "hint": "限制发送给 Hindsight 的查询长度，优先保留用户消息。默认 380，范围 32 到 400 token，也可在记忆管理面板的高级设置中调整。"
   },
   "query_tokenizer": {
     "description": "查询分词编码",

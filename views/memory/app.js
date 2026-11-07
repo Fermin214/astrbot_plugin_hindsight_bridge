@@ -3,6 +3,10 @@ let bridge = window.AstrBotPluginView;
 const modeLabels = { active: "读写记忆", readonly: "只读记忆", paused: "停用记忆" };
 let data = null;
 let settingsRevision = "";
+let parameterDraft = null;
+const parameterKeys = ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+  "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
+  "queue_max_tasks", "queue_max_mib", "command_prefixes"];
 let scopeId = "";
 let selectedAccount = "";
 let maintenanceScopeId = "";
@@ -337,6 +341,86 @@ function hydrateConfig() {
   updateProviderHelp();
 }
 
+function renderParameters({ discard = false } = {}) {
+  const snapshot = data?.parameters;
+  if (!snapshot) return;
+  if (discard || !parameterDraft || !parameterDraft.dirty) {
+    parameterDraft = { revision: data.config_revision, dirty: false };
+    for (const key of parameterKeys) {
+      $("memory-" + key).value = key === "command_prefixes"
+        ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join("\n") : "") : String(snapshot.values[key] ?? "");
+    }
+  }
+  $("parameters-fields").disabled = locks.has("parameters");
+  $("parameters-conflict").hidden = parameterDraft.revision === data.config_revision;
+  for (const key of parameterKeys) {
+    const display = (value) => Array.isArray(value) ? value.join("、") || "无" : text(value);
+    $("effective-" + key).textContent = `已保存：${display(snapshot.values[key])}；`
+      + (snapshot.running ? `生效值：${display(snapshot.effective[key])}` : "连接服务后生效");
+  }
+  const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
+    service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
+  $("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
+    [el("dt", "", labels[key] || key), el("dd", "", value || "默认专属目录")]));
+  renderParameterLimits();
+}
+
+function renderParameterLimits() {
+  const page = Number($("memory-background_max_tokens").value);
+  const shared = Number($("memory-recall_max_tokens").value);
+  const seconds = Number($("memory-background_timeout").value);
+  const total = Number($("memory-recall_timeout").value);
+  const messages = [];
+  if (page > shared) messages.push("知识页仍受较小的共享 token 上限约束。");
+  if (seconds > total / 4) messages.push(`知识页实际读取等待小于 ${total / 4} 秒，并随认证耗时缩短。`);
+  $("parameters-limits").textContent = messages.join(" ");
+  $("parameters-limits").hidden = !messages.length;
+}
+
+function parameterPayload() {
+  const parameters = {};
+  for (const key of parameterKeys) {
+    const raw = $("memory-" + key).value;
+    if (key === "command_prefixes") parameters[key] = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    else if (key === "query_tokenizer") parameters[key] = raw.trim();
+    else {
+      const value = Number(raw);
+      if (!raw.trim() || !Number.isFinite(value) || (!key.endsWith("timeout") && !Number.isSafeInteger(value))) {
+        throw new Error("记忆参数须填写有效数值；数量和长度须为整数。");
+      }
+      parameters[key] = value;
+    }
+  }
+  return { config_revision: parameterDraft.revision, parameters };
+}
+
+async function saveParameters() {
+  if (!parameterDraft || !$("parameters-form").reportValidity()) return;
+  const payload = parameterPayload();
+  await perform($("save-parameters"), "parameters", async () => {
+    const response = await withTimeout(bridge.apiPost("parameters/save", payload), 25000,
+      "保存记忆设置超时，请重新获取状态并检查已保存值后重试。");
+    if (!response.saved || !response.parameters || !response.config_revision) throw new Error(response.message || "记忆设置未保存，请重试。");
+    if (data.config_revision !== payload.config_revision && data.config_revision !== response.config_revision) {
+      await refreshBootstrap({ automatic: true, pollMaintenance: false });
+      throw new Error("保存完成后设置又有更新，草稿保留。请重新加载记忆设置并核对已保存值。");
+    }
+    if (settingsRevision === payload.config_revision) settingsRevision = response.config_revision;
+    data.parameters = response.parameters;
+    data.config_revision = response.config_revision;
+    renderParameters({ discard: true });
+    backgroundDraft = null;
+    notify(response.message, false, "parameters-feedback");
+    await refreshBootstrap({ automatic: true, pollMaintenance: false });
+  }, "parameters-feedback");
+}
+
+async function reloadParameters() {
+  await refreshBootstrap({ automatic: true, pollMaintenance: false });
+  renderParameters({ discard: true });
+  notify("记忆设置已重新加载。", false, "parameters-feedback");
+}
+
 function accountKey(account) {
   return JSON.stringify([account.platform_instance_id, account.user_id]);
 }
@@ -430,6 +514,7 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   if (revision !== bootstrapReadRevision) return;
   if (settingsRevision && next.config_revision !== settingsRevision) clearCommands();
   data = next;
+  renderParameters();
   if (managedSetup?.installation_id && data.config.managed && data.installation_id === managedSetup.installation_id) managedSetup.providers = data.providers;
   if (hydrate) hydrateConfig();
   else if (!automatic || document.activeElement?.tagName !== "SELECT") {
@@ -644,6 +729,7 @@ function renderBackground() {
     + "目录标记不保证正文已包含全部记忆；刷新请在官方面板操作。" : "";
   $("background-index").textContent = index;
   $("background-index").hidden = !index;
+  $("background-recheck").disabled = !!blocked || backgroundDraft.loading || locks.has("memory");
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
 
@@ -1125,6 +1211,20 @@ async function prepareForget(button, id) {
 }
 
 $("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void (managedMode() ? saveAccess() : saveSettings()).catch((error) => notify(errorMessage(error), true)); });
+$("parameters-form").addEventListener("input", () => {
+  if (parameterDraft) parameterDraft.dirty = true;
+  renderParameterLimits();
+});
+$("parameters-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveParameters().catch((error) => notify(errorMessage(error), true, "parameters-feedback"));
+});
+$("reload-parameters").addEventListener("click", () => void perform($("reload-parameters"), "parameters", reloadParameters, "parameters-feedback"));
+$("background-recheck").addEventListener("click", () => void loadBackground());
+$("background-settings").addEventListener("click", () => {
+  activateTab("setup");
+  $("memory-background_max_tokens").focus();
+});
 $("check-connection").addEventListener("click", () => void perform($("check-connection"), "setup", async () => {
   await checkConnection(connectionPayload());
   await refreshBootstrap();

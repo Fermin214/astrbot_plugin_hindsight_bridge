@@ -131,6 +131,11 @@ class Feedback(Acceptance):
         await self.usable()
 
     async def single_page(self, page, frame, bank, short):
+        from parameter_panel import save_parameters
+
+        async def configure(**updates):
+            return await save_parameters(self, frame, **updates)
+
         async def selected_check():
             scope = await self.scope()
             return await self.http("GET", self.prefix + "/scopes/" + scope["scope_id"] + "/background")
@@ -153,9 +158,9 @@ class Feedback(Acceptance):
         assert baseline["selection"]["page_id"] == short
         assert baseline["budget"] == {"tokens": 1200, "chars": 4000, "page_tokens": 400, "page_timeout": 1}
         await chat(True)
-        self.passed("027_upgrade_preserves_single_reference_and_default_budgets_and_wait")
+        self.passed("single_reference_and_default_budgets_and_wait_are_preserved")
         medium = await self.page(bank, "HB-BUDGET-MEDIUM")
-        await self.config(recall_max_tokens=600)
+        await configure(recall_max_tokens=600)
         await self.usable()
         await self.select(medium)
         checked = await selected_check()
@@ -176,47 +181,66 @@ class Feedback(Acceptance):
         self.report["measurements"]["long_page_check"] = checked["check"]
         self.passed("selection_size_warning_and_index_state_survive_native_dashboard_reload")
 
-        await self.config(background_max_tokens=4096, recall_max_tokens=6000, context_max_chars=24000)
+        await configure(background_max_tokens=4096, recall_max_tokens=6000, context_max_chars=24000)
         await self.usable()
         checked = await selected_check()
         assert checked["check"]["code"] == "" and checked["check"]["tokens"] > 400
         wire = await chat(True)
         assert ("HB-FEEDBACK-LONG complete paragraph. " * 120).rstrip() in wire
-        self.passed("expanded_page_and_shared_token_character_budgets_inject_entire_native_long_page")
+        await self.drained()
+        assert "HB-FEEDBACK-LONG complete paragraph." not in json.dumps(database(self.runtime, "SELECT payload FROM outbox"))
+        saved_parameters = (await self.bootstrap())["parameters"]["values"]
+        await self.http("POST", "/api/v1/plugins/" + NAME + "/reload", payload={})
+        await self.usable()
+        await page.reload()
+        await self.dismiss_host_notice(page)
+        await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+        assert (await self.bootstrap())["parameters"]["values"] == saved_parameters
+        assert (await self.scope())["background"]["page_id"] == long
+        await frame.locator("#background-recheck").click()
+        await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        assert ("HB-FEEDBACK-LONG complete paragraph. " * 120).rstrip() in await chat(True)
+        self.passed("native_panel_expands_three_budgets_and_injects_entire_long_page_after_reload_without_material_backflow")
         for settings in ({"context_max_chars": 256}, {"context_max_chars": 24000, "recall_max_tokens": 256},
                          {"recall_max_tokens": 6000, "background_max_tokens": 400}):
-            await self.config(**settings)
+            await configure(**settings)
             await self.usable()
             assert (await selected_check())["check"]["code"] == "background_too_large"
             wire = await chat(False, "知识页太长")
             assert "HB-FEEDBACK-LONG complete paragraph." not in wire
         self.passed("independent_page_shared_token_and_shared_character_ceilings_each_skip_whole_page")
 
-        await self.config(background_max_tokens=400, recall_max_tokens=1200, context_max_chars=4000,
-                          recall_timeout=10, background_timeout=0.1)
+        await configure(background_max_tokens=400, recall_max_tokens=1200, context_max_chars=4000,
+                        recall_timeout=10, background_timeout=0.1)
         await self.usable()
         await self.select(short)
-        await self.control("delay_background", seconds=0.35)
-        try:
-            wire = await chat(False, "读取知识页超时")
-            assert "Hindsight 知识页" not in wire
-            await self.config(background_timeout=0.8)
-            await self.usable()
-            assert "Hindsight 知识页" in await chat(True)
-            await self.config(recall_timeout=0.4, background_timeout=10)
-            await self.usable()
-            await chat(False, "读取知识页超时")
-        finally:
-            await self.control("delay_background", seconds=0)
-        self.passed("configured_page_subdeadline_allows_slow_read_and_stays_within_shared_quarter_deadline")
-        await self.config(recall_timeout=10, background_timeout=1)
+        if not self.settings.get("parameter_managed"):
+            await self.control("delay_background", seconds=0.35)
+            try:
+                wire = await chat(False, "读取知识页超时")
+                assert "Hindsight 知识页" not in wire
+                await configure(background_timeout=0.8)
+                await self.usable()
+                assert "Hindsight 知识页" in await chat(True)
+                await configure(recall_timeout=0.4, background_timeout=10)
+                await self.usable()
+                await chat(False, "读取知识页超时")
+            finally:
+                await self.control("delay_background", seconds=0)
+            self.passed("configured_page_subdeadline_allows_slow_read_and_stays_within_shared_quarter_deadline")
+        await configure(recall_timeout=10, background_timeout=1)
         await self.usable()
         await page.reload()
         await self.dismiss_host_notice(page)
         await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
         await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        from parameter_panel import verify_advanced
+
+        await verify_advanced(self, frame)
         await self.layout(page, frame)
-        self.report["acceptance_scope"] = "0.2.7 upgrade, single page budgets, native selection checks, index state and read subdeadline"
+        await frame.locator("#tab-setup").click()
+        await self.layout(page, frame)
+        self.report["acceptance_scope"] = "native panel parameter saves, long-page chat use, reload persistence, index state and read subdeadline"
         self.report["not_covered"] = ["real QQ login", "production model quality", "control migration and business snapshot recovery"]
         self.report["complete"] = True
         self.save()

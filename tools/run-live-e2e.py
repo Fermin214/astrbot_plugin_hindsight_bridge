@@ -211,6 +211,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             url = state.settings["hindsight_url"] + path
             if path.endswith("/recall") and self.command == "POST":
                 response_delay = self.server.recall_delay
+                self.server.record("recall-trace", {"path": path, "body": json.loads(raw)})
             if "/mental-models/" in path and self.command == "GET":
                 response_delay = self.server.background_delay
             if path.endswith("/memories") and self.command == "POST":
@@ -424,7 +425,7 @@ class Environment:
         print("Real Hindsight and PostgreSQL are ready", flush=True)
         token_cache = Path(os.environ.get("TIKTOKEN_CACHE_DIR") or os.environ.get("DATA_GYM_CACHE_DIR")
                            or str(Path(tempfile.gettempdir()) / "data-gym-cache")).resolve()
-        run(sys.executable, "-c", "import tiktoken; tiktoken.get_encoding('o200k_base')")
+        run(sys.executable, "-c", "import tiktoken; tiktoken.get_encoding('o200k_base'); tiktoken.get_encoding('cl100k_base')")
         mounts = ["-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                   "-e", "ASTRBOT_ROOT=/delivery/verification", "-e", "ASTRBOT_DASHBOARD_INITIAL_PASSWORD=" + self.settings["initial_password"],
                   "-e", "TIKTOKEN_CACHE_DIR=/token-cache", "-v", str(token_cache) + ":/token-cache:ro"]

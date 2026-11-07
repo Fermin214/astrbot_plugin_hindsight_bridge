@@ -19,7 +19,7 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
-from .core.background import ReadGuard, compose_background, context_limits, reference
+from .core.background import ReadGuard, check_page, compose_background, context_limits, reference
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -499,7 +499,14 @@ class HindsightBridge(Star):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
                     guard.queue.apply_control()
                     raise HindsightError("bank_missing")
-                return block, recall_code, facts_used, {"code": page_code, "used": background_used}
+                page_check = check_page(
+                    page, tokens=tokens, chars=chars, page_tokens=limits["page_tokens"],
+                    tokenizer=guard.client.tokenizer,
+                ) if page is not None and page_code == "background_too_large" else {}
+                return block, recall_code, facts_used, {
+                    "code": page_code, "used": background_used,
+                    "exceeded": page_check.get("exceeded", []),
+                }
         except TimeoutError:
             raise HindsightError("auth_timeout" if stage == "auth" else "recall_timeout") from None
         finally:

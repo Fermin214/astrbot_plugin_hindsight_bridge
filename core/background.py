@@ -46,7 +46,14 @@ def check_page(page, *, tokens, chars, page_tokens, tokenizer):
     code = "background_empty" if not block else (
         "background_too_large" if count > min(page_tokens, tokens) or len(block) > chars else ""
     )
-    return {"tokens": count, "chars": len(block), "code": code}
+    exceeded = []
+    if count > page_tokens:
+        exceeded.append("知识页 token 上限")
+    if count > tokens:
+        exceeded.append("共享 token 上限")
+    if len(block) > chars:
+        exceeded.append("共享字符上限")
+    return {"tokens": count, "chars": len(block), "code": code, "exceeded": exceeded}
 
 
 def reference_key(connection, owner):

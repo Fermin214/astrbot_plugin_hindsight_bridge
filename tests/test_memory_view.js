@@ -50,7 +50,11 @@ function harness() {
     locks: new Set(), scopeId: "", selectedAccount: "", maintenanceScopeId: "", modeDirty: false, maintenanceState: null,
     maintenanceIdentity: "", maintenanceCheckedAt: 0,
     maintenanceExpiryTimer: undefined,
-    authorizationState: null, settingsRevision: "",
+    authorizationState: null, settingsRevision: "", parameterDraft: null,
+    parameterKeys: ["background_max_tokens", "recall_max_tokens", "context_max_chars",
+      "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
+      "queue_max_tasks", "queue_max_mib", "command_prefixes"],
+    renderParameters() {},
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
@@ -75,6 +79,102 @@ function harness() {
   }
   return context;
 }
+
+function parameterHarness() {
+  const context = harness();
+  for (const name of ["text", "renderParameterLimits", "renderParameters", "parameterPayload", "perform", "saveParameters"]) {
+    vm.runInContext(declaration(name), context);
+  }
+  const values = { background_max_tokens: 400, recall_max_tokens: 1200, context_max_chars: 4000,
+    recall_timeout: 10, background_timeout: 1, recall_query_tokens: 380, query_tokenizer: "o200k_base",
+    queue_max_tasks: 10000, queue_max_mib: 64, command_prefixes: [] };
+  context.data = { config_revision: "a", config: {}, parameters: {
+    values, effective: values, running: true, deployment: { service_id: "service", agent_id: "default" },
+  } };
+  context.settingsRevision = "a";
+  context.refreshBootstrap = async () => { context.renderParameters(); };
+  context.renderParameters();
+  return context;
+}
+
+test("memory settings polling retains drafts and exposes conflicts without changing saved values", () => {
+  const context = parameterHarness();
+  context.$("memory-background_max_tokens").value = "4096";
+  context.parameterDraft.dirty = true;
+  context.renderParameters();
+  assert.equal(context.$("memory-background_max_tokens").value, "4096");
+  assert.equal(context.$("parameters-conflict").hidden, true);
+  context.data.config_revision = "b";
+  context.data.parameters.values = { ...context.data.parameters.values, background_max_tokens: 2000 };
+  context.renderParameters();
+  assert.equal(context.$("memory-background_max_tokens").value, "4096");
+  assert.equal(context.parameterDraft.revision, "a");
+  assert.equal(context.$("parameters-conflict").hidden, false);
+  assert.match(context.$("effective-background_max_tokens").textContent, /已保存：2000/);
+  context.renderParameters({ discard: true });
+  assert.equal(context.$("memory-background_max_tokens").value, "2000");
+  assert.equal(context.parameterDraft.revision, "b");
+});
+
+test("memory parameter saves use an independent payload and acknowledge the returned runtime values", async () => {
+  const context = parameterHarness();
+  context.$("api-url").value = "http://unsaved-connection";
+  context.$("memory-background_max_tokens").value = "4096";
+  context.$("memory-command_prefixes").value = "!\n#\n";
+  context.parameterDraft.dirty = true;
+  context.bridge = { apiPost: async (route, payload) => {
+    assert.equal(route, "parameters/save");
+    assert.deepEqual(Object.keys(payload).sort(), ["config_revision", "parameters"]);
+    assert.equal(payload.config_revision, "a");
+    assert.equal(payload.parameters.background_max_tokens, 4096);
+    assert.equal(JSON.stringify(payload.parameters.command_prefixes), '["!","#"]');
+    return { saved: true, config_revision: "b", message: "已保存并生效",
+      parameters: { ...context.data.parameters, values: payload.parameters, effective: payload.parameters } };
+  } };
+  await context.saveParameters();
+  assert.equal(context.$("api-url").value, "http://unsaved-connection");
+  assert.equal(context.settingsRevision, "b");
+  assert.equal(context.parameterDraft.revision, "b");
+  assert.equal(context.parameterDraft.dirty, false);
+  assert.match(context.$("effective-background_max_tokens").textContent, /生效值：4096/);
+  assert.match(context.$("parameters-feedback").textContent, /已保存并生效/);
+  assert.equal(context.locks.size, 0);
+});
+
+test("failed parameter saves retain input and revision and reject invalid numeric serialization", async () => {
+  const context = parameterHarness();
+  context.$("memory-context_max_chars").value = "24000";
+  context.parameterDraft.dirty = true;
+  context.bridge = { apiPost: async () => { throw new Error("配置已被更新"); } };
+  await context.saveParameters();
+  assert.equal(context.$("memory-context_max_chars").value, "24000");
+  assert.equal(context.parameterDraft.revision, "a");
+  assert.equal(context.parameterDraft.dirty, true);
+  assert.match(context.$("parameters-feedback").textContent, /配置已被更新/);
+  for (const raw of ["", "1.2", "NaN", "9007199254740992"]) {
+    context.$("memory-queue_max_tasks").value = raw;
+    assert.throws(() => context.parameterPayload(), /有效数值/);
+  }
+});
+
+test("a late parameter save response cannot overwrite newer bootstrap values", async () => {
+  const context = parameterHarness();
+  context.parameterDraft.dirty = true;
+  context.$("memory-background_max_tokens").value = "4096";
+  let finish;
+  context.bridge = { apiPost: () => new Promise((resolve) => { finish = resolve; }) };
+  const saving = context.saveParameters();
+  context.data.config_revision = "newer";
+  context.data.parameters.values = { ...context.data.parameters.values, background_max_tokens: 3000 };
+  finish({ saved: true, config_revision: "saved", parameters: { ...context.data.parameters,
+    values: { ...context.data.parameters.values, background_max_tokens: 4096 } } });
+  await saving;
+  assert.equal(context.data.config_revision, "newer");
+  assert.equal(context.data.parameters.values.background_max_tokens, 3000);
+  assert.equal(context.$("memory-background_max_tokens").value, "4096");
+  assert.equal(context.parameterDraft.dirty, true);
+  assert.match(context.$("parameters-feedback").textContent, /设置又有更新/);
+});
 
 test("manual version feedback survives polling and rejects results from a changed connection", async () => {
   const context = harness();

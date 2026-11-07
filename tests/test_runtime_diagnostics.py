@@ -19,7 +19,7 @@ import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
-from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_background, context_limits, reference
+from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, check_page, compose_background, context_limits, reference
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
