@@ -32,10 +32,11 @@
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
 .shell { max-width: 1160px; margin: auto; padding: 30px 28px 72px; }
-h1, h2, h3, p { margin: 0; }
+h1, h2, h3, h4, p { margin: 0; }
 h1 { display: flex; align-items: center; gap: 12px; font-size: 23px; font-weight: 650; }
 h2 { font-size: 22px; font-weight: 650; }
 h3 { font-size: 18px; font-weight: 650; }
+h4 { font-size: 16px; font-weight: 650; }
 p, span { overflow-wrap: anywhere; }
 button, input, select, textarea { font: inherit; }
 button, .button { cursor: pointer; min-height: 42px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 16px; background: var(--surface); color: var(--text); line-height: 1.5; }
@@ -84,6 +85,20 @@ a { color: var(--accent); }
 .bank-row { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-radius: 6px; background: var(--tint); }
 .bank-row input { flex: 1; min-width: 0; min-height: 34px; padding: 4px 0; border: 0; background: transparent; font-family: Consolas, monospace; }
 .bank-row button { padding: 4px 10px; min-height: 34px; background: transparent; flex-shrink: 0; }
+.bank-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 10px; }
+.bank-actions:has(button[hidden]) { display: none; }
+.management-row { margin-top: 16px; }
+.management-row > label { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.management-row > div { display: flex; gap: 10px; }
+.management-row input { min-width: 0; }
+.management-row button { flex-shrink: 0; }
+.memory-feature { margin-top: 24px; padding: 22px 0; border-top: 1px solid var(--line); }
+.memory-feature > h4 { margin-bottom: 12px; }
+.memory-feature .knowledge-row { margin: 12px 0; }
+.memory-feature .field-help { max-width: 68ch; margin: 10px 0 0; }
+.reflect-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 18px 36px; margin-top: 16px; }
+.reflect-controls .check-label { margin-top: 0; }
+.reflect-controls > label:last-child { max-width: 180px; }
 #bank-range-field { margin-bottom: 18px; }
 .knowledge-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); align-items: center; gap: 16px; margin-top: 20px; }
 .knowledge-row .check-label { margin-top: 0; }
