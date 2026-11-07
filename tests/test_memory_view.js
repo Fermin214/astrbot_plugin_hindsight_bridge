@@ -22,6 +22,7 @@ function harness() {
       get options() { return this.children; },
       querySelector() { return node(); }, closest() { return null; },
       append(...children) { this.children.push(...children); },
+      prepend(...children) { this.children.unshift(...children); },
       replaceChildren(...children) { this.children = children; },
       attributes: {},
       addEventListener(name, handler) { this.listeners[name] = handler; },
@@ -54,7 +55,7 @@ function harness() {
     parameterKeys: ["background_max_tokens", "recall_max_tokens", "context_max_chars",
       "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",
       "queue_max_tasks", "queue_max_mib", "command_prefixes"],
-    renderParameters() {}, renderControlPlane() {},
+    renderParameters() {},
     maintenanceReadRevision: 0, bootstrapReadRevision: 0, statusSignature: "",
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
@@ -110,7 +111,6 @@ test("memory settings polling retains drafts and exposes conflicts without chang
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.parameterDraft.revision, "a");
   assert.equal(context.$("parameters-conflict").hidden, false);
-  assert.match(context.$("effective-background_max_tokens").textContent, /已保存：2000/);
   context.renderParameters({ discard: true });
   assert.equal(context.$("memory-background_max_tokens").value, "2000");
   assert.equal(context.parameterDraft.revision, "b");
@@ -136,8 +136,8 @@ test("memory parameter saves use an independent payload and acknowledge the retu
   assert.equal(context.settingsRevision, "b");
   assert.equal(context.parameterDraft.revision, "b");
   assert.equal(context.parameterDraft.dirty, false);
-  assert.match(context.$("effective-background_max_tokens").textContent, /生效值：4096/);
-  assert.match(context.$("parameters-feedback").textContent, /已保存并生效/);
+  assert.equal(context.data.parameters.effective.background_max_tokens, 4096);
+  assert.match(context.$("parameters-feedback").textContent, /已保存/);
   assert.equal(context.locks.size, 0);
 });
 
@@ -173,7 +173,7 @@ test("a late parameter save response cannot overwrite newer bootstrap values", a
   assert.equal(context.data.parameters.values.background_max_tokens, 3000);
   assert.equal(context.$("memory-background_max_tokens").value, "4096");
   assert.equal(context.parameterDraft.dirty, true);
-  assert.match(context.$("parameters-feedback").textContent, /设置又有更新/);
+  assert.match(context.$("parameters-feedback").textContent, /设置已更新/);
 });
 
 test("manual version feedback survives polling and rejects results from a changed connection", async () => {
@@ -734,7 +734,7 @@ test("connected service does not hide the user's recall failure", () => {
   context.scopeId = "one";
   context.renderStatus();
   context.renderScope();
-  assert.equal(context.$("status-label").textContent, "服务已连接");
+  assert.equal(context.$("status-label").textContent, "已连接");
   const text = context.$("scope-recall-status").textContent;
   assert.match(text, /超时/);
   assert.match(text, /增加召回等待时间/);
@@ -781,31 +781,29 @@ test("background polling retains saved selection and clears references after Ban
   assert.equal(context.$("background-page").value, "");
 });
 
-test("chat usage and failures remain visible after index loading and polling", async () => {
+test("per-page usage and failures remain visible after index loading and polling", async () => {
   const context = backgroundHarness();
   const saved = context.data.scopes[0].background;
+  const content = () => context.$("background-selected").children.flatMap(row => row.children).map(row => row.textContent).join(" ");
   context.bridge = { apiGet: async () => ({ pages: [{ page_id: "kp-1", path: "Page" }],
     selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1" }) };
-  for (const message of ["上次聊天已使用知识页。", "上次聊天未使用知识页：知识页太长。",
-    "上次聊天未使用知识页：读取知识页超时。", "上次聊天未使用知识页：知识页还没有正文。",
-    "上次聊天未使用知识页：找不到所选知识页。"]) {
-    saved.status = { message };
+  for (const message of ["已使用", "知识页太长", "读取超时", "正文为空", "页面不存在"]) {
+    saved.status = { pages: [{ page_id: "kp-1", used: message === "已使用", message }] };
     context.renderBackground();
-    assert.equal(context.$("background-status").textContent, message);
+    assert.ok(content().includes(message));
     await context.loadBackground();
     context.renderBackground();
-    assert.equal(context.$("background-status").textContent, message);
-    assert.equal(context.$("background-status").hidden, false);
+    assert.ok(content().includes(message));
   }
   context.scopeId = "two";
   context.data.scopes.push({ scope_id: "two", bank: "bank-2", summary: {}, background: { revision: 0, enabled: false } });
   context.renderBackground();
-  assert.equal(context.$("background-status").textContent, "");
+  assert.equal(content(), "");
   context.scopeId = "one";
   saved.invalidated = true;
   saved.enabled = false;
   saved.page_id = "";
-  saved.message = "身份或记忆库已变化，知识页选择已失效，请重新选择。";
+  saved.message = "知识页选择已失效，请重新选择。";
   context.renderBackground();
   assert.equal(context.$("background-page").value, "");
   assert.equal(context.$("background-status").textContent, saved.message);
@@ -822,24 +820,25 @@ test("historical and maintenance scopes never offer page reads; maintenance perm
   assert.equal(context.$("background-page").disabled, true);
 });
 
-test("page length and index checks stay separate from chat usage and clear on scope change", async () => {
+test("page rows show length and actual stale state without repeating routine status", async () => {
   const context = backgroundHarness();
-  context.data.scopes[0].background.status = { message: "上次聊天已使用知识页。" };
-  for (const [stale, label] of [[true, "有新记忆待刷新"], [false, "未标记待刷新"], [null, "更新状态未知"]]) {
+  context.data.scopes[0].background.status = { pages: [{ page_id: "kp-1", used: true }] };
+  const content = () => context.$("background-selected").children.flatMap(row => row.children).map(row => row.textContent).join(" ");
+  for (const stale of [true, false, null]) {
     context.bridge = { apiGet: async () => ({
       pages: [{ page_id: "kp-1", path: "Page", index_stale: stale }],
       selection: { revision: 1 }, scope_revision: 2, config_revision: "config-1",
-      check: { message: "含说明与元数据：1800 token、4000 字符。知识页太长。" },
+      checks: [{ page_id: "kp-1", tokens: 1800, chars: 4000, exceeded: ["知识页长度"], code: "background_too_large" }],
     }) };
     await context.loadBackground();
-    assert.match(context.$("background-index").textContent, new RegExp(label));
-    assert.match(context.$("background-check").textContent, /1800 token/);
-    assert.equal(context.$("background-status").textContent, "上次聊天已使用知识页。");
+    assert.match(content(), /1800 token/);
+    assert.match(content(), /已使用/);
+    assert.equal(content().includes("有新记忆待刷新"), stale === true);
+    assert.equal(context.$("background-status").hidden, true);
   }
   context.data.scopes[0].background.enabled = false;
   context.renderBackground();
-  assert.equal(context.$("background-check").hidden, true);
-  assert.equal(context.$("background-index").hidden, true);
+  assert.doesNotMatch(content(), /1800 token|已使用|有新记忆待刷新/);
 });
 
 test("late background index cannot overwrite another user's draft", async () => {

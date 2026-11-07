@@ -11,10 +11,6 @@ async def save_parameters(acceptance, frame, **updates):
     await frame.locator("#tab-setup").click()
     await frame.locator("#reload-parameters").click()
     await until(lambda: frame.locator("#reload-parameters").is_enabled(), timeout=30)
-    if set(updates) & {"recall_query_tokens", "query_tokenizer", "queue_max_tasks", "queue_max_mib", "command_prefixes"}:
-        details = frame.locator(".advanced-settings")
-        if not await details.evaluate("(node) => node.open"):
-            await details.locator("summary").click()
     for key, value in updates.items():
         await frame.locator("#memory-" + key).fill("\n".join(value) if isinstance(value, list) else str(value))
     await frame.locator("#save-parameters").click()
@@ -26,7 +22,6 @@ async def save_parameters(acceptance, frame, **updates):
     for key, value in updates.items():
         assert stored[key] == value, (key, stored[key], value)
         assert snapshot["parameters"]["effective"][key] == value
-        assert "生效值" in await frame.locator("#effective-" + key).inner_text()
     for key in ("api_url", "api_key", "service_id", "agent_id", "allowed_accounts",
                 "service_address_revision", "control_state_dir"):
         assert stored.get(key) == before.get(key), key

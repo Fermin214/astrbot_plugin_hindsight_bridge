@@ -205,9 +205,6 @@ function updateConnectionMode() {
   $("save-settings").hidden = managed;
   $("save-access").hidden = !managed;
   $("check-connection").hidden = managed;
-  $("deployment-capabilities").textContent = managed
-    ? "选择模型后点击「保存并连接」完成接入。API 地址与密钥来自配套安装记录；官方管理地址可单独保存。"
-    : "已有服务通过 API 使用插件记忆功能。测试服务连接检查记忆 API 和认证。";
 }
 
 function renderServiceVersion() {
@@ -343,13 +340,6 @@ function hydrateConfig() {
   updateProviderHelp();
 }
 
-function renderControlPlane() {
-  let address = "";
-  try { address = controlPlaneUrl(data?.config?.control_plane_url || ""); } catch { /* Invalid saved addresses stay in settings. */ }
-  $("control-plane-access").hidden = !address;
-  $("saved-control-plane-url").value = address;
-  $("configure-control-plane").hidden = !!address;
-}
 
 function renderParameters({ discard = false } = {}) {
   const snapshot = data?.parameters;
@@ -363,11 +353,6 @@ function renderParameters({ discard = false } = {}) {
   }
   $("parameters-fields").disabled = locks.has("parameters");
   $("parameters-conflict").hidden = parameterDraft.revision === data.config_revision;
-  for (const key of parameterKeys) {
-    const display = (value) => Array.isArray(value) ? value.join("、") || "无" : text(value);
-    $("effective-" + key).textContent = `已保存：${display(snapshot.values[key])}；`
-      + (snapshot.running ? `生效值：${display(snapshot.effective[key])}` : "连接服务后生效");
-  }
   const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
     service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
   $("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
@@ -382,8 +367,8 @@ function renderParameterLimits() {
   const seconds = Number($("memory-background_timeout").value);
   const total = Number($("memory-recall_timeout").value);
   const messages = [];
-  if (page > shared) messages.push("知识页仍受较小的共享 token 上限约束。");
-  if (seconds > total / 4) messages.push(`知识页实际读取等待小于 ${total / 4} 秒，并随认证耗时缩短。`);
+  if (page > shared) messages.push("知识页长度超过记忆参考长度。");
+  if (seconds > total / 4) messages.push(`知识页有效超时 ≤ ${total / 4} 秒。`);
   $("parameters-limits").textContent = messages.join(" ");
   $("parameters-limits").hidden = !messages.length;
 }
@@ -410,18 +395,18 @@ async function saveParameters() {
   const payload = parameterPayload();
   await perform($("save-parameters"), "parameters", async () => {
     const response = await withTimeout(bridge.apiPost("parameters/save", payload), 25000,
-      "保存记忆设置超时，请重新获取状态并检查已保存值后重试。");
+      "保存超时，请刷新后确认结果。");
     if (!response.saved || !response.parameters || !response.config_revision) throw new Error(response.message || "记忆设置未保存，请重试。");
     if (data.config_revision !== payload.config_revision && data.config_revision !== response.config_revision) {
       await refreshBootstrap({ automatic: true, pollMaintenance: false });
-      throw new Error("保存完成后设置又有更新，草稿保留。请重新加载记忆设置并核对已保存值。");
+      throw new Error("设置已更新，请撤销修改后重试。");
     }
     if (settingsRevision === payload.config_revision) settingsRevision = response.config_revision;
     data.parameters = response.parameters;
     data.config_revision = response.config_revision;
     renderParameters({ discard: true });
     backgroundDraft = null;
-    notify(response.message, false, "parameters-feedback");
+    notify("已保存", false, "parameters-feedback");
     await refreshBootstrap({ automatic: true, pollMaintenance: false });
   }, "parameters-feedback");
 }
@@ -429,7 +414,7 @@ async function saveParameters() {
 async function reloadParameters() {
   await refreshBootstrap({ automatic: true, pollMaintenance: false });
   renderParameters({ discard: true });
-  notify("记忆设置已重新加载。", false, "parameters-feedback");
+  notify("已撤销修改", false, "parameters-feedback");
 }
 
 function accountKey(account) {
@@ -491,12 +476,17 @@ function countDescription(counts) {
 function renderStatus() {
   const status = data.status || {};
   const connected = status.connected;
-  $("status-label").textContent = status.recovering ? "正在核对记忆数据" : connected === true ? "服务已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
+  $("status-label").textContent = status.recovering ? "恢复中" : connected === true ? "已连接" : status.label || (connected === false ? "服务未连接" : "连接状态未知");
   $("status-dot").className = `status-dot${!status.recovering && connected === true ? " good" : connected === false ? " bad" : ""}`;
   let description = status.recovering ? "正在核对记忆库与保存任务。" : connected !== true ? status.message || "请检查服务地址、密钥和服务运行状态。" : "";
   if (data.config.managed && data.managed_service?.installed && !status.recovering && !data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
   $("status-description").textContent = description;
   $("status-description").hidden = !description;
+  const setup = $("panel-setup");
+  const connection = $("setup-fields");
+  if (connected === true || data.config.configured) {
+    if (setup.lastElementChild !== connection) setup.append(connection);
+  } else if (setup.firstElementChild !== connection) setup.prepend(connection);
   const attention = !!status.recovering || !data.config.configured || connected !== true;
   $("service-alert").hidden = !attention;
   $("service-alert-message").textContent = attention ? description || $("status-label").textContent : "";
@@ -504,7 +494,7 @@ function renderStatus() {
 
 function recallDescription(recall) {
   if (!recall) return "尚未检索";
-  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过", on_demand: "按需工具，未自动召回" };
+  const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过", on_demand: "按需读取" };
   const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome] || "结果未知";
   let result = `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}`;
   if (recall.error_message) result += `：${recall.error_message}`;
@@ -525,7 +515,6 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   if (revision !== bootstrapReadRevision) return;
   if (settingsRevision && next.config_revision !== settingsRevision) clearCommands();
   data = next;
-  renderControlPlane();
   renderParameters();
   if (managedSetup?.installation_id && data.config.managed && data.installation_id === managedSetup.installation_id) managedSetup.providers = data.providers;
   if (hydrate) hydrateConfig();
@@ -653,9 +642,6 @@ function renderScope() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const summary = scope?.summary || {};
   const account = (data?.config.allowed_accounts || []).find((item) => accountKey(item) === selectedAccount);
-  const platform = data?.platforms?.find((item) => item.id === scope?.platform_instance_id);
-  $("user-name").textContent = account?.user_id || scope?.user_id || "";
-  $("user-platform").textContent = platform?.name || scope?.platform_instance_id || "";
   $("user-bot").textContent = scope?.bot_id ? `机器人 ${scope.bot_id}` : "";
   $("user-availability").textContent = { historical: "旧记忆库", disconnected: "机器人未连接", confirmation: "身份待确认" }[scope?.availability] || "";
   $("pending-account").hidden = !scope?.pending;
@@ -674,7 +660,7 @@ function renderScope() {
   $("remove-account").disabled = !account || locks.has("setup") || !!data?.backend?.pending || !!data?.backend?.upgrade_paused;
   $("scope-bank").value = scope?.bank || "";
   $("copy-bank").disabled = !scope?.bank;
-  $("bank-state").textContent = scope?.bank_state === "new" ? "记忆库将在首次保存聊天时创建。" : "";
+  $("bank-state").textContent = scope?.bank_state === "new" ? "等待首次保存" : "";
   $("bank-state").hidden = !$("bank-state").textContent;
   const counts = summary.counts || {};
   $("saved-count").textContent = Number.isSafeInteger(summary.saved_count) && summary.saved_count >= 0 ? summary.saved_count : !scope || scope.pending ? "待开通" : "暂不可用";
@@ -709,19 +695,16 @@ function renderReading() {
   select.disabled = !scope || !!scope.pending || !!scope.historical || !!data?.status?.recovering
     || !!saved.error || locks.has("memory");
   select.options[1].disabled = !saved.observed_available && saved.mode !== "tools";
+  select.title = saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
   const status = saved.status || {};
   const messages = [];
   if (saved.error) messages.push(saved.error);
-  if (saved.invalidated) messages.push("身份或记忆库已变化，细节记忆已恢复自动召回。");
-  if (saved.mode === "tools") {
-    if (scope?.summary?.maintenance || scope?.mode === "paused") messages.push("记忆已暂停，按需工具不会读取内容。");
-    else if (status.state === "success") messages.push(`上次聊天调用记忆工具 ${status.calls} 次。`);
-    else if (status.state === "error") messages.push(status.message || "上次工具读取失败，请检查服务；也可切回自动召回。");
-    else if (status.state === "budget") messages.push("上次聊天的记忆工具额度已用完。");
-    else if (status.state === "not_called") messages.push("上次聊天未调用记忆工具，不能据此判断没有相关记忆。");
-    else if (status.state === "unavailable") messages.push("此会话未提供全部记忆工具，或模型、执行器不支持；请检查会话工具，或切回自动召回。");
-    else messages.push("按需工具的可用状态将在收到普通私聊后更新；不可用时可切回自动召回。");
-  } else if (!saved.observed_available) messages.push("发送一条普通私聊后，可检查此会话是否支持按需工具。");
+  else if (saved.invalidated) messages.push("记忆库已变化，已切回自动召回。");
+  else if (saved.mode === "tools") {
+    if (status.state === "error") messages.push(status.message || "工具读取失败");
+    else if (status.state === "budget") messages.push("本条消息的工具额度已用完");
+    else if (status.state === "unavailable") messages.push("此会话暂不支持按需工具");
+  }
   $("reading-status").textContent = messages.join(" ");
   $("reading-status").hidden = !messages.length;
 }
@@ -735,7 +718,7 @@ async function saveReading() {
     const response = await bridge.apiPost(endpoint("reading", draft.id), payload);
     if (readingDraft !== draft || scopeId !== draft.id) return;
     await refreshBootstrap();
-    if (scopeId === draft.id) notify(response.message || "记忆读取方式已保存。", false, "reading-feedback");
+    if (scopeId === draft.id) notify("已保存", false, "reading-feedback");
   }, "reading-feedback");
 }
 
@@ -758,20 +741,15 @@ function renderReflect({ discard = false } = {}) {
   $("reflect-save").disabled = !!unavailable || conflict || !reflectDraft.dirty;
   $("reflect-reload").disabled = locks.has("memory") || !scope;
   $("reflect-conflict").hidden = !conflict;
-  $("reflect-effective").textContent = `已保存：${saved.enabled ? "开启" : "关闭"}；等待 ${saved.timeout ?? 12} 秒。`;
+  $("reflect-enabled").title = saved.observed_available ? "" : "先与机器人聊一句，检测工具支持";
   const messages = [];
-  if (saved.error) messages.push("Reflect 设置无法读取，请检查最新控制数据。");
-  if (saved.invalidated) messages.push("身份或记忆库已变化，Reflect 已关闭。");
-  if (saved.unknown) messages.push("Reflect 请求的执行终点不明，相关旧记忆库不能完成清空；需要 Hindsight 提供可核验的请求完成凭据。");
-  else if (saved.pending) messages.push("正在核对已发送的 Reflect 请求，请不要重复调用。");
-  const status = saved.status || {};
-  if (saved.enabled) {
-    if (scope?.mode === "paused" || scope?.summary?.maintenance) messages.push("记忆已暂停，Reflect 不会读取内容。");
-    else if (!saved.observed_available) messages.push("此会话暂不支持 Reflect；请检查工具、模型、回退模型及子代理设置。");
-    else if (status.state === "error" || status.state === "budget") messages.push(status.message || "上次 Reflect 调用失败，请查看聊天中的工具结果。");
-    else if (status.state === "success") messages.push("上次聊天已完成一次 Reflect 调用。");
-    else messages.push("上次聊天未调用 Reflect，不能据此判断没有相关记忆。");
-  } else if (!saved.observed_available) messages.push("先发送一条普通私聊，检查模型和会话是否支持 Reflect 工具。");
+  if (saved.error) messages.push("Reflect 设置读取失败");
+  else if (saved.invalidated) messages.push("记忆库已变化，Reflect 已关闭。");
+  if (saved.unknown) messages.push("请求状态待确认，暂时无法清空记忆。");
+  else if (saved.pending) messages.push("Reflect 处理中…");
+  else if (saved.enabled && ["error", "budget"].includes(saved.status?.state)) {
+    messages.push(saved.status.message || "Reflect 调用失败");
+  }
   $("reflect-status").textContent = messages.join(" ");
   $("reflect-status").hidden = !messages.length;
 }
@@ -788,7 +766,7 @@ async function saveReflect() {
     if (reflectDraft !== draft || scopeId !== draft.id) return;
     draft.dirty = false;
     await refreshBootstrap();
-    if (scopeId === draft.id) notify(response.message || "Reflect 设置已保存。", false, "reflect-feedback");
+    if (scopeId === draft.id) notify("已保存", false, "reflect-feedback");
   }, "reflect-feedback");
 }
 
@@ -831,14 +809,15 @@ function renderBackground() {
     const native = draft.pages.find((item) => item.page_id === page.page_id);
     row.append(el("div", "knowledge-page-title", `${index + 1}. ${native?.path || page.page_id}`));
     const check = saved.enabled ? draft.checks.find((item) => item.page_id === page.page_id) : null;
-    if (check?.message) row.append(el("p", "field-help", check.message));
     const usage = saved.status?.pages?.find((item) => item.page_id === page.page_id);
-    if (usage?.message && saved.enabled) row.append(el("p", "field-help", usage.message));
-    if (native && saved.enabled) row.append(el("p", "field-help", native.index_stale === true ? "目录标记：有新记忆待刷新。"
-      : native.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。"));
+    if (check?.tokens != null) row.append(el("span", "page-metrics", `${check.tokens} token / ${check.chars} 字符`));
+    if (check?.exceeded?.length) row.append(el("p", "operation-status error", `超出${check.exceeded.join("、")}`));
+    else if (check?.code) row.append(el("p", "operation-status error", check.message));
+    if (saved.enabled && usage) row.append(el("span", "page-status", usage.used ? "已使用" : usage.message));
+    if (native?.index_stale === true && saved.enabled) row.append(el("span", "page-status", "有新记忆待刷新"));
     const actions = el("div", "knowledge-page-actions");
     for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
-      const button = el("button", "text-button", label);
+      const button = el("button", "", label);
       button.type = "button";
       button.setAttribute("aria-label", `${label}第 ${index + 1} 篇知识页`);
       button.disabled = !!blocked || locks.has("memory") || (direction === -1 && index === 0)
@@ -856,26 +835,9 @@ function renderBackground() {
     return row;
   });
   $("background-selected").replaceChildren(...rows);
-  const messages = [saved.error || saved.message || ""];
-  if (!unavailable && scope.summary?.maintenance) messages.push("插件读写已暂停，知识页不会传入聊天。");
-  else if (!unavailable && scope.mode === "paused" && saved.enabled) messages.push("停用记忆模式下，知识页不会传入聊天。");
-  if (saved.enabled && !saved.invalidated && !scope?.historical) {
-    messages.push(saved.status?.message || "已选择知识页，聊天使用结果将在读取后显示。");
-  }
-  if (backgroundDraft.loaded && !backgroundDraft.pages.length) messages.push("这个记忆库还没有知识页，可在记忆面板中创建。");
-  const status = messages.filter(Boolean).join(" ");
+  const status = saved.error || (saved.invalidated ? saved.message || "知识页选择已失效" : "");
   $("background-status").textContent = status;
   $("background-status").hidden = !status;
-  const check = saved.enabled && !saved.invalidated && selected.length <= 1 ? backgroundDraft.check?.message || "" : "";
-  $("background-check").textContent = check;
-  $("background-check").hidden = !check;
-  const indexed = saved.enabled && !saved.invalidated && selected.length <= 1
-    ? backgroundDraft.pages.find((page) => page.page_id === saved.page_id) : null;
-  const index = indexed ? (indexed.index_stale === true ? "目录标记：有新记忆待刷新。"
-    : indexed.index_stale === false ? "目录标记：未标记待刷新。" : "目录标记：更新状态未知。")
-    + "目录标记不保证正文已包含全部记忆；刷新请在官方面板操作。" : "";
-  $("background-index").textContent = index;
-  $("background-index").hidden = !index;
   $("background-recheck").disabled = !!blocked || backgroundDraft.loading || locks.has("memory");
   if (viewReady && !blocked && !backgroundDraft.attempted && !locks.has("memory")) void loadBackground();
 }
@@ -932,7 +894,7 @@ async function saveBackground({ pageIds, enabled } = {}) {
       backgroundDraft.checks = response.checks || [];
       renderBackground();
     }
-    notify(response.message || "知识页选择已保存。", false, "background-feedback");
+    notify("已保存", false, "background-feedback");
   }, "background-feedback");
 }
 
@@ -998,7 +960,7 @@ async function requestAuthorization(platform, user) {
   const payload = { action: "prepare", platform_instance_id: platform, user_id: user, config_revision: settingsRevision };
   const response = await bridge.apiPost("accounts/authorize", payload);
   authorizationState = { ...payload, action: "confirm", confirmation: response.confirmation };
-  $("authorization-description").textContent = `为用户 ${user} 开通机器人 ${response.bot_id} 的记忆访问。从确认之后的新消息开始记录。`;
+  $("authorization-description").textContent = `用户 ${user} / 机器人 ${response.bot_id}`;
   $("authorization-dialog").showModal();
 }
 
@@ -1045,7 +1007,7 @@ function watchModels(requestId = "", managed = false) {
         failures = 0;
       } catch {
         if (managed && ++failures >= 3) throw new Error("无法获取接入进度，请重新打开页面核对结果后重试。");
-        $("model-progress").textContent = "暂时无法获取进度，正在重新获取进度，请勿重复提交。";
+        $("model-progress").textContent = "正在重新获取进度…";
         await delay(5000);
         continue;
       }
@@ -1262,8 +1224,8 @@ async function prepareInstallation(button, redeploy = false) {
     $("check-deployment").hidden = !redeploy;
     $("deployment-heading").textContent = redeploy ? "重新部署" : "安装配套服务";
     $("deployment-description").textContent = redeploy
-      ? "在原服务器、原安装目录执行。已有记忆、模型和凭据继续使用；卸载已删除的数据不会因重装而恢复。"
-      : "在运行 AstrBot 的 Linux 主机执行命令，完成后选择模型并点击「保存并连接」。";
+      ? "在原服务器、原安装目录执行。"
+      : "在 AstrBot 所在主机执行，再选择模型连接。";
     $("deployment-feedback").hidden = true;
     if (!$("deployment-dialog").open) $("deployment-dialog").showModal();
   }, "deployment-feedback");
@@ -1357,7 +1319,7 @@ async function prepareForget(button, id) {
     if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
     forgetState = { id, confirmation: response.confirmation };
     $("forget-user").textContent = scopeName(data.scopes.find((item) => item.scope_id === id));
-    $("forget-message").textContent = response.message || "";
+    $("forget-message").textContent = "清空后暂停记忆，完成后可切回读写模式。";
     $("forget-feedback").textContent = "";
     $("forget-agree").checked = false;
     $("forget-agree").disabled = false;
@@ -1416,7 +1378,7 @@ $("prepare").addEventListener("click", () => void prepareInstallation($("prepare
 $("reinstall").addEventListener("click", () => {
   clearCommands();
   $("deployment-heading").textContent = "重新部署";
-  $("deployment-description").textContent = "重新应用配套部署文件，已有数据、模型和凭据继续使用。卸载已删除的数据不会因重装而恢复。";
+  $("deployment-description").textContent = "在原服务器、原安装目录执行。";
   $("generate-deployment").hidden = false;
   $("check-deployment").hidden = true;
   $("deployment-feedback").hidden = true;
@@ -1500,12 +1462,7 @@ $("reflect-reload").addEventListener("click", () => renderReflect({ discard: tru
 $("copy-bank").addEventListener("click", () => void perform($("copy-bank"), "copy",
   () => copyValue("scope-bank", "Bank ID 已复制。")));
 $("copy-control-plane").addEventListener("click", () => void perform($("copy-control-plane"), "copy",
-  () => copyValue("saved-control-plane-url", "管理地址已复制，请在浏览器打开。")));
-$("saved-control-plane-url").addEventListener("focus", () => $("saved-control-plane-url").select());
-$("configure-control-plane").addEventListener("click", () => {
-  activateTab("setup");
-  $("control-plane-url").focus();
-});
+  () => copyValue("control-plane-url", "已复制")));
 $("scope-bank").addEventListener("focus", () => $("scope-bank").select());
 $("retry").addEventListener("click", () => void perform($("retry"), "memory", async () => {
   const response = await bridge.apiPost(endpoint("action"), { action: "retry" });
