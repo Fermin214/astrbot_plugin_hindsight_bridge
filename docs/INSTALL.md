@@ -1,6 +1,6 @@
 # 安装与连接
 
-需要 Linux、AstrBot **4.29.1 及以上**的内置执行器 `local` 和 Hindsight **1.1.0 或 1.2.0**。QQ 私聊可使用 OneBot v11，或官方机器人的 WebSocket、Webhook。默认在同一台服务器部署 AstrBot 与 Hindsight，配套安装需要 Docker Engine 和 Compose v2。平台与模型支持见 [兼容范围](SUPPORT.md)。
+需要 Linux、AstrBot **4.29.1 及以上**的内置执行器 `local` 和 Hindsight **1.1.0 或 1.2.0**。QQ 私聊可使用 OneBot v11，或官方机器人的 WebSocket、Webhook；[Telegram Bot](TELEGRAM.md) 使用原生适配器。默认在同一台服务器部署 AstrBot 与 Hindsight，配套安装需要 Docker Engine 和 Compose v2。平台与模型支持见 [兼容范围](SUPPORT.md)。
 
 ## 一、安装插件
 

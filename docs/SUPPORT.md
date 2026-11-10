@@ -9,7 +9,8 @@
 | AstrBot | **4.29.1 及以上**，使用内置执行器 `local` |
 | Hindsight | 自托管 **1.1.0 / 1.2.0**，启用 API Key 认证，官方管理面板与服务版本一致 |
 | QQ 接入 | OneBot v11（`aiocqhttp`）、官方 WS（`qq_official`）、官方 Webhook（`qq_official_webhook`） |
-| 对话类型 | OneBot 私聊纯文字；官方机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
+| Telegram 接入 | 原生 Bot（`telegram`），配置与实体限制见 [Telegram 接入](TELEGRAM.md) |
+| 对话类型 | OneBot、Telegram Bot 私聊纯文字；官方 QQ 机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
 | 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 自定义 bridge、默认 bridge、host 网络，Hindsight 运行于 Linux Docker |
 | 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
 
