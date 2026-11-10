@@ -265,8 +265,10 @@ async def main():
                 assert plugin.allowed(await message(adapter, 5))
                 assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
                 queued = await message(adapter, 6)
-                telegram_identity["id"] = 100000002
                 await adapter._recreate_application()
+                await plugin.prepare_sources()
+                assert plugin.source_accounts[INSTANCE]["login"] is None
+                telegram_identity["id"] = 100000002
                 await adapter._start_application()
                 plugin.refresh_permissions()
                 assert plugin.source_header(queued) is None
@@ -281,6 +283,27 @@ async def main():
                 await adapter._start_application()
                 assert await plugin.panel.bot_id(INSTANCE) == "100000002"
                 passed.append("native_telegram_client_rebuild_preserves_scope_and_bot_change_requires_confirmation")
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 7)), grant["revision"])
+                original = adapter
+                from qq_source_contracts import Fixture as QQFixture
+
+                replacement = QQFixture(instance=INSTANCE)
+                await replacement.login()
+                try:
+                    adapter = replacement.host
+                    context.platform_manager.platform_insts = [adapter]
+                    astrbot_config["platform"] = [adapter.config]
+                    plugin.refresh_permissions()
+                    assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                    assert not plugin.task.done()
+                finally:
+                    adapter = original
+                    context.platform_manager.platform_insts = [adapter]
+                    astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                passed.append("native_cross_platform_instance_replacement_revokes_binding_and_keeps_worker_alive")
             if PLATFORM == "weixin_oc":
                 old_event = await message(adapter, 4)
                 adapter.token = None

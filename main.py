@@ -271,12 +271,14 @@ class HindsightBridge(Star):
                 adapter = self.context.get_platform_inst(instance)
                 login = evidence.get("login")
                 observed = native_login(adapter)
+                if observed is not None:
+                    logical = platform_details(adapter.meta().name)["logical_type"]
+                    bot = observed.bot_id if logical == "telegram" else observed.appid
+                    if self.outbox.access.observe_bot(instance, logical, bot):
+                        self.outbox.sync_permissions(accounts)
+                        self.confirmations.clear()
+                        self.permission_revision += 1
                 if login is not None and not login.matches(observed):
-                    if evidence.get("host_type") == "telegram" and observed is not None:
-                        if self.outbox.access.observe_bot(instance, "telegram", observed.bot_id):
-                            self.outbox.sync_permissions(accounts)
-                            self.confirmations.clear()
-                            self.permission_revision += 1
                     evidence["invalid_login"] = evidence.get("host_type") != "telegram"
                     evidence["bot_id"] = ""
                 if (
