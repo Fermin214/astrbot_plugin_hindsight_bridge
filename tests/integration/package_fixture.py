@@ -8,15 +8,16 @@ import shutil
 
 
 NAME = "astrbot_plugin_hindsight_bridge"
+DELIVERY = Path(os.environ.get("DELIVERY_ROOT", "/delivery"))
 
 
 def candidate_manifest():
-    return json.loads(Path("/delivery/package-inventory.json").read_text())
+    return json.loads((DELIVERY / "package-inventory.json").read_text())
 
 
 async def install_candidate(manager, archive_name):
     manifest = candidate_manifest()
-    source = Path("/delivery") / archive_name
+    source = DELIVERY / archive_name
     digest = manifest["archives"][archive_name]
     assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     upload = Path(os.environ["ASTRBOT_ROOT"]) / archive_name
