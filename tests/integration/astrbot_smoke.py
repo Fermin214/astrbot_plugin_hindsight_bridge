@@ -234,6 +234,16 @@ async def main():
                 assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
                 adapter.account_id = "another-fixture-bot@im.bot"
                 adapter.config["weixin_oc_account_id"] = adapter.account_id
+                plugin.refresh_permissions()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                adapter.account_id = "fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 5)), grant["revision"])
+                adapter.account_id = "another-fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
                 await plugin.prepare_sources()
                 assert plugin.source_header(old_event) is None
                 assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
@@ -243,7 +253,7 @@ async def main():
                 await plugin.prepare_sources()
                 assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
                 grant = plugin.outbox.access.authorization(INSTANCE, USER)
-                plugin.outbox.activate(plugin.source_header(await message(adapter, 5)), grant["revision"])
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 6)), grant["revision"])
                 passed.append("native_relogin_recovers_same_scope_and_account_change_requires_confirmation")
             await manager.uninstall_plugin(NAME)
             assert context.get_registered_star(NAME) is None
