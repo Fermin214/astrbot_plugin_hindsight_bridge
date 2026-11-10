@@ -65,4 +65,3 @@ sh /tmp/bridge-weixin/start-native.sh \
 | 长文与文件 | 核对原生发送、分段和 JSON 导出；平台拒绝发送时显示实际错误 |
 
 证据记录代码提交与文件摘要、AstrBot/Hindsight/SDK 版本、模型配置标识、平台实例指纹、操作和实际结果。平台收发、原生宿主合成载荷、真实 Hindsight 与模型调用分别记录。
-
