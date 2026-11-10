@@ -1,0 +1,10 @@
+name: astrbot_plugin_bridge_platform_probe
+display_name: Bridge 平台字段采样
+desc: 独立测试宿主的单次字段采样
+version: 1.0.0
+author: Fermin214
+repo: https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
+astrbot_version: ">=4.29.1"
+support_platforms:
+  - weixin_oc
+  - telegram

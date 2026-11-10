@@ -1,0 +1,17 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用单次采样",
+    "default": false
+  },
+  "platform_instance_id": {
+    "type": "string",
+    "description": "测试平台实例 ID",
+    "default": ""
+  },
+  "user_id": {
+    "type": "string",
+    "description": "测试用户 UID",
+    "default": ""
+  }
+}
