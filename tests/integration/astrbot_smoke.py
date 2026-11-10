@@ -40,8 +40,8 @@ from astrbot.core.utils.metrics import Metric
 NAME = "astrbot_plugin_hindsight_bridge"
 DELIVERY = Path(os.environ.get("DELIVERY_ROOT", "/delivery"))
 PLATFORM = os.environ.get("ASTRBOT_PLATFORM_FIXTURE", "aiocqhttp")
-assert PLATFORM in {"aiocqhttp", "weixin_oc"}
-INSTANCE = "delivery-weixin" if PLATFORM == "weixin_oc" else "delivery-qq"
+assert PLATFORM in {"aiocqhttp", "weixin_oc", "telegram"}
+INSTANCE = {"aiocqhttp": "delivery-qq", "weixin_oc": "delivery-weixin", "telegram": "delivery-telegram"}[PLATFORM]
 USER = "fixture-user@im.wechat" if PLATFORM == "weixin_oc" else "123"
 passed = []
 banks = set()
@@ -89,6 +89,19 @@ async def wait_for(predicate):
 
 
 async def message(adapter, message_id=1):
+    if PLATFORM == "telegram":
+        from telegram import Update
+
+        raw = Update.de_json({
+            "update_id": message_id,
+            "message": {
+                "message_id": message_id, "date": int(time.time()) + 1,
+                "chat": {"id": int(USER), "type": "private"},
+                "from": {"id": int(USER), "is_bot": False, "first_name": "Fixture user"},
+                "text": "hello",
+            },
+        }, adapter.client)
+        return adapter.create_event(await adapter.convert_message(raw, SimpleNamespace(bot=adapter.client)))
     if PLATFORM == "weixin_oc":
         await adapter._handle_inbound_message({
             "message_id": str(message_id), "from_user_id": USER,
@@ -112,7 +125,25 @@ async def main():
     conversations = ConversationManager(db_helper)
     providers = SimpleNamespace(provider_insts=[], embedding_provider_insts=[], rerank_provider_insts=[],
                                 tts_provider_insts=[], stt_provider_insts=[], inst_map={}, llm_tools=FunctionToolManager())
-    if PLATFORM == "weixin_oc":
+    telegram_http = None
+    telegram_identity = {"id": 100000001, "is_bot": True, "first_name": "Fixture", "username": "FixtureBot"}
+    if PLATFORM == "telegram":
+        from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
+        from telegram.request import HTTPXRequest
+
+        async def get_me(request, url, method, **kwargs):
+            assert url.endswith("/getMe"), "unexpected Telegram I/O endpoint"
+            return 200, json.dumps({"ok": True, "result": telegram_identity}).encode()
+
+        telegram_http = patch.object(HTTPXRequest, "do_request", get_me)
+        telegram_http.start()
+        adapter = TelegramPlatformAdapter({
+            "id": INSTANCE, "type": PLATFORM, "enable": True,
+            "telegram_token": "123456:synthetic-offline-token",
+            "telegram_command_register": False, "telegram_command_auto_refresh": False,
+        }, {}, asyncio.Queue())
+        await adapter._start_application()
+    elif PLATFORM == "weixin_oc":
         from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 
         adapter = WeixinOCAdapter({
@@ -223,6 +254,33 @@ async def main():
 
             assert reference(plugin.outbox, plugin.outbox.list_scopes()[0])["enabled"]
             passed.append("official_archive_upgrade_preserves_config_and_bank")
+            if PLATFORM == "telegram":
+                old_event = await message(adapter, 4)
+                await adapter._recreate_application()
+                plugin.refresh_permissions()
+                assert not plugin.allowed(old_event)
+                await adapter._start_application()
+                await plugin.prepare_sources()
+                assert plugin.source_header(old_event) is None
+                assert plugin.allowed(await message(adapter, 5))
+                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
+                queued = await message(adapter, 6)
+                telegram_identity["id"] = 100000002
+                await adapter._recreate_application()
+                await adapter._start_application()
+                plugin.refresh_permissions()
+                assert plugin.source_header(queued) is None
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                telegram_identity["id"] = 100000001
+                await adapter._recreate_application()
+                await adapter._start_application()
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                telegram_identity["id"] = 100000002
+                await adapter._recreate_application()
+                await adapter._start_application()
+                assert await plugin.panel.bot_id(INSTANCE) == "100000002"
+                passed.append("native_telegram_client_rebuild_preserves_scope_and_bot_change_requires_confirmation")
             if PLATFORM == "weixin_oc":
                 old_event = await message(adapter, 4)
                 adapter.token = None
@@ -256,6 +314,9 @@ async def main():
         await server.cleanup()
         if PLATFORM == "weixin_oc":
             await adapter.client.close()
+        if PLATFORM == "telegram":
+            await adapter._shutdown_application(delete_commands=False)
+            telegram_http.stop()
         await db_helper.engine.dispose()
     inventory = json.loads((DELIVERY / "package-inventory.json").read_text())
     report = {"astrbot": VERSION, "memory_backend": "local HTTP fixture, not real Hindsight",
