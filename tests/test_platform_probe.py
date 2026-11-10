@@ -29,6 +29,7 @@ class PlatformProbeTests(unittest.TestCase):
         samples.arm(pair, "text", 100, {"available": True}, received_at=99.5)
         self.assertIsNone(samples.take(("instance", "another-user"), 101, 100))
         self.assertIsNone(samples.take(pair, 101, 99))
+        self.assertEqual(samples.take(pair, 101, 100), ("text", {"available": True}))
         samples.arm(pair, "voice", 100, {}, received_at=99.5)
         self.assertIsNone(samples.take(pair, 221, 220))
         samples.arm(pair, "text", 100, {}, received_at=99.5)
@@ -62,6 +63,14 @@ class PlatformProbeTests(unittest.TestCase):
             probe.fingerprint("private-user", b"first"),
             probe.fingerprint("private-user", b"second"),
         )
+        raw["update_time_ms"] = raw["create_time_ms"] + 1
+        raw["delete_time_ms"] = raw["create_time_ms"] + 2
+        raw["item_list"][0]["is_completed"] = False
+        result = probe.project(event, None, b"test-key")
+        self.assertTrue(result["has_later_update"])
+        self.assertTrue(result["has_deletion"])
+        self.assertTrue(result["items"][0]["explicitly_incomplete"])
+        self.assertEqual(result["unknown_field_count"], 1)
 
     def test_preparation_cannot_overwrite_existing_root_and_binds_loopback(self):
         with tempfile.TemporaryDirectory() as directory:

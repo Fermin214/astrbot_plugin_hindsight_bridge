@@ -14,7 +14,16 @@ LABELS = frozenset({
 WX_FIELDS = (
     "from_user_id", "to_user_id", "message_id", "msg_id", "create_time_ms",
     "create_time", "message_type", "message_state", "item_list", "group_id",
+    "update_time_ms", "delete_time_ms",
 )
+WX_MESSAGE_FIELDS = frozenset({
+    "seq", "message_id", "from_user_id", "to_user_id", "client_id", "create_time_ms",
+    "update_time_ms", "delete_time_ms", "session_id", "group_id", "message_type",
+    "message_state", "item_list", "context_token", "run_id",
+})
+WX_TEXT_FIELDS = frozenset({
+    "type", "create_time_ms", "update_time_ms", "is_completed", "msg_id", "text_item",
+})
 TG_FIELDS = (
     "message_id", "date", "from", "chat", "text", "entities", "reply_to_message",
     "forward_origin", "caption", "photo", "voice", "audio", "video", "document",
@@ -116,6 +125,9 @@ def project(event, adapter, key):
             return {**report, "raw_mapping": False}
         items = raw.get("item_list")
         report["fields"] = {name: field(raw.get(name)) for name in WX_FIELDS}
+        report["unknown_field_count"] = len(set(raw) - WX_MESSAGE_FIELDS)
+        report["has_later_update"] = raw.get("update_time_ms") not in (None, 0, raw.get("create_time_ms"))
+        report["has_deletion"] = raw.get("delete_time_ms") not in (None, 0)
         report["identifiers"] = {
             name: identity(raw.get(name), key)
             for name in ("from_user_id", "to_user_id", "message_id", "msg_id")
@@ -147,6 +159,11 @@ def project(event, adapter, key):
                     "type": kind if type(kind) is int and 0 <= kind <= 100 else None,
                     "has_reference": bool(item.get("ref_msg")),
                     "has_voice": bool(item.get("voice_item")),
+                    "completion": field(item.get("is_completed")),
+                    "explicitly_incomplete": item.get("is_completed") is False,
+                    "has_later_update": item.get("update_time_ms") not in (None, 0, item.get("create_time_ms")),
+                    "unknown_field_count": len(set(item) - WX_TEXT_FIELDS),
+                    "unknown_text_field_count": len(set(text_item) - {"text"}) if isinstance(text_item, Mapping) else None,
                     "text": {**field(text), "length": len(text) if isinstance(text, str) else None},
                 })
                 if kind == 1 and isinstance(text, str) and text.strip():
@@ -204,10 +221,14 @@ class Samples:
         self.armed[pair] = (label, now + 120, login, received_at)
 
     def take(self, pair, now, received_at):
-        armed = self.armed.pop(pair, None)
+        armed = self.armed.get(pair)
+        if armed is not None and now > armed[1]:
+            self.armed.pop(pair, None)
+            return None
         if (
-            armed is None or now > armed[1] or type(received_at) not in (int, float)
+            armed is None or type(received_at) not in (int, float)
             or not math.isfinite(received_at) or not armed[3] < received_at <= now + 1
         ):
             return None
+        self.armed.pop(pair, None)
         return armed[0], armed[2]
