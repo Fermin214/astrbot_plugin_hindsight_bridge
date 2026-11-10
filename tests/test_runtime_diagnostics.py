@@ -34,8 +34,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, PanelError
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
-from plugins.astrbot_plugin_hindsight_bridge.core.qq_source import native_login
-from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
+from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity, source_identity
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 

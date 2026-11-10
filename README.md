@@ -8,7 +8,7 @@
 
 ## 安装
 
-支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`**和 **Hindsight 1.1.0 / 1.2.0**。QQ 私聊可使用 OneBot v11（`aiocqhttp`），或官方机器人 C2C 的 WebSocket（`qq_official`）与 Webhook（`qq_official_webhook`）入口。默认在同一台服务器部署 AstrBot 与 Hindsight，可连接已有服务，也可使用配套安装器。版本和消息限制见 [兼容范围](docs/SUPPORT.md)。
+支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`**和 **Hindsight 1.1.0 / 1.2.0**。QQ 私聊可使用 OneBot v11（`aiocqhttp`），或官方机器人 C2C 的 WebSocket（`qq_official`）与 Webhook（`qq_official_webhook`）入口；微信使用原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）私聊。默认在同一台服务器部署 AstrBot 与 Hindsight，可连接已有服务，也可使用配套安装器。版本和消息限制见 [兼容范围](docs/SUPPORT.md)。
 
 1. 在 AstrBot 打开 **插件管理 → 安装 → 从链接安装**，粘贴：
 
