@@ -55,14 +55,14 @@ def main():
     )
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", metadata["version"])
     assert metadata["support_platforms"] == [
-        "aiocqhttp", "qq_official", "qq_official_webhook",
+        "aiocqhttp", "qq_official", "qq_official_webhook", "weixin_oc",
     ]
     assert metadata["astrbot_version"] == ">=4.29.1"
     for name in (
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
-        "core/source.py", "core/access.py", "core/qq_source.py",
+        "core/source.py", "core/access.py", "core/qq_source.py", "core/weixin_source.py",
         "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
@@ -73,6 +73,7 @@ def main():
         "deploy/managed_service.py", "deploy/model_probe.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
         "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
+        "docs/WEIXIN.md",
         "examples/config.qq-official.example.json",
     ):
         assert (root / name).is_file(), name

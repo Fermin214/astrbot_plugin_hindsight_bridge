@@ -39,9 +39,8 @@ from .core.materials import TokenizerError, load_encoding, memory_block, recall_
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
-from .core.qq_source import native_login
 from .core.reflection import Reflection
-from .core.source import local_runner, native_header, platform_details, prepare_bot_identity, source_identity
+from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity, source_identity
 from .core.worker import Worker
 
 
@@ -271,8 +270,17 @@ class HindsightBridge(Star):
             for instance, evidence in self.source_accounts.items():
                 adapter = self.context.get_platform_inst(instance)
                 login = evidence.get("login")
-                if login is not None and not login.matches(native_login(adapter)):
-                    evidence["invalid_login"] = True
+                observed = native_login(adapter)
+                if observed is not None:
+                    logical = platform_details(adapter.meta().name)["logical_type"]
+                    bot = observed.account_id if logical == "weixin_oc" else observed.appid
+                    if self.outbox.access.observe_bot(instance, logical, bot):
+                        self.outbox.sync_permissions(accounts)
+                        self.confirmations.clear()
+                        self.permission_revision += 1
+                if login is not None and not login.matches(observed):
+                    evidence["invalid_login"] = evidence.get("host_type") != "weixin_oc"
+                    evidence["bot_id"] = ""
                 if (
                     adapter is None or adapter is not evidence["adapter"]
                     or adapter.get_client() is not evidence["client"]
@@ -314,8 +322,10 @@ class HindsightBridge(Star):
                     bot = ""
                 previous = self.source_accounts.get(instance, {})
                 login = native_login(adapter)
+                record = next((row for row in self.context.get_config().get("platform", [])
+                               if str(row.get("id")) == instance), {})
                 same_adapter = previous.get("adapter") is adapter
-                invalid = same_adapter and (
+                invalid = record.get("type") != "weixin_oc" and same_adapter and (
                     previous.get("invalid_login", False)
                     or previous.get("login") is not None
                     and not previous["login"].matches(login)
@@ -325,10 +335,8 @@ class HindsightBridge(Star):
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
                     "login": previous.get("login") if invalid else login,
-                    "invalid_login": invalid,
+                    "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
-                record = next((row for row in self.context.get_config().get("platform", [])
-                               if str(row.get("id")) == instance), {})
                 logical_type = platform_details(record.get("type", ""))["logical_type"]
                 if bot and self.outbox.access.observe_bot(instance, logical_type, bot):
                     self.outbox.sync_permissions(accounts)

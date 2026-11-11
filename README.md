@@ -2,13 +2,13 @@
 
 连接自托管 Hindsight，让 AstrBot 在新会话中也能记得你。
 
-正常聊天，插件就会把 QQ 私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
+正常聊天，插件就会把 QQ、微信 ClawBot 私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
 
 在 AstrBot 插件页配置连接、添加使用者和调整记忆模式；在 Hindsight 官方管理页面（Control Plane）浏览、搜索和管理记忆。可以连接已有 Hindsight，也可以通过安装向导部署配套服务，复用 AstrBot 已配置的模型。
 
 ## 安装
 
-支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`**和 **Hindsight 1.1.0 / 1.2.0**。QQ 私聊可使用 OneBot v11（`aiocqhttp`），或官方机器人 C2C 的 WebSocket（`qq_official`）与 Webhook（`qq_official_webhook`）入口。默认在同一台服务器部署 AstrBot 与 Hindsight，可连接已有服务，也可使用配套安装器。版本和消息限制见 [兼容范围](docs/SUPPORT.md)。
+支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`**和 **Hindsight 1.1.0 / 1.2.0**。QQ 私聊可使用 OneBot v11（`aiocqhttp`），或官方机器人 C2C 的 WebSocket（`qq_official`）与 Webhook（`qq_official_webhook`）入口；微信使用原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）私聊。默认在同一台服务器部署 AstrBot 与 Hindsight，可连接已有服务，也可使用配套安装器。版本和消息限制见 [兼容范围](docs/SUPPORT.md)。
 
 1. 在 AstrBot 打开 **插件管理 → 安装 → 从链接安装**，粘贴：
 
@@ -19,9 +19,9 @@
 2. 安装完成后打开 **Hindsight Bridge 插件详情 → 记忆管理 → 插件设置**。
 3. 选择安装方式：生成配套服务安装命令，在运行 AstrBot 的 Linux 主机执行；已有 Hindsight 1.1.0 或 1.2.0 则填写服务 API 地址、API Key 和官方管理地址。
 4. 配套组件安装完成后，在设置中选择记忆处理模型与向量模型，可选重排模型，点击 **保存并连接**。页面完成验证、启动和插件接入后显示已连接。
-5. 进入 **用户与记忆**，点击 **添加用户**，选择 QQ 机器人实例：OneBot 填 QQ 号，官方机器人填私聊 `/sid` 返回的用户 UID（OpenID），再核对并确认机器人身份。
+5. 进入 **用户与记忆**，点击 **添加用户**，选择机器人实例：OneBot 填 QQ 号，QQ 官方机器人或微信 ClawBot 填私聊 `/sid` 返回的用户 UID，再核对并确认机器人身份。
 
-配套安装的主机需已安装 Docker Engine 和 Compose v2，支持 AstrBot 原生运行，以及 Docker 自定义 bridge、默认 bridge 和 host 网络。保存设置并确认授权后，正常聊天即可。
+配套安装的主机需已安装 Docker Engine 和 Compose v2，支持 AstrBot 原生运行，以及 Docker 自定义 bridge、默认 bridge 和 host 网络。保存设置并确认机器人身份后，正常聊天即可。
 
 配套部署的记忆处理模型与向量模型从 AstrBot 供应商列表选择，无需重复填写模型地址和 Key。嵌入模型用于查找相关记忆，与平常聊天的模型用途不同；缺少时，向导会提示去 AstrBot「模型供应商 → 嵌入」添加。重排模型可不选。连接已有服务时，模型由该服务的原部署配置管理。
 
@@ -67,7 +67,7 @@
 
 配套服务有适用更新时，页面顶部显示可忽略的升级横幅；升级尚未完成时保留进度入口。升级或故障留下的读写暂停通过 **查看暂停状态** 处理，检查通过后 **解除读写暂停**，原记忆模式保持。完整步骤见 [使用指南](docs/USAGE.md)。
 
-使用者也可以在自己的 QQ 私聊中发送：
+使用者也可以在自己的 QQ 或微信 ClawBot 私聊中发送：
 
 | 想做什么 | 命令 |
 | --- | --- |

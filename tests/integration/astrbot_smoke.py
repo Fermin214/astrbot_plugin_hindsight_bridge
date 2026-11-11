@@ -38,6 +38,11 @@ from astrbot.core.star.star_manager import PluginManager
 from astrbot.core.utils.metrics import Metric
 
 NAME = "astrbot_plugin_hindsight_bridge"
+DELIVERY = Path(os.environ.get("DELIVERY_ROOT", "/delivery"))
+PLATFORM = os.environ.get("ASTRBOT_PLATFORM_FIXTURE", "aiocqhttp")
+assert PLATFORM in {"aiocqhttp", "weixin_oc"}
+INSTANCE = "delivery-weixin" if PLATFORM == "weixin_oc" else "delivery-qq"
+USER = "fixture-user@im.wechat" if PLATFORM == "weixin_oc" else "123"
 passed = []
 banks = set()
 operations = {}
@@ -48,6 +53,8 @@ async def service(request):
     if request.headers.get("Authorization") != "Bearer delivery-key":
         return web.json_response({}, status=401)
     path = request.path
+    if path == "/v1/version":
+        return web.json_response({"api_version": "1.2.0"})
     if path == "/v1/default/banks":
         return web.json_response({"banks": []})
     bank = path.split("/")[4]
@@ -82,6 +89,14 @@ async def wait_for(predicate):
 
 
 async def message(adapter, message_id=1):
+    if PLATFORM == "weixin_oc":
+        await adapter._handle_inbound_message({
+            "message_id": str(message_id), "from_user_id": USER,
+            "to_user_id": "fixture-bot@im.bot", "message_type": 1, "message_state": 2,
+            "create_time_ms": int((time.time() + 1) * 1000),
+            "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+        })
+        return adapter._event_queue.get_nowait()
     raw = Event({
         "post_type": "message", "message_type": "private", "sub_type": "friend", "self_id": 456,
         "user_id": 123, "message_id": message_id, "time": int(time.time()) + 1,
@@ -97,11 +112,20 @@ async def main():
     conversations = ConversationManager(db_helper)
     providers = SimpleNamespace(provider_insts=[], embedding_provider_insts=[], rerank_provider_insts=[],
                                 tts_provider_insts=[], stt_provider_insts=[], inst_map={}, llm_tools=FunctionToolManager())
-    adapter = AiocqhttpAdapter({
-        "id": "delivery-qq", "type": "aiocqhttp", "ws_reverse_host": "127.0.0.1", "ws_reverse_port": 0,
-    }, {}, asyncio.Queue())
-    adapter.bot.get_login_info = AsyncMock(return_value={"user_id": 456})
-    astrbot_config["platform"] = [{"id": "delivery-qq", "type": "aiocqhttp"}]
+    if PLATFORM == "weixin_oc":
+        from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
+
+        adapter = WeixinOCAdapter({
+            "id": INSTANCE, "type": PLATFORM, "enable": True,
+            "weixin_oc_account_id": "fixture-bot@im.bot",
+            "weixin_oc_token": "synthetic-offline-token",
+        }, {}, asyncio.Queue())
+    else:
+        adapter = AiocqhttpAdapter({
+            "id": INSTANCE, "type": PLATFORM, "ws_reverse_host": "127.0.0.1", "ws_reverse_port": 0,
+        }, {}, asyncio.Queue())
+        adapter.bot.get_login_info = AsyncMock(return_value={"user_id": 456})
+    astrbot_config["platform"] = [adapter.config]
     context = Context(asyncio.Queue(), astrbot_config, db_helper, providers,
                       SimpleNamespace(platform_insts=[adapter], get_insts=lambda: [adapter]), conversations,
                       None, None, SimpleNamespace(get_conf=lambda _: astrbot_config), None, None)
@@ -130,7 +154,7 @@ async def main():
             } <= routes, routes
             passed.append("official_archive_install_and_empty_config")
             metadata.config.update(api_url=f"http://127.0.0.1:{port}", api_key="delivery-key", service_id="delivery-service",
-                                   allowed_accounts=[{"platform_instance_id": "delivery-qq", "user_id": "123"}])
+                                   allowed_accounts=[{"platform_instance_id": INSTANCE, "user_id": USER}])
             metadata.config.save_config()
             result = await manager.reload(NAME)
             assert result[0], result
@@ -139,12 +163,12 @@ async def main():
             assert plugin.outbox and plugin.client, plugin.status
             await wait_for(lambda: not plugin.outbox.recovering and plugin.client.connection["connected"] is True)
             passed.append("official_reload_and_background_auth")
-            from data.plugins.astrbot_plugin_hindsight_bridge.core.source import native_header
             from data.plugins.astrbot_plugin_hindsight_bridge.core.background import save_reference
 
             authorization_event = await message(adapter)
-            header = native_header(authorization_event, Plain)
-            grant = plugin.outbox.access.authorization("delivery-qq", "123")
+            header = plugin.source_header(authorization_event)
+            assert header is not None
+            grant = plugin.outbox.access.authorization(INSTANCE, USER)
             plugin.outbox.activate(header, grant["revision"])
             event = await message(adapter, 2)
             cid = await conversations.new_conversation(event.unified_msg_origin)
@@ -162,7 +186,7 @@ async def main():
             await conversations.update_conversation(event.unified_msg_origin, cid, history=stored)
             persisted = await conversations.get_conversation(event.unified_msg_origin, cid)
             assert "Hindsight" not in persisted.history
-            passed.append("real_onebot_event_and_temporary_provider_content")
+            passed.append("native_" + PLATFORM + "_event_and_temporary_provider_content")
             await wait_for(lambda: plugin.outbox.db.execute("SELECT COUNT(*) FROM outbox WHERE state='done'").fetchone()[0] == 1)
             assert payloads and "Hindsight" not in json.dumps(payloads)
             passed.append("durable_worker_over_real_http")
@@ -199,6 +223,61 @@ async def main():
 
             assert reference(plugin.outbox, plugin.outbox.list_scopes()[0])["enabled"]
             passed.append("official_archive_upgrade_preserves_config_and_bank")
+            if PLATFORM == "weixin_oc":
+                old_event = await message(adapter, 4)
+                adapter.token = None
+                plugin.refresh_permissions()
+                assert not plugin.allowed(old_event)
+                adapter.token = adapter.client.token = "rotated-offline-token"
+                await plugin.prepare_sources()
+                assert plugin.allowed(old_event)
+                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
+                adapter.token = None
+                await plugin.prepare_sources()
+                assert plugin.source_accounts[INSTANCE]["login"] is None
+                adapter.token = "restored-offline-token"
+                adapter.account_id = "another-fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                plugin.refresh_permissions()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                adapter.account_id = "fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 5)), grant["revision"])
+                adapter.account_id = "another-fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert plugin.source_header(old_event) is None
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                assert await plugin.panel.bot_id(INSTANCE) == adapter.account_id
+                adapter.account_id = "fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 6)), grant["revision"])
+                passed.append("native_relogin_recovers_same_scope_and_account_change_requires_confirmation")
+                original = adapter
+                from qq_source_contracts import Fixture as QQFixture
+
+                replacement = QQFixture(instance=INSTANCE)
+                await replacement.login()
+                try:
+                    adapter = replacement.host
+                    context.platform_manager.platform_insts = [adapter]
+                    astrbot_config["platform"] = [adapter.config]
+                    plugin.refresh_permissions()
+                    assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                    assert not plugin.task.done()
+                finally:
+                    adapter = original
+                    context.platform_manager.platform_insts = [adapter]
+                    astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                passed.append("native_cross_platform_instance_replacement_revokes_binding_and_keeps_worker_alive")
             await manager.uninstall_plugin(NAME)
             assert context.get_registered_star(NAME) is None
             assert plugin.client is None and plugin.outbox is None and plugin.connection_task is None
@@ -208,13 +287,15 @@ async def main():
         if current and current.star_cls:
             await current.star_cls.terminate()
         await server.cleanup()
+        if PLATFORM == "weixin_oc":
+            await adapter.client.close()
         await db_helper.engine.dispose()
-    inventory = json.loads(Path("/delivery/package-inventory.json").read_text())
+    inventory = json.loads((DELIVERY / "package-inventory.json").read_text())
     report = {"astrbot": VERSION, "memory_backend": "local HTTP fixture, not real Hindsight",
               "candidate_sha256": candidate_sha256,
-              "platform_peer": "synthetic OneBot payloads and login fixture; no real QQ account",
+              "platform_peer": "synthetic " + PLATFORM + " payloads and login fixture; no real platform account",
               "candidate_tree_sha256": inventory["tree_sha256"], "passed": passed}
-    Path("/delivery/astrbot-smoke-report.json").write_text(json.dumps(report, indent=2))
+    (DELIVERY / "astrbot-smoke-report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
 
 
