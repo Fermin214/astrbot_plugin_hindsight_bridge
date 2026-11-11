@@ -137,9 +137,18 @@ async def main(output):
             ("unknown_state", {"message_state": 90}),
             ("group", {"group_id": "synthetic-group"}),
             ("delete", {"delete_time_ms": int(time.time() * 1000)}),
-            ("edit", {"update_time_ms": int((time.time() + 2) * 1000)}),
+            ("new_later_update", {"message_state": 0, "update_time_ms": int((time.time() + 2) * 1000)}),
+            ("future_update", {"update_time_ms": int((time.time() + 301) * 1000)}),
+            ("boolean_update", {"update_time_ms": False}),
+            ("backwards_update", {"update_time_ms": int((time.time() - 10) * 1000)}),
             ("different_recipient", {"to_user_id": "another-bot"}),
             ("unknown_extension", {"unknown_extension": {"text": "synthetic"}}),
+            ("empty_container_extension", {"unknown_extension": {}}),
+            ("populated_scalar_extension", {"unknown_extension": True}),
+            ("unknown_empty_scalar", {"unknown_extension": 0}),
+            ("root_relation", {"root_id": 1}),
+            ("parent_relation", {"parent_id": 1}),
+            ("boolean_relation", {"root_id": False}),
             ("unusable_user_id", {"from_user_id": "user:FriendMessage:another"}),
             ("media", {"item_list": [
                 {"type": 1, "text_item": {"text": "synthetic"}},
@@ -154,9 +163,36 @@ async def main(output):
             ("incomplete_item", {"item_list": [
                 {"type": 1, "text_item": {"text": "synthetic"}, "is_completed": False},
             ]}),
+            ("buttons", {"item_list": [
+                {"type": 1, "text_item": {"text": "synthetic"}, "button_item_list": [{}]},
+            ]}),
+            ("mentions", {"item_list": [
+                {"type": 1, "text_item": {"text": "synthetic"}, "at_bot_username_list": ["bot"]},
+            ]}),
+            ("malformed_control_list", {"item_list": [
+                {"type": 1, "text_item": {"text": "synthetic"}, "button_item_list": ""},
+            ]}),
         ):
             assert fixture.header(await fixture.event(changes=changes)) is None, label
         passed.append("native_fallback_media_reference_updates_direction_and_unknown_fields_rejected")
+
+        created = int(time.time() * 1000) - 100
+        completed = await fixture.event(changes={
+            "create_time_ms": created, "update_time_ms": created + 50,
+            "root_id": 0, "parent_id": 0,
+            "item_list": [{
+                "type": 1, "text_item": {"text": "synthetic text"},
+                "create_time_ms": created, "update_time_ms": created + 25,
+                "is_completed": True, "ref_msg": None, "image_item": None,
+                "button_item_list": [], "at_bot_username_list": [],
+            }],
+        })
+        assert fixture.header(completed).timestamp == created / 1000
+        record = probe.project(completed, fixture.host, b"synthetic-fingerprint-key")
+        assert record["unknown_field_count"] == 2
+        assert all(row["empty_scalar"] for row in record["unknown_fields"])
+        assert all(row["empty_scalar"] or row["empty_container"] for row in record["items"][0]["unknown_fields"])
+        passed.append("finished_completion_timestamps_zero_relations_and_empty_controls_preserve_original_source")
 
         multiline = await fixture.event(changes={"item_list": [
             {"type": 1, "text_item": {"text": " first "}},
@@ -215,6 +251,21 @@ async def main(output):
                     captured = queue.capture(fresh, "synthetic-conversation")
                     frozen = dict(queue.get(captured.task_id))
                     assert not queue.capture(fresh, "another-conversation").created
+                    updated = fixture.header(await fixture.event(changes={
+                        "message_id": "100", "create_time_ms": int(fresh.timestamp * 1000),
+                        "update_time_ms": int((baseline + 2) * 1000) + 1,
+                    }))
+                    assert updated is not None and not queue.capture(updated, "another-conversation").created
+                    changed = fixture.header(await fixture.event(text="changed text", changes={
+                        "message_id": "100", "create_time_ms": int(fresh.timestamp * 1000),
+                        "update_time_ms": int((baseline + 2) * 1000) + 2,
+                    }))
+                    try:
+                        queue.capture(changed, "another-conversation")
+                    except QueueError as error:
+                        assert str(error) == "message_identity_content_conflict"
+                    else:
+                        raise AssertionError("updated message created another memory task")
                     raw_material = json.loads(frozen["payload"])
                     assert raw_material["items"][0]["metadata"]["time_source"] == "weixin_oc.create_time_ms"
                     owner = queue.scope(fresh)
@@ -243,6 +294,7 @@ async def main(output):
                     assert queue.scope_owner(source.id)["bank"] != old_bank
                 passed.append("native_capture_deduplication_time_provenance_revoke_regrant_and_forget")
                 passed.append("native_state_changing_command_is_consumed_once")
+                passed.append("finished_message_updates_deduplicate_and_changed_text_preserves_frozen_task")
             finally:
                 queue.close()
         report = {

@@ -12,10 +12,27 @@ MESSAGE_FIELDS = frozenset({
     "seq", "message_id", "from_user_id", "to_user_id", "client_id",
     "create_time_ms", "update_time_ms", "delete_time_ms", "session_id", "group_id",
     "message_type", "message_state", "item_list", "context_token", "run_id",
+    "root_id", "parent_id",
 })
 ITEM_FIELDS = frozenset({
     "type", "create_time_ms", "update_time_ms", "is_completed", "msg_id", "text_item",
 })
+NON_TEXT_FIELDS = frozenset({
+    "ref_msg", "image_item", "voice_item", "file_item", "video_item",
+    "tool_call_start_item", "tool_call_result_item",
+})
+EMPTY_LIST_FIELDS = frozenset({"button_item_list", "at_bot_username_list"})
+
+
+def valid_update(value, created, finished):
+    if value is None or type(value) is int and value == 0:
+        return True
+    # FINISH can arrive after creation; message_id still deduplicates later updates.
+    return (
+        type(value) is int and type(created) is int
+        and created <= value <= (time.time() + 300) * 1000
+        and (finished or value == created)
+    )
 
 
 def identifier(value):
@@ -83,16 +100,21 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
     raw = event.message_obj.raw_message
-    if set(raw) - MESSAGE_FIELDS or raw.get("group_id"):
+    if (
+        set(raw) - MESSAGE_FIELDS or raw.get("group_id")
+        or any(value is not None and (type(value) is not int or value != 0)
+               for value in (raw.get("root_id"), raw.get("parent_id")))
+    ):
         return None
     if type(raw.get("message_type")) is not int or raw["message_type"] != 1:
         return None
     if type(raw.get("message_state")) is not int or raw["message_state"] not in {0, 2}:
         return None
+    finished = raw["message_state"] == 2
     occurred = raw.get("create_time_ms")
     if (
         type(occurred) is not int or not 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
-        or raw.get("update_time_ms") not in (None, 0, occurred)
+        or not valid_update(raw.get("update_time_ms"), occurred, finished)
         or raw.get("delete_time_ms") not in (None, 0)
     ):
         return None
@@ -111,10 +133,13 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
     texts, length = [], 0
     for item in items:
         if (
-            not isinstance(item, Mapping) or set(item) - ITEM_FIELDS
+            not isinstance(item, Mapping) or set(item) - (ITEM_FIELDS | NON_TEXT_FIELDS | EMPTY_LIST_FIELDS)
+            or any(item.get(name) is not None for name in NON_TEXT_FIELDS)
+            or any(type(value) is not list or value
+                   for name in EMPTY_LIST_FIELDS if (value := item.get(name)) is not None)
             or type(item.get("type")) is not int or item["type"] != 1
             or item.get("is_completed") is not None and item.get("is_completed") is not True
-            or item.get("update_time_ms") not in (None, 0, item.get("create_time_ms"))
+            or not valid_update(item.get("update_time_ms"), item.get("create_time_ms"), finished)
         ):
             return None
         text_item = item.get("text_item")

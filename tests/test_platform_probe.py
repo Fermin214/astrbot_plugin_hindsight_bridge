@@ -71,6 +71,9 @@ class PlatformProbeTests(unittest.TestCase):
         self.assertTrue(result["has_deletion"])
         self.assertTrue(result["items"][0]["explicitly_incomplete"])
         self.assertEqual(result["unknown_field_count"], 1)
+        self.assertEqual(result["unknown_fields"], [
+            {"present": True, "type": "dict", "empty_scalar": False, "empty_container": False},
+        ])
 
     def test_preparation_cannot_overwrite_existing_root_and_binds_loopback(self):
         with tempfile.TemporaryDirectory() as directory:
