@@ -708,7 +708,7 @@ class MemoryPanel:
 
     async def bot_id(self, platform):
         contract = next((row for row in self.platforms() if row["id"] == platform), None)
-        if contract and contract["logical_type"] in {"qq_official", "weixin_oc"}:
+        if contract and contract["logical_type"] in {"qq_official", "weixin_oc", "telegram"}:
             await self.plugin.prepare_sources()
             identity = self.plugin.source_accounts.get(platform, {}).get("bot_id", "")
         else:

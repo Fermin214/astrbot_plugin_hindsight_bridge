@@ -273,13 +273,18 @@ class HindsightBridge(Star):
                 observed = native_login(adapter)
                 if observed is not None:
                     logical = platform_details(adapter.meta().name)["logical_type"]
-                    bot = observed.account_id if logical == "weixin_oc" else observed.appid
+                    if logical == "weixin_oc":
+                        bot = observed.account_id
+                    elif logical == "telegram":
+                        bot = observed.bot_id
+                    else:
+                        bot = observed.appid
                     if self.outbox.access.observe_bot(instance, logical, bot):
                         self.outbox.sync_permissions(accounts)
                         self.confirmations.clear()
                         self.permission_revision += 1
                 if login is not None and not login.matches(observed):
-                    evidence["invalid_login"] = evidence.get("host_type") != "weixin_oc"
+                    evidence["invalid_login"] = evidence.get("host_type") not in {"weixin_oc", "telegram"}
                     evidence["bot_id"] = ""
                 if (
                     adapter is None or adapter is not evidence["adapter"]
@@ -325,7 +330,7 @@ class HindsightBridge(Star):
                 record = next((row for row in self.context.get_config().get("platform", [])
                                if str(row.get("id")) == instance), {})
                 same_adapter = previous.get("adapter") is adapter
-                invalid = record.get("type") != "weixin_oc" and same_adapter and (
+                invalid = record.get("type") not in {"weixin_oc", "telegram"} and same_adapter and (
                     previous.get("invalid_login", False)
                     or previous.get("login") is not None
                     and not previous["login"].matches(login)
