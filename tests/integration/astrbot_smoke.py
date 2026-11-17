@@ -40,9 +40,9 @@ from astrbot.core.utils.metrics import Metric
 NAME = "astrbot_plugin_hindsight_bridge"
 DELIVERY = Path(os.environ.get("DELIVERY_ROOT", "/delivery"))
 PLATFORM = os.environ.get("ASTRBOT_PLATFORM_FIXTURE", "aiocqhttp")
-assert PLATFORM in {"aiocqhttp", "weixin_oc"}
-INSTANCE = "delivery-weixin" if PLATFORM == "weixin_oc" else "delivery-qq"
-USER = "fixture-user@im.wechat" if PLATFORM == "weixin_oc" else "123"
+assert PLATFORM in {"aiocqhttp", "weixin_oc", "lark"}
+INSTANCE = {"weixin_oc": "delivery-weixin", "lark": "delivery-lark"}.get(PLATFORM, "delivery-qq")
+USER = {"weixin_oc": "fixture-user@im.wechat", "lark": "ou_fixtureuser"}.get(PLATFORM, "123")
 passed = []
 banks = set()
 operations = {}
@@ -89,6 +89,12 @@ async def wait_for(predicate):
 
 
 async def message(adapter, message_id=1):
+    if PLATFORM == "lark":
+        from lark_source_contracts import Fixture
+
+        fixture = Fixture.__new__(Fixture)
+        fixture.host, fixture.queue = adapter, adapter._event_queue
+        return await fixture.event(text="hello", mid=f"om_fixture{message_id}", offset=1)
     if PLATFORM == "weixin_oc":
         await adapter._handle_inbound_message({
             "message_id": str(message_id), "from_user_id": USER,
@@ -112,7 +118,11 @@ async def main():
     conversations = ConversationManager(db_helper)
     providers = SimpleNamespace(provider_insts=[], embedding_provider_insts=[], rerank_provider_insts=[],
                                 tts_provider_insts=[], stt_provider_insts=[], inst_map={}, llm_tools=FunctionToolManager())
-    if PLATFORM == "weixin_oc":
+    if PLATFORM == "lark":
+        from lark_source_contracts import Fixture
+
+        adapter = Fixture(instance=INSTANCE).host
+    elif PLATFORM == "weixin_oc":
         from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 
         adapter = WeixinOCAdapter({
@@ -223,6 +233,35 @@ async def main():
 
             assert reference(plugin.outbox, plugin.outbox.list_scopes()[0])["enabled"]
             passed.append("official_archive_upgrade_preserves_config_and_bank")
+            if PLATFORM == "lark":
+                from lark_source_contracts import Fixture
+
+                old_event = await message(adapter, 4)
+                original = adapter
+                # A fresh native adapter is how AstrBot applies credential changes.
+                adapter = Fixture(instance=INSTANCE).host
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
+                assert plugin.source_header(old_event) is None
+                assert plugin.allowed(await message(adapter, 5))
+                passed.append("native_same_lark_application_reload_preserves_bank_and_rejects_old_api_events")
+                adapter = Fixture(instance=INSTANCE, appid="cli_other", bot="ou_otherbot").host
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                plugin.refresh_permissions()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                await plugin.prepare_sources()
+                assert await plugin.panel.bot_id(INSTANCE) == plugin.source_accounts[INSTANCE]["login"].bot_id
+                assert "/cli_other/ou_otherbot" in await plugin.panel.bot_id(INSTANCE)
+                assert plugin.source_header(old_event) is None
+                adapter = original
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                passed.append("native_lark_application_change_revokes_grant_and_returning_requires_confirmation")
             if PLATFORM == "weixin_oc":
                 old_event = await message(adapter, 4)
                 adapter.token = None

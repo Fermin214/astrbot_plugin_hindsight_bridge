@@ -59,7 +59,8 @@ jobs:
           host = any(
               name == "main.py" or name.startswith(("core/", ".astrbot-plugin/"))
               or name in {"requirements.txt", "_conf_schema.json", "metadata.yaml",
-                          "tests/integration/astrbot_smoke.py", "tests/integration/package_fixture.py"}
+                          "tests/integration/astrbot_smoke.py", "tests/integration/package_fixture.py",
+                          "tests/integration/lark_source_contracts.py"}
               for name in code
           )
           models = bool(set(code) & {
@@ -93,28 +94,52 @@ jobs:
     if: needs.check.outputs.host == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "4.29.1"
+            platform: aiocqhttp
+          - version: "4.29.1"
+            platform: lark
+          - version: "4.29.4"
+            platform: lark
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python tools/build-test-package.py --output "${{ runner.temp }}/hindsight-delivery"
+      - name: Native Lark SDK event contracts
+        if: matrix.platform == 'lark'
+        run: |
+          docker run --rm --network none --memory 1536m \
+            -e ASTRBOT_ROOT=/contracts \
+            -e ASTRBOT_TEST_VERSION=${{ matrix.version }} \
+            -e ASTRBOT_DISABLE_METRICS=1 \
+            -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
+            -v "${{ github.workspace }}:/candidate-source:ro" \
+            soulter/astrbot:v${{ matrix.version }} \
+            python /candidate-source/tests/integration/lark_source_contracts.py \
+              --output /delivery/lark-contracts.json
       - name: Official AstrBot archive installation, requests, history and upgrade
         shell: bash
         run: |
           docker run --rm --name hindsight-bridge-delivery-astrbot \
             --label hindsight-bridge.test=delivery --memory 1536m \
             -e ASTRBOT_ROOT=/verification \
+            -e ASTRBOT_TEST_VERSION=${{ matrix.version }} \
+            -e ASTRBOT_PLATFORM_FIXTURE=${{ matrix.platform }} \
             -e ASTRBOT_DASHBOARD_INITIAL_PASSWORD='Delivery-Test-2026!' \
             -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
             -v "${{ github.workspace }}:/candidate-source:ro" \
-            soulter/astrbot:v4.29.1 \
+            soulter/astrbot:v${{ matrix.version }} \
             python /candidate-source/tests/integration/astrbot_smoke.py \
             2>&1 | tee "${{ runner.temp }}/hindsight-delivery/astrbot-smoke.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: astrbot-delivery-evidence
+          name: astrbot-delivery-evidence-${{ matrix.version }}-${{ matrix.platform }}
           path: ${{ runner.temp }}/hindsight-delivery
 
   hindsight-model-contracts:

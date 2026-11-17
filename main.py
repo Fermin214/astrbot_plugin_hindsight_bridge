@@ -273,7 +273,10 @@ class HindsightBridge(Star):
                 observed = native_login(adapter)
                 if observed is not None:
                     logical = platform_details(adapter.meta().name)["logical_type"]
-                    bot = observed.account_id if logical == "weixin_oc" else observed.appid
+                    bot = (
+                        observed.bot_id if logical == "lark" else
+                        observed.account_id if logical == "weixin_oc" else observed.appid
+                    )
                     if self.outbox.access.observe_bot(instance, logical, bot):
                         self.outbox.sync_permissions(accounts)
                         self.confirmations.clear()

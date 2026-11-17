@@ -23,7 +23,7 @@ def private_file(path, text):
 def prepare(destination, platform, version, port):
     if destination.exists() or destination.is_symlink():
         raise ValueError("output must be a new directory")
-    if platform not in {"weixin_oc", "telegram"} or version not in {"4.29.1", "4.29.4"}:
+    if platform not in {"weixin_oc", "telegram", "lark"} or version not in {"4.29.1", "4.29.4"}:
         raise ValueError("unsupported platform or host version")
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError("dashboard port must be between 1024 and 65535")
@@ -83,7 +83,7 @@ def prepare(destination, platform, version, port):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--platform", choices=("weixin_oc", "telegram"), required=True)
+    parser.add_argument("--platform", choices=("weixin_oc", "telegram", "lark"), required=True)
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--dashboard-port", type=int, default=6188)
     args = parser.parse_args()

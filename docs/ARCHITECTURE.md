@@ -6,7 +6,7 @@
 
 AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。Hindsight 负责记忆提取（Retain）、记忆召回（Recall）、整合（Consolidation）、知识页生成与内容管理。插件负责消息来源校验、用户隔离、材料构造、持久队列、临时注入、连接及暂停与恢复协调。
 
-支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C 和微信 ClawBot（`weixin_oc`）私聊纯文字，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
+支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C 、微信 ClawBot（`weixin_oc`）与飞书（`lark`）私聊纯文字，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
 
 插件只调用 Hindsight 的公开 HTTP API，不把 Hindsight 安装进 AstrBot 的 Python 环境，也不额外调用摘要模型；自动 reflect 关闭。
 
@@ -26,13 +26,15 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 `core/weixin_source.py` 使用原生 `weixin_oc` 登录账号和原始 `to_user_id` 核对接收者，避免把可变 adapter 的新账号附到旧排队事件上。原始用户、uint64 消息 ID、毫秒时间、方向、状态和纯文字条目与宿主组件分别核对。相同账号重新登录可以恢复原范围；账号变化撤销旧绑定，新身份必须重新确认。平台 Token 与发送上下文只由 AstrBot 管理。
 
+`core/lark_source.py` 读取 AstrBot 原生飞书适配器已取得的机器人 OpenID，以官方 API 域名、App ID、机器人 OpenID 构成稳定机器人身份。事件携带的 API 客户端、实例和 self_id 必须匹配登录快照；客户端替换后拒绝旧排队事件。原生 SDK 消息须为 `p2p/text`，核对消息 ID、毫秒创建时间、编辑时间及 Plain 正文，排除引用、话题、提及、富文本和媒体。使用者 OpenID 由原生事件提供，应用凭证与平台连接均由 AstrBot 管理。
+
 独立控制库中的授权修订绑定平台实例、用户与真实来源身份。新增和再授权须由 Dashboard 管理员显式确认；授权时间下限单调推进，配置恢复不能重启撤权。旧 OneBot 身份、Bank、采集下限和冻结请求保留。状态变更命令使用可信原始时间与持久事件凭据，控制变更和消费记录通过同一 SQLite 事务提交；跨异步前先核对边界，提交后再重放到业务库。
 
 身份层保存 `principal_id` 和 Bank 归属。每个稳定用户范围使用独立 Bank，记忆空间固定为 `default`。不提供跨账号绑定、账号转移或历史 Bank 合并。
 
 ## 用户消息与助手正文
 
-用户原文须通过标准接收事件、原始载荷与模型请求的关联核对。接受 OneBot v11 私聊纯文本及已验证的 QQ 官方 C2C 纯文本；history 中的 user 文本不能替代接收入站校验。官方 C2C 核对原始 author.user_openid/id/content/timestamp、纯文字消息类型及已验证的合成 At/Plain 组件，拒绝引用、附件、未知扩展和不一致的正文转换。原始时间须带时区，用户材料标为 `qq_official.timestamp`，不回填宿主时间。AstrBot 追加的时间、身份与群名提示按独立 `system_reminder` 内容块识别；首块仍须与入站原文完全一致，其他附加内容或轮次不匹配时拒绝关联。原始正文和持久历史都不改写。
+用户原文须通过标准接收事件、原始载荷与模型请求的关联核对。接受 OneBot v11、微信 ClawBot、飞书私聊纯文本及 QQ 官方 C2C 纯文本；history 中的 user 文本不能替代接收入站校验。官方 C2C 核对原始 author.user_openid/id/content/timestamp、纯文字消息类型及已验证的合成 At/Plain 组件，拒绝引用、附件、未知扩展和不一致的正文转换。原始时间须带时区，用户材料标为 `qq_official.timestamp`，不回填宿主时间。AstrBot 追加的时间、身份与群名提示按独立 `system_reminder` 内容块识别；首块仍须与入站原文完全一致，其他附加内容或轮次不匹配时拒绝关联。原始正文和持久历史都不改写。
 
 助手正文读取自标准 `conversation_manager` 的持久化 `history`，并关联同一来源账号、代次和会话中已核对的用户事件。每条最终正文保存后独立入队，无需下一条用户消息触发。
 
