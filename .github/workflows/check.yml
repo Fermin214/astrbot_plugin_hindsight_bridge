@@ -110,18 +110,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tools/build-test-package.py --output "${{ runner.temp }}/hindsight-delivery"
-      - name: Native Lark SDK event contracts
-        if: matrix.platform == 'lark'
-        run: |
-          docker run --rm --network none --memory 1536m \
-            -e ASTRBOT_ROOT=/contracts \
-            -e ASTRBOT_TEST_VERSION=${{ matrix.version }} \
-            -e ASTRBOT_DISABLE_METRICS=1 \
-            -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
-            -v "${{ github.workspace }}:/candidate-source:ro" \
-            soulter/astrbot:v${{ matrix.version }} \
-            python /candidate-source/tests/integration/lark_source_contracts.py \
-              --output /delivery/lark-contracts.json
       - name: Official AstrBot archive installation, requests, history and upgrade
         shell: bash
         run: |
@@ -134,7 +122,13 @@ jobs:
             -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
             -v "${{ github.workspace }}:/candidate-source:ro" \
             soulter/astrbot:v${{ matrix.version }} \
-            python /candidate-source/tests/integration/astrbot_smoke.py \
+            sh -ec '
+              python /candidate-source/tests/integration/astrbot_smoke.py
+              if [ "$ASTRBOT_PLATFORM_FIXTURE" = lark ]; then
+                ASTRBOT_ROOT=/contracts python /candidate-source/tests/integration/lark_source_contracts.py \
+                  --output /delivery/lark-contracts.json
+              fi
+            ' \
             2>&1 | tee "${{ runner.temp }}/hindsight-delivery/astrbot-smoke.log"
       - uses: actions/upload-artifact@v4
         if: always()
