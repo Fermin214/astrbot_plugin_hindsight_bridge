@@ -38,7 +38,10 @@ PLATFORMS = {
         "lark", "用户 OpenID", "填写飞书私聊 /sid 中的用户 UID（ou_ 开头）",
         supported=True,
     ),
-    "telegram": Platform("telegram", "用户 ID", "填写 /sid 中的用户 UID", True),
+    "telegram": Platform(
+        "telegram", "Telegram 用户 ID", "填写 Telegram 私聊 /sid 中的用户 UID",
+        True, True,
+    ),
 }
 TIME_SOURCES = {
     "aiocqhttp": "onebot.time",
@@ -100,6 +103,10 @@ def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=
         return header(event, plain_type, wake_prefixes, adapter, binding)
     if host_type == "weixin_oc":
         from .weixin_source import header
+
+        return header(event, plain_type, wake_prefixes, adapter, binding)
+    if host_type == "telegram":
+        from .telegram_source import header
 
         return header(event, plain_type, wake_prefixes, adapter, binding)
     if event.get_platform_name() != "aiocqhttp":
@@ -214,6 +221,16 @@ def source_identity(event, incoming, adapter=None, *, authorization_revision=0, 
             "weixin_oc", incoming.platform_instance_id, "weixin_oc",
             login.account_id, login.client, authorization_revision,
         )
+    if incoming.platform_type == "telegram":
+        from .telegram_source import bound_login
+
+        login = bound_login(event, adapter, binding)
+        if login is None or incoming.bot_id != login.bot_id:
+            return None
+        return SourceIdentity(
+            "telegram", incoming.platform_instance_id, "telegram",
+            login.bot_id, login.client, authorization_revision,
+        )
     if incoming.platform_type != "aiocqhttp":
         return None
     producer = getattr(event, "bot", None)
@@ -238,6 +255,10 @@ def native_login(adapter):
             from .weixin_source import native_login as weixin_login
 
             return weixin_login(adapter)
+        if adapter.meta().name == "telegram":
+            from .telegram_source import native_login as telegram_login
+
+            return telegram_login(adapter)
     except AttributeError:
         return None
     from .qq_source import native_login as qq_login
@@ -272,6 +293,11 @@ async def prepare_bot_identity(context, platform):
 
         login = native_login(adapter)
         return login.bot_id if login and login.appid == record.get("app_id") else ""
+    if record.get("type") == "telegram":
+        from .telegram_source import native_login
+
+        login = native_login(adapter)
+        return login.bot_id if login else ""
     if record.get("type") != "aiocqhttp":
         return ""
     client = adapter.get_client()

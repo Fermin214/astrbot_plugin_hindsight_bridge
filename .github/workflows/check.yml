@@ -60,7 +60,8 @@ jobs:
               name == "main.py" or name.startswith(("core/", ".astrbot-plugin/"))
               or name in {"requirements.txt", "_conf_schema.json", "metadata.yaml",
                           "tests/integration/astrbot_smoke.py", "tests/integration/package_fixture.py",
-                          "tests/integration/lark_source_contracts.py", ".github/workflows/check.yml"}
+                          "tests/integration/lark_source_contracts.py",
+                          "tests/integration/telegram_source_contracts.py", ".github/workflows/check.yml"}
               for name in code
           )
           models = bool(set(code) & {
@@ -104,6 +105,10 @@ jobs:
             platform: lark
           - version: "4.29.4"
             platform: lark
+          - version: "4.29.1"
+            platform: telegram
+          - version: "4.29.4"
+            platform: telegram
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -127,6 +132,9 @@ jobs:
               if [ "$ASTRBOT_PLATFORM_FIXTURE" = lark ]; then
                 ASTRBOT_ROOT=/contracts python /candidate-source/tests/integration/lark_source_contracts.py \
                   --output /delivery/lark-contracts.json
+              elif [ "$ASTRBOT_PLATFORM_FIXTURE" = telegram ]; then
+                ASTRBOT_ROOT=/contracts python /candidate-source/tests/integration/telegram_source_contracts.py \
+                  --output /delivery/telegram-contracts.json
               fi
             ' \
             2>&1 | tee "${{ runner.temp }}/hindsight-delivery/astrbot-smoke.log"

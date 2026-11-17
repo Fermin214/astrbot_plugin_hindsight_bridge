@@ -508,8 +508,8 @@ class SourceContracts(unittest.TestCase):
         self.assertTrue(platform_details("qq_official")["supported"])
         self.assertTrue(platform_details("qq_official_webhook")["supported"])
         self.assertTrue(platform_details("weixin_oc")["supported"])
-        for kind in ("telegram", "unknown"):
-            self.assertFalse(platform_details(kind)["supported"])
+        self.assertTrue(platform_details("telegram")["supported"])
+        self.assertFalse(platform_details("unknown")["supported"])
         self.assertTrue(valid_user_id("qq_official", "AbC_x-123"))
         self.assertFalse(valid_user_id("aiocqhttp", "AbC_x-123"))
         self.assertFalse(valid_user_id("aiocqhttp", "１２３"))
