@@ -285,6 +285,43 @@ async def main():
                 passed.append("native_telegram_client_rebuild_preserves_scope_and_bot_change_requires_confirmation")
                 grant = plugin.outbox.access.authorization(INSTANCE, USER)
                 plugin.outbox.activate(plugin.source_header(await message(adapter, 7)), grant["revision"])
+            if PLATFORM == "weixin_oc":
+                old_event = await message(adapter, 4)
+                adapter.token = None
+                plugin.refresh_permissions()
+                assert not plugin.allowed(old_event)
+                adapter.token = adapter.client.token = "rotated-offline-token"
+                await plugin.prepare_sources()
+                assert plugin.allowed(old_event)
+                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
+                adapter.token = None
+                await plugin.prepare_sources()
+                assert plugin.source_accounts[INSTANCE]["login"] is None
+                adapter.token = "restored-offline-token"
+                adapter.account_id = "another-fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                plugin.refresh_permissions()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                adapter.account_id = "fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 5)), grant["revision"])
+                adapter.account_id = "another-fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert plugin.source_header(old_event) is None
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                assert await plugin.panel.bot_id(INSTANCE) == adapter.account_id
+                adapter.account_id = "fixture-bot@im.bot"
+                adapter.config["weixin_oc_account_id"] = adapter.account_id
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                grant = plugin.outbox.access.authorization(INSTANCE, USER)
+                plugin.outbox.activate(plugin.source_header(await message(adapter, 6)), grant["revision"])
+                passed.append("native_relogin_recovers_same_scope_and_account_change_requires_confirmation")
+            if PLATFORM in {"weixin_oc", "telegram"}:
                 original = adapter
                 from qq_source_contracts import Fixture as QQFixture
 
@@ -304,28 +341,6 @@ async def main():
                 await plugin.prepare_sources()
                 assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
                 passed.append("native_cross_platform_instance_replacement_revokes_binding_and_keeps_worker_alive")
-            if PLATFORM == "weixin_oc":
-                old_event = await message(adapter, 4)
-                adapter.token = None
-                plugin.refresh_permissions()
-                assert not plugin.allowed(old_event)
-                adapter.token = adapter.client.token = "rotated-offline-token"
-                await plugin.prepare_sources()
-                assert plugin.allowed(old_event)
-                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
-                adapter.account_id = "another-fixture-bot@im.bot"
-                adapter.config["weixin_oc_account_id"] = adapter.account_id
-                await plugin.prepare_sources()
-                assert plugin.source_header(old_event) is None
-                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
-                assert await plugin.panel.bot_id(INSTANCE) == adapter.account_id
-                adapter.account_id = "fixture-bot@im.bot"
-                adapter.config["weixin_oc_account_id"] = adapter.account_id
-                await plugin.prepare_sources()
-                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
-                grant = plugin.outbox.access.authorization(INSTANCE, USER)
-                plugin.outbox.activate(plugin.source_header(await message(adapter, 5)), grant["revision"])
-                passed.append("native_relogin_recovers_same_scope_and_account_change_requires_confirmation")
             await manager.uninstall_plugin(NAME)
             assert context.get_registered_star(NAME) is None
             assert plugin.client is None and plugin.outbox is None and plugin.connection_task is None

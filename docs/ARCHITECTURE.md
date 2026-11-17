@@ -6,7 +6,7 @@
 
 AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。Hindsight 负责记忆提取（Retain）、记忆召回（Recall）、整合（Consolidation）、知识页生成与内容管理。插件负责消息来源校验、用户隔离、材料构造、持久队列、临时注入、连接及暂停与恢复协调。
 
-支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C 和 Telegram Bot（`telegram`）私聊纯文字，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
+支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C、微信 ClawBot（`weixin_oc`）和 Telegram Bot（`telegram`）私聊纯文字，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
 
 插件只调用 Hindsight 的公开 HTTP API，不把 Hindsight 安装进 AstrBot 的 Python 环境，也不额外调用摘要模型；自动 reflect 关闭。
 
@@ -24,7 +24,9 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 `core/qq_source.py` 只读取 AstrBot 原生 adapter/client 的认证身份。WS 核对 SDK robot，Webhook 核对已认证 helper/user 及 client/API/HTTP 对应；登录快照冻结对象引用和认证 ID。消息携带的 client 和原始 API 必须属于该登录，重载或登录变化后拒绝旧产生方事件。插件不保存 AppSecret、不实现签名服务器或 QQ 客户端。
 
-`core/telegram_source.py` 核对已初始化的数字 Bot ID 与事件携带的原生客户端。普通私聊要求 chat 与发送者 ID 一致，原始消息 ID 和 `date` 参与去重与时间边界检查。用户名不参与身份；客户端重建后，旧事件不能使用新登录。引用、转发、编辑、媒体、business 与未知扩展事件拒绝自动采集。
+`core/weixin_source.py` 使用原生 `weixin_oc` 登录账号和原始 `to_user_id` 核对接收者，避免把可变 adapter 的新账号附到旧排队事件上。原始用户、uint64 消息 ID、毫秒时间、方向、状态和纯文字条目与宿主组件分别核对。相同账号重新登录可以恢复原范围；账号变化撤销旧绑定，新身份必须重新确认。平台 Token 与发送上下文只由 AstrBot 管理。
+
+`core/telegram_source.py` 使用初始化后的数字 Bot ID 和事件携带的原生客户端核对来源。普通私聊要求 chat 与用户 ID 相同，原始消息 ID、带时区的 date、正文和实体与宿主转换结果一致；旧客户端事件不能归属重连后的新 Bot。
 
 独立控制库中的授权修订绑定平台实例、用户与真实来源身份。新增和再授权须由 Dashboard 管理员显式确认；授权时间下限单调推进，配置恢复不能重启撤权。旧 OneBot 身份、Bank、采集下限和冻结请求保留。状态变更命令使用可信原始时间与持久事件凭据，控制变更和消费记录通过同一 SQLite 事务提交；跨异步前先核对边界，提交后再重放到业务库。
 

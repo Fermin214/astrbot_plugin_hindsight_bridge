@@ -8,7 +8,7 @@
 
 记忆内容的浏览、搜索、更正、删除、Bank 管理和原生导入导出由独立打开的 Hindsight 原生 Control Plane 提供。插件不实现内容列表、详情、更正表单或下载页面。QQ view/show/export 只提供本人范围内的官方只读 API 转发。
 
-支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C 和 Telegram Bot（`telegram`）私聊纯文字，默认同机部署。模型配置使用协议适配、配置管理器和原子回退。
+支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C、微信 ClawBot（`weixin_oc`）和 Telegram Bot（`telegram`）私聊纯文字，默认同机部署。模型配置使用协议适配、配置管理器和原子回退。
 
 配套新安装固定使用 1.2.0 Slim。服务进程等待 75 秒，容器退出宽限为 90 秒，覆盖上游启动脚本的 60 秒退出等待。配套服务通过保留安装身份、凭据、模型设置卷和数据库的专用升级命令升级；插件更新本身不操作服务容器。配套升级和备份步骤见 [备份与恢复](DATA-MAINTENANCE.md#升级-hindsight-服务)。
 
@@ -96,7 +96,9 @@ Hindsight 内容名称沿用 Control Plane：Bank 为记忆库，World Facts / E
 
 QQ 官方 WS/Webhook 的 AppID、AppSecret、事件订阅和回调连接由 AstrBot 管理；插件只选择既有实例并保存用户 OpenID。原生机器人未完成认证时不激活授权。两种传输使用同一逻辑平台身份，不同实例不合并，切换 AppID 必须重新确认授权。
 
-Telegram 的 Bot Token、网络和轮询由 AstrBot 管理。插件使用初始化后的数字 Bot ID 与私聊 `/sid` 返回的数字用户 UID，用户名变化不影响身份。客户端重建可恢复同 Bot 范围；换 Bot 必须重新确认，旧客户端事件不使用新身份。
+微信 ClawBot 的扫码、Token 和收发上下文由 AstrBot 管理。插件使用宿主登录账号作为机器人身份，管理页面填写私聊 `/sid` 返回的用户 UID。重新登录同一账号沿用原范围；换账号使旧绑定失效，重新确认后使用独立记忆库。
+
+Telegram Bot 的 Token、轮询和代理由 AstrBot 管理。插件使用数字 Bot ID 和私聊 `/sid` 返回的数字用户 UID；用户名变化不改变记忆范围。重连后沿用同 Bot 的已确认范围，更换 Bot 需要重新确认。
 
 授权、撤权、单调接收下限和命令防重凭据保存在最新控制库，普通设置保存不能重绑。原实例换登录账号时，旧范围作为旧记忆库保留，管理员可处理已有暂停或清空；不提供模式切换和重试入口，不向新账号转移记忆。
 

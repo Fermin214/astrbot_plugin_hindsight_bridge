@@ -58,6 +58,15 @@ def field(value):
     }
 
 
+def unknown_fields(value, allowed):
+    return [
+        {**field(item), "empty_scalar": item is None or (
+            type(item) in (str, int, bool) and item in ("", 0, False)
+        ), "empty_container": type(item) in (dict, list, tuple) and not item}
+        for name, item in value.items() if name not in allowed
+    ][:32]
+
+
 def numeric(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
 
@@ -126,6 +135,7 @@ def project(event, adapter, key):
         items = raw.get("item_list")
         report["fields"] = {name: field(raw.get(name)) for name in WX_FIELDS}
         report["unknown_field_count"] = len(set(raw) - WX_MESSAGE_FIELDS)
+        report["unknown_fields"] = unknown_fields(raw, WX_MESSAGE_FIELDS)
         report["has_later_update"] = raw.get("update_time_ms") not in (None, 0, raw.get("create_time_ms"))
         report["has_deletion"] = raw.get("delete_time_ms") not in (None, 0)
         report["identifiers"] = {
@@ -163,6 +173,7 @@ def project(event, adapter, key):
                     "explicitly_incomplete": item.get("is_completed") is False,
                     "has_later_update": item.get("update_time_ms") not in (None, 0, item.get("create_time_ms")),
                     "unknown_field_count": len(set(item) - WX_TEXT_FIELDS),
+                    "unknown_fields": unknown_fields(item, WX_TEXT_FIELDS),
                     "unknown_text_field_count": len(set(text_item) - {"text"}) if isinstance(text_item, Mapping) else None,
                     "text": {**field(text), "length": len(text) if isinstance(text, str) else None},
                 })
