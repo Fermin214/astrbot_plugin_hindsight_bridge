@@ -118,9 +118,14 @@ jobs:
         run: |
           $env:DELIVERY_ROOT = Join-Path $env:RUNNER_TEMP 'hindsight-delivery'
           $env:ASTRBOT_ROOT = Join-Path $env:RUNNER_TEMP 'AstrBot 数据'
-          python tools/build-test-package.py --output "$env:DELIVERY_ROOT"
+          python tools/build-test-package.py --distribution --output "$env:DELIVERY_ROOT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tests/integration/astrbot_smoke.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-astrbot-smoke
+          path: ${{ runner.temp }}/hindsight-delivery/astrbot-smoke-report.json
+          if-no-files-found: error
 
   astrbot-smoke:
     needs: check

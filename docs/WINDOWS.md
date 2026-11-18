@@ -14,7 +14,7 @@ py -3.12 -m venv ".venv"
 & ".\.venv\Scripts\python.exe" -m pip install "hindsight-api==1.2.0"
 ```
 
-在该目录用 UTF-8 保存 `.env`。下面以 OpenAI 记忆处理、本地中文向量模型和本地重排为例。把模型密钥和服务 API 密钥替换成不同的值。服务 API 密钥可用 `& ".\.venv\Scripts\python.exe" -c "import secrets; print(secrets.token_hex(32))"` 生成。每套服务使用不同的 pg0 实例名和 Worker ID，重启时沿用同一组值。
+在该目录将 `.env` 保存为 UTF-8 无 BOM。下面以 OpenAI 记忆处理、本地中文向量模型和本地重排为例。把模型密钥和服务 API 密钥替换成不同的值。服务 API 密钥可用 `& ".\.venv\Scripts\python.exe" -c "import secrets; print(secrets.token_hex(32))"` 生成。每套服务使用不同的 pg0 实例名和 Worker ID，重启时沿用同一组值。
 
 ```dotenv
 HINDSIGHT_API_DATABASE_URL=pg0://astrbot-memory
@@ -35,6 +35,8 @@ HINDSIGHT_API_RERANKER_PROVIDER=local
 ```powershell
 $memoryRoot = Join-Path $env:LOCALAPPDATA 'AstrBot Memory'
 Set-Location -LiteralPath "$memoryRoot"
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $env:PG0_HOME = Join-Path $memoryRoot 'pg0'
 & ".\.venv\Scripts\hindsight-api.exe" --host 127.0.0.1 --port 8888
 ```

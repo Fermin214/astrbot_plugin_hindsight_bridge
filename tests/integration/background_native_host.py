@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import platform
+import shutil
 import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from package_fixture import candidate_manifest, install_candidate, verify_installed_candidate
+from package_fixture import DELIVERY, candidate_manifest, install_candidate, verify_installed_candidate
 
 from aiocqhttp import Event
 
@@ -97,6 +99,7 @@ async def main():
                     await asyncio.sleep(0.1)
             from data.plugins.astrbot_plugin_hindsight_bridge.core.source import native_header
             from data.plugins.astrbot_plugin_hindsight_bridge.core.background import reference, save_reference
+            from data.plugins.astrbot_plugin_hindsight_bridge.scripts.backup import backup
 
             header = native_header(await event(adapter, 1), Plain)
             plugin.outbox.activate(header, plugin.outbox.access.authorization("background-fixture", "123")["revision"])
@@ -184,6 +187,10 @@ async def main():
             await plugin.worker.maintenance.resume(scope["scope_id"])
             checks.append("maintenance_drains_native_refresh_and_blocks_personal_read")
             scope = plugin.outbox.scope_owner(scope["scope_id"])
+            runtime = plugin.outbox.directory
+            control = plugin.outbox.control.directory
+            snapshot = ROOT / "bridge backup"
+            manifest = backup(runtime, control, snapshot, backend_version=native_version)
             plugin.outbox.forget(scope["scope_id"])
             async with asyncio.timeout(60):
                 while not await plugin.worker.maintenance.check(force=True):
@@ -196,15 +203,21 @@ async def main():
             persisted = await conversations.get_conversation(incoming.unified_msg_origin, cid)
             assert persisted.history
             checks.append("real_forget_deletes_native_bank_pages_and_clears_selection_without_deleting_host_history")
-            await manager.reload(NAME)
+            await plugin.terminate()
+            shutil.copyfile(snapshot / "runtime.sqlite3", runtime / "runtime.sqlite3")
+            for name in ("runtime.sqlite3-wal", "runtime.sqlite3-shm"):
+                (runtime / name).unlink(missing_ok=True)
+            assert (await manager.reload(NAME))[0]
             plugin = context.get_registered_star(NAME).star_cls
             async with asyncio.timeout(60):
                 while plugin.outbox.recovering:
                     await asyncio.sleep(0.5)
             latest = plugin.outbox.scope_owner(scope["scope_id"])
+            assert plugin.outbox.deployment_id == manifest["deployment_id"]
+            assert latest["bank"] != bank and latest["mode"] == "paused"
             assert not reference(plugin.outbox, latest)["page_id"]
             assert not await plugin.client.bank_exists(bank)
-            checks.append("reload_cannot_revive_erased_selection_or_old_bank")
+            checks.append("restore_old_business_snapshot_with_latest_control_preserves_erasure")
             await manager.uninstall_plugin(NAME)
             plugin = None
     finally:
@@ -212,9 +225,12 @@ async def main():
             await plugin.terminate()
         await db_helper.engine.dispose()
     report = {"astrbot": VERSION, "hindsight": native_version, "candidate_sha256": candidate_sha256, "passed": checks,
+              "host": platform.platform(), "python": platform.python_version(),
               "platform_peer": "synthetic actual OneBot SDK objects, no real QQ login",
               "model_peer": "synthetic OpenAI-compatible fixture, not a production model", "complete": True}
-    Path("/delivery/background-native-host-report-" + VERSION + ".json").write_text(json.dumps(report, indent=2))
+    (DELIVERY / ("background-native-host-report-" + VERSION + ".json")).write_text(
+        json.dumps(report, indent=2), encoding="utf-8",
+    )
     print(json.dumps(report))
 
 
