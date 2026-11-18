@@ -307,7 +307,7 @@ class HindsightBridge(Star):
                         )
             self.outbox.db.commit()
 
-    async def prepare_sources(self):
+    async def prepare_sources(self, platform=None):
         getter = getattr(self.context, "get_platform_inst", None)
         if getter is None or self.outbox is None or self.stopping:
             return
@@ -318,7 +318,10 @@ class HindsightBridge(Star):
             except QueueError:
                 self.refresh_permissions()
                 return
-            for instance in sorted({platform for platform, _ in accounts}):
+            instances = {instance for instance, _ in accounts}
+            if platform is not None:
+                instances.intersection_update({platform})
+            for instance in sorted(instances):
                 adapter = getter(instance)
                 client = adapter.get_client() if adapter else None
                 bot = await prepare_bot_identity(self.context, instance)
@@ -401,7 +404,14 @@ class HindsightBridge(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
-        if self.outbox is not None and event not in self.incoming:
+        if self.outbox is not None and not self.stopping and event not in self.incoming:
+            if event.get_platform_name() == "aiocqhttp":
+                header = self.source_header(event)
+                if (
+                    header and (header.platform_instance_id, header.user_id) in (self.permissions or ())
+                    and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
+                ):
+                    await self.prepare_sources(header.platform_instance_id)
             incoming = self.snapshot(event)
             if incoming:
                 self.incoming[event] = incoming

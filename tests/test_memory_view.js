@@ -6,11 +6,13 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "../views/memory/app.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "../views/memory/app.js"), "utf8").replace(/\r\n/g, "\n");
 function declaration(name) {
   const begin = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
-  assert.notEqual(begin, -1);
-  return source.slice(begin, source.indexOf("\n}\n", begin) + 3);
+  assert.notEqual(begin, -1, `missing function ${name}`);
+  const end = source.indexOf("\n}\n", begin);
+  assert.notEqual(end, -1, `missing end of function ${name}`);
+  return source.slice(begin, end + 3);
 }
 
 function harness() {
@@ -101,13 +103,10 @@ function parameterHarness() {
 test("Windows setup displays the existing-service form without managed controls", () => {
   const context = harness();
   context.document.querySelector = () => ({ value: "managed" });
-  context.data = { config: {}, has_installation: true, capabilities: {
-    managed_installation: false, windows_guide: true,
-  } };
+  context.data = { config: {}, has_installation: true, capabilities: { managed_installation: false } };
   context.updateConnectionMode();
   assert.equal(context.$("connection-options").hidden, true);
   assert.equal(context.$("connection-options").disabled, true);
-  assert.equal(context.$("windows-guide").hidden, false);
   assert.equal(context.$("models-settings").hidden, true);
   assert.equal(context.$("maintenance").hidden, true);
   assert.equal(context.$("api-url").readOnly, false);
@@ -115,10 +114,9 @@ test("Windows setup displays the existing-service form without managed controls"
   assert.equal(context.$("save-settings").hidden, false);
   assert.equal(context.$("check-connection").hidden, false);
 
-  context.data.capabilities = { managed_installation: true, windows_guide: false };
+  context.data.capabilities = { managed_installation: true };
   context.updateConnectionMode();
   assert.equal(context.$("connection-options").hidden, false);
-  assert.equal(context.$("windows-guide").hidden, true);
   assert.equal(context.$("maintenance").hidden, false);
 });
 
@@ -315,6 +313,25 @@ test("opening an upgrade cannot expose service management for an existing connec
   context.data.config.managed = true;
   context.openUpgrade();
   assert.equal(context.$("upgrade-dialog").open, true);
+});
+
+test("Windows shows pending upgrade recovery without command generation", async () => {
+  const context = harness();
+  for (const name of ["renderServiceVersion", "openUpgrade", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  context.data = { config: { managed: false }, capabilities: { managed_installation: false }, backend: {
+    managed: true, version: "1.1.0", target: "1.2.0", pending: true,
+  } };
+  context.renderServiceVersion();
+  context.openUpgrade();
+  assert.equal(context.$("upgrade-dialog").open, true);
+  assert.equal(context.$("upgrade-begin-step").hidden, true);
+  assert.equal(context.$("upgrade-prepare-step").hidden, true);
+  assert.equal(context.$("upgrade-cancel").disabled, false);
+  assert.equal(context.$("remove-account").disabled, true);
+  context.bridge = { apiGet: async () => ({ ...context.data.backend, supported: true, upgrade_available: false }) };
+  await context.checkServiceVersion();
+  assert.match(context.$("version-check-result").textContent, /插件兼容 Hindsight 1\.1\.0/);
+  assert.match(context.$("version-check-result").textContent, /无法生成升级命令/);
 });
 
 test("a model task outside the connected service releases polling and setup controls", async () => {

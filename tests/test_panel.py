@@ -409,7 +409,14 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.gather(saving, return_exceptions=True)
 
-    async def test_offline_account_removal_updates_existing_queue_without_restarting(self):
+    async def test_offline_account_removal_keeps_legacy_managed_connection_on_windows(self):
+        self.installation_supported.return_value = False
+        state = {
+            "connection_mode": "managed", "id": "012345abcdef",
+            "api_url": self.config["api_url"], "api_key": self.config["api_key"],
+            "management_url": "http://memory.test:8766",
+        }
+        self.panel.store_state(state)
         with tempfile.TemporaryDirectory() as temporary:
             queue = Outbox(
                 Path(temporary) / "runtime", self.config["service_id"], self.config["api_url"],
@@ -418,7 +425,10 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.outbox = queue
             self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
             self.plugin.refresh_permissions()
-            scope = queue.scope(Incoming("aiocqhttp", "qq", "20001", "123", "", int(time.time()), ""))
+            incoming = Incoming("aiocqhttp", "qq", "20001", "123", "", int(time.time()), "")
+            queue.activate(incoming, queue.access.authorization("qq", "123")["revision"])
+            scope = queue.scope(incoming)
+            self.assertTrue(queue.can_recall(scope))
             self.auth_gate = AsyncMock(side_effect=module.HindsightError("connection_error"))
             self.panel.managed_request = AsyncMock(side_effect=module.PanelError("offline"))
             try:
@@ -427,6 +437,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.config["allowed_accounts"], [])
                 self.assertFalse(queue.can_recall(scope))
                 self.assertIs(self.plugin.outbox, queue)
+                self.assertEqual(self.panel.saved_state, state)
                 self.auth_gate.assert_not_awaited()
                 self.panel.managed_request.assert_not_awaited()
                 self.plugin.initialize.assert_not_awaited()
@@ -540,9 +551,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.panel.store_state(state)
         self.panel.managed_request = AsyncMock()
         self.panel.body = AsyncMock(return_value={"mode": "managed", "installation_id": state["id"]})
-        with patch.object(module.sys, "platform", "win32"):
-            snapshot = await self.panel.bootstrap()
-        self.assertEqual(snapshot["capabilities"], {"managed_installation": False, "windows_guide": True})
+        snapshot = await self.panel.bootstrap()
+        self.assertEqual(snapshot["capabilities"], {"managed_installation": False})
         self.assertFalse(snapshot["config"]["managed"])
         self.assertFalse(snapshot["has_installation"])
         for operation in (

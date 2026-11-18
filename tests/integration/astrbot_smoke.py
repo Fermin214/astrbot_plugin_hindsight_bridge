@@ -185,7 +185,7 @@ async def main():
             metadata = context.get_registered_star(NAME)
             if sys.platform == "win32":
                 snapshot = await metadata.star_cls.panel.bootstrap()
-                assert snapshot["capabilities"] == {"managed_installation": False, "windows_guide": True}
+                assert snapshot["capabilities"] == {"managed_installation": False}
                 assert not snapshot["config"]["managed"] and not snapshot["has_installation"]
                 from data.plugins.astrbot_plugin_hindsight_bridge.core.panel import PanelError
 

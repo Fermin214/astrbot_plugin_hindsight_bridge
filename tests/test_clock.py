@@ -83,6 +83,7 @@ class ClockResolution(unittest.TestCase):
 
 class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
     async def initialize_bridge(self, root, host):
+        root = root.resolve()
         namespace = lifecycle_methods({
             "asyncio": asyncio, "Path": Path, "sha256": sha256, "pairs": pairs,
             "configuration_accounts": configuration_accounts,

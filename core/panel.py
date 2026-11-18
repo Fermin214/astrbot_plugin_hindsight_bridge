@@ -10,7 +10,6 @@ import re
 import secrets
 import socket
 import sqlite3
-import sys
 import time
 from urllib.parse import urlsplit
 
@@ -268,15 +267,18 @@ class MemoryPanel:
         if "config_revision" in payload and payload["config_revision"] != self.config_revision():
             raise PanelError("配置已被更新，请刷新页面后重新保存。")
 
+    def upgrade_progress(self, state):
+        queue = self.plugin.outbox
+        if not queue or not self.managed_connection(state):
+            return False, False
+        check, pauses = state.get("upgrade_check") or {}, state.get("upgrade_pauses") or {}
+        return (
+            check.get("connection_id") == queue.connection_id and not check.get("verified"),
+            pauses.get("connection_id") == queue.connection_id,
+        )
+
     def ensure_no_upgrade(self):
-        state, queue = self.upgrade_state(), self.plugin.outbox
-        check, pauses = state.get("upgrade_check"), state.get("upgrade_pauses")
-        if queue and self.managed_connection(state) and (
-            check and check.get("connection_id") == queue.connection_id and not check.get("verified")
-            or pauses and pauses.get("connection_id") == queue.connection_id
-        ):
-            if not local_installation_supported():
-                raise PanelError("请在原 Linux 部署环境核对升级并解除暂停，再迁移插件连接。")
+        if any(self.upgrade_progress(self.upgrade_state())):
             raise PanelError("服务升级尚未结束。请先核对升级结果并解除升级造成的暂停，或选择暂不升级，再修改连接、模型、账号或删除数据。")
 
     @staticmethod
@@ -332,13 +334,17 @@ class MemoryPanel:
     async def service_status(self, *, force=True):
         plugin, state = self.plugin, self.upgrade_state()
         client = plugin.client
-        managed = local_installation_supported() and self.managed_connection(state) and (
+        local_installation = local_installation_supported()
+        pending, paused = self.upgrade_progress(state)
+        managed = (local_installation or pending or paused) and self.managed_connection(state) and (
             not client or self.connection_url(state["api_url"]) == client.url
         )
         ignored = state.get("ignored_upgrades", {})
         result = {
             "version": None, "target": HINDSIGHT_VERSION if managed else None,
             "managed": managed, "upgrade_available": False,
+            "pending": managed and pending, "upgrade_paused": managed and paused,
+            "resume_available": managed and paused and bool((state.get("upgrade_check") or {}).get("verified")),
             "ignored": bool(managed and isinstance(ignored, dict)
                             and ignored.get(self.connection_revision()) == HINDSIGHT_VERSION),
         }
@@ -348,7 +354,7 @@ class MemoryPanel:
             return result
         identity = (
             client.url, sha256(client.api_key), self.config_revision(),
-            bool(state.get("upgrade_check")), bool(state.get("upgrade_pauses")),
+            local_installation, pending, paused,
         )
         if not force and self.version_cache and self.version_cache[0] == identity and self.version_cache[1] > time.monotonic():
             return self.version_cache[2]
@@ -360,21 +366,11 @@ class MemoryPanel:
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                 raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
             result.update(version=version, supported=version in SUPPORTED_VERSIONS,
-                          upgrade_available=managed and version == "1.1.0")
+                          upgrade_available=local_installation and managed and version == "1.1.0")
         except (HindsightError, TimeoutError, PanelError):
             result["message"] = "暂时无法核对服务版本，请检查连接后重试。"
         if plugin.client is not client or plugin.stopping:
             return {"version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False}
-        check = state.get("upgrade_check", {})
-        result["pending"] = bool(
-            managed and check and check.get("connection_id") == plugin.outbox.connection_id
-            and not check.get("verified")
-        )
-        pauses = state.get("upgrade_pauses")
-        result["upgrade_paused"] = bool(
-            managed and pauses and pauses.get("connection_id") == plugin.outbox.connection_id
-        )
-        result["resume_available"] = bool(result["upgrade_paused"] and check.get("verified"))
         self.version_cache = (identity, time.monotonic() + 30, result)
         return result
 
@@ -407,14 +403,24 @@ class MemoryPanel:
         payload = await self.body()
         if not request.username:
             raise PanelError("请使用 AstrBot 管理账号登录。")
-        self.ensure_local_installation()
+        action = payload.get("action")
+        recovery = action in ("verify", "resume", "cancel")
+        if not recovery:
+            self.ensure_local_installation()
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(60):
             self.check_revision(payload)
             plugin, state = self.plugin, self.upgrade_state()
             status = await self.service_status()
             if not status.get("managed") or not plugin.outbox or plugin.outbox.recovering:
                 raise PanelError("此入口只升级当前插件的配套服务；外部服务请由其管理员升级。")
-            managed_status = await self.managed_request(state)
+            try:
+                managed_status = await self.managed_request(state, recover_upgrade=recovery)
+            except PanelError:
+                if recovery and not local_installation_supported():
+                    raise PanelError(
+                        "无法核对原配套服务的管理接口。请回到原 Linux 部署环境，使用原连接完成或取消升级。"
+                    ) from None
+                raise
             if not managed_status["ready"]:
                 raise PanelError("配套服务还不能处理记忆请求，请先恢复原服务连接。")
             queue, maintenance = plugin.outbox, plugin.worker.maintenance
@@ -502,7 +508,6 @@ class MemoryPanel:
                 plugin.worker.wake.set()
                 return len(targets)
 
-            action = payload.get("action")
             if action in {"verify", "resume"}:
                 check = state.get("upgrade_check")
                 if not check or status["version"] != HINDSIGHT_VERSION:
@@ -843,7 +848,6 @@ class MemoryPanel:
             "config_revision": self.config_revision(),
             "capabilities": {
                 "managed_installation": local_installation,
-                "windows_guide": sys.platform == "win32",
             },
             "parameters": settings.snapshot(plugin),
             "config": {
@@ -940,8 +944,9 @@ class MemoryPanel:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise PanelError("配套网络记录损坏，请重新执行安装命令。") from None
 
-    async def managed_request(self, state, environment=None):
-        self.ensure_local_installation()
+    async def managed_request(self, state, environment=None, *, recover_upgrade=False):
+        if not recover_upgrade or environment is not None or not any(self.upgrade_progress(state)):
+            self.ensure_local_installation()
         endpoints = self.network_endpoints(state)
         url, key = state.get("management_url"), state.get("management_key")
         if endpoints:
@@ -1434,8 +1439,6 @@ class MemoryPanel:
         mode = payload.get("mode", previous_mode)
         if mode not in {None, "managed", "existing"}:
             raise PanelError("连接方式无效，请重新选择。")
-        if mode == "managed":
-            self.ensure_local_installation()
         if not connection_fields(plugin.config)["service_id"] and self.has_identity_data():
             raise PanelError("已有记忆数据但记忆服务识别码缺失，请恢复原插件配置后重新保存。")
         try:
@@ -1459,6 +1462,8 @@ class MemoryPanel:
                     for name in ("allowed_accounts", "control_plane_url"))
         )
         try:
+            if mode == "managed" and ("mode" in payload or not local_change):
+                self.ensure_local_installation()
             if not local_change:
                 if local_installation_supported() and mode != "existing" and state.get("management_url") and self.managed_connection(
                     state, api_url=client.url, api_key=key,

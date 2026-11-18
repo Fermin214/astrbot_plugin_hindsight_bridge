@@ -30,14 +30,14 @@ HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL=BAAI/bge-small-zh-v1.5
 HINDSIGHT_API_RERANKER_PROVIDER=local
 ```
 
-每次从同一目录启动 API，等待服务启动完成。需要停止时，在 API 窗口按 `Ctrl+C` 并等进程正常退出。
+每次从同一目录启动 API，等待服务启动完成。`PG0_HOME` 请使用只含 ASCII 字符的绝对路径。pg0 的 PostgreSQL 初始化在包含中文的路径下可能报 UTF-8 编码错误。AstrBot 的数据目录可以包含中文和空格。需要停止时，在 API 窗口按 `Ctrl+C` 并等进程正常退出。
 
 ```powershell
 $memoryRoot = Join-Path $env:LOCALAPPDATA 'AstrBot Memory'
 Set-Location -LiteralPath "$memoryRoot"
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-$env:PG0_HOME = Join-Path $memoryRoot 'pg0'
+$env:PG0_HOME = 'C:\AstrBotMemory\pg0'
 & ".\.venv\Scripts\hindsight-api.exe" --host 127.0.0.1 --port 8888
 ```
 
@@ -94,4 +94,11 @@ python "$astrbotData\plugins\astrbot_plugin_hindsight_bridge\scripts\backup.py" 
 
 在线逻辑备份或跨环境迁移时，在 PostgreSQL 保持运行且业务停写的时段使用匹配实例的 `pg_dump` 和 `pg_restore`。退出 Hindsight API 可能同时停止 pg0。升级前固定源、目标版本并完成备份，按 Hindsight 的迁移步骤操作，启动后检查原 Bank 和待处理任务。
 
-从 Linux 迁移 AstrBot 时可先沿用原 Hindsight，迁移插件配置、业务库及最新控制库，并保存「连接已有服务」。配套升级造成的暂停需先在原 Linux 部署环境核对并解除。更换后端数据库或向量模型时按后端迁移处理。
+## 从 Linux 迁移 AstrBot
+
+1. 如果配套升级已暂停读写，先在原 Linux 部署环境核对升级结果并解除暂停，或在服务仍为 1.1.0 时选择「暂不升级」。已经迁移的情况下，只有原 API 和原管理接口都可达才能在 Windows 上核对。管理接口不可达时，回原部署环境使用原连接和最新控制数据完成这一步。
+2. 停止 AstrBot，迁移插件配置、业务库和最新控制库，保留账号与平台实例 ID。若配置了 `control_state_dir`，将它改为 Windows 上对应的控制目录。
+3. 沿用同一套 Hindsight 时，保留插件配置中的 `service_id` 和密钥。若原 API 地址在 Windows 上不可达，启动前在插件配置文件中更新 `api_url`，将整数 `service_address_revision` 加 1。
+4. 启动 AstrBot，在「连接已有服务」中测试并保存已经写入配置的地址，核对原 Bank、账号和待处理任务。若切换到另一套 Hindsight，在这里填写新服务的地址和密钥。
+
+更换后端数据库或向量模型时，按 Hindsight 的数据迁移流程操作。
