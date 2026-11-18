@@ -275,7 +275,7 @@ class HindsightBridge(Star):
                     logical = platform_details(adapter.meta().name)["logical_type"]
                     if logical == "weixin_oc":
                         bot = observed.account_id
-                    elif logical == "telegram":
+                    elif logical in {"telegram", "lark"}:
                         bot = observed.bot_id
                     else:
                         bot = observed.appid

@@ -8,3 +8,4 @@ astrbot_version: ">=4.29.1"
 support_platforms:
   - weixin_oc
   - telegram
+  - lark

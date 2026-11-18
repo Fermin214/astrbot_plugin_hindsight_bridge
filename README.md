@@ -4,13 +4,13 @@
 
 连接自托管 Hindsight，让 AstrBot 在新会话中也能记得你。
 
-正常聊天，插件就会把 QQ、微信 ClawBot、Telegram 私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
+正常聊天，插件就会把 QQ、微信 ClawBot、Telegram、飞书私聊文字交给 [Hindsight](https://github.com/vectorize-io/hindsight) 整理成长期记忆，并在之后的聊天中自动查找相关内容。不同用户的记忆分开保存。
 
 在 AstrBot 插件页配置连接、添加使用者和调整记忆模式；在 Hindsight 官方管理页面（Control Plane）浏览、搜索和管理记忆。可以连接已有 Hindsight，也可以通过安装向导部署配套服务，复用 AstrBot 已配置的模型。
 
 ## 安装
 
-支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`** 和 **Hindsight 1.1.0 / 1.2.0**。平台支持 OneBot v11（`aiocqhttp`）、QQ 官方机器人 C2C（WebSocket `qq_official` 与 Webhook `qq_official_webhook`）、微信原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）和 [Telegram Bot](docs/TELEGRAM.md)（`telegram`）私聊。可连接已有服务，也可使用配套安装器同机部署。完整限制见 [兼容范围](docs/SUPPORT.md)。
+支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`** 和 **Hindsight 1.1.0 / 1.2.0**。平台支持 OneBot v11（`aiocqhttp`）、QQ 官方机器人 C2C（WebSocket `qq_official` 与 Webhook `qq_official_webhook`）、微信原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）、[Telegram Bot](docs/TELEGRAM.md)（`telegram`）和[飞书](docs/FEISHU.md)（`lark`）私聊。可连接已有服务，也可使用配套安装器同机部署。完整限制见 [兼容范围](docs/SUPPORT.md)。
 
 1. 在 AstrBot 打开 **插件管理 → 安装 → 从链接安装**，输入：
 
@@ -23,7 +23,7 @@
    - **配套服务**：生成安装命令，在运行 AstrBot 的 Linux 主机上执行。
    - **已有服务**：填写 Hindsight 1.1.0 或 1.2.0 的 API 地址、API Key 和官方管理地址，点击 **测试服务连接**，再点击 **保存连接**。
 4. 使用配套服务时，在设置中选择记忆处理模型与向量模型（可选重排模型），点击 **保存并连接**。
-5. 进入 **用户与记忆**，点击 **添加用户** 并选择机器人实例：OneBot 填写 QQ 号；QQ 官方机器人、微信 ClawBot 或 Telegram 填写私聊 `/sid` 返回的用户 UID，核对并确认机器人身份后即可开始聊天。
+5. 进入 **用户与记忆**，点击 **添加用户** 并选择机器人实例：OneBot 填写 QQ 号；QQ 官方机器人、微信 ClawBot、Telegram 或飞书填写私聊 `/sid` 返回的用户 UID，核对并确认机器人身份后即可开始聊天。
 
 配套部署的记忆处理模型与向量模型直接复用 AstrBot 已配置的供应商，无需重复填写地址与密钥。若缺少嵌入模型，可在 AstrBot「模型供应商 → 嵌入」中添加。
 
@@ -58,7 +58,7 @@
 - **清空记忆**：删除所选记忆库的全部长期记忆、知识页、来源材料与待保存记录。AstrBot 自身的本地聊天记录保持不变。
 - **状态恢复**：配套服务升级或异常留下的读写暂停，可通过 **查看暂停状态** 核对并通过后解除。完整步骤见 [使用指南](docs/USAGE.md)。
 
-使用者也可在 QQ、微信 ClawBot 或 Telegram 私聊中通过命令管理记忆：
+使用者也可在 QQ、微信 ClawBot、Telegram 或飞书私聊中通过命令管理记忆：
 
 | 想做什么 | 命令 |
 | --- | --- |

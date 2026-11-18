@@ -40,9 +40,9 @@ from astrbot.core.utils.metrics import Metric
 NAME = "astrbot_plugin_hindsight_bridge"
 DELIVERY = Path(os.environ.get("DELIVERY_ROOT", "/delivery"))
 PLATFORM = os.environ.get("ASTRBOT_PLATFORM_FIXTURE", "aiocqhttp")
-assert PLATFORM in {"aiocqhttp", "weixin_oc", "telegram"}
-INSTANCE = {"aiocqhttp": "delivery-qq", "weixin_oc": "delivery-weixin", "telegram": "delivery-telegram"}[PLATFORM]
-USER = "fixture-user@im.wechat" if PLATFORM == "weixin_oc" else "123"
+assert PLATFORM in {"aiocqhttp", "weixin_oc", "telegram", "lark"}
+INSTANCE = {"aiocqhttp": "delivery-qq", "weixin_oc": "delivery-weixin", "telegram": "delivery-telegram", "lark": "delivery-lark"}[PLATFORM]
+USER = {"weixin_oc": "fixture-user@im.wechat", "lark": "ou_fixtureuser"}.get(PLATFORM, "123")
 passed = []
 banks = set()
 operations = {}
@@ -89,6 +89,12 @@ async def wait_for(predicate):
 
 
 async def message(adapter, message_id=1):
+    if PLATFORM == "lark":
+        from lark_source_contracts import Fixture
+
+        fixture = Fixture.__new__(Fixture)
+        fixture.host, fixture.queue = adapter, adapter._event_queue
+        return await fixture.event(text="hello", mid=f"om_fixture{message_id}", offset=1)
     if PLATFORM == "telegram":
         from telegram import Update
 
@@ -143,6 +149,10 @@ async def main():
             "telegram_command_register": False, "telegram_command_auto_refresh": False,
         }, {}, asyncio.Queue())
         await adapter._start_application()
+    elif PLATFORM == "lark":
+        from lark_source_contracts import Fixture
+
+        adapter = Fixture(instance=INSTANCE).host
     elif PLATFORM == "weixin_oc":
         from astrbot.core.platform.sources.weixin_oc.weixin_oc_adapter import WeixinOCAdapter
 
@@ -254,6 +264,35 @@ async def main():
 
             assert reference(plugin.outbox, plugin.outbox.list_scopes()[0])["enabled"]
             passed.append("official_archive_upgrade_preserves_config_and_bank")
+            if PLATFORM == "lark":
+                from lark_source_contracts import Fixture
+
+                old_event = await message(adapter, 4)
+                original = adapter
+                # A fresh native adapter is how AstrBot applies credential changes.
+                adapter = Fixture(instance=INSTANCE).host
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert plugin.outbox.list_scopes()[0]["bank"] == old_bank
+                assert plugin.source_header(old_event) is None
+                assert plugin.allowed(await message(adapter, 5))
+                passed.append("native_same_lark_application_reload_preserves_bank_and_rejects_old_api_events")
+                adapter = Fixture(instance=INSTANCE, appid="cli_other", bot="ou_otherbot").host
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                plugin.refresh_permissions()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                await plugin.prepare_sources()
+                assert await plugin.panel.bot_id(INSTANCE) == plugin.source_accounts[INSTANCE]["login"].bot_id
+                assert "/cli_other/ou_otherbot" in await plugin.panel.bot_id(INSTANCE)
+                assert plugin.source_header(old_event) is None
+                adapter = original
+                context.platform_manager.platform_insts = [adapter]
+                astrbot_config["platform"] = [adapter.config]
+                await plugin.prepare_sources()
+                assert not plugin.outbox.access.authorization(INSTANCE, USER)["enabled"]
+                passed.append("native_lark_application_change_revokes_grant_and_returning_requires_confirmation")
             if PLATFORM == "telegram":
                 old_event = await message(adapter, 4)
                 await adapter._recreate_application()

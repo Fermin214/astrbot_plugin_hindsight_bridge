@@ -1,6 +1,6 @@
 # 安装与连接
 
-需要 Linux、AstrBot **4.29.1 及以上**的内置执行器 `local` 和 Hindsight **1.1.0 或 1.2.0**。QQ 私聊可使用 OneBot v11，或官方机器人的 WebSocket、Webhook；微信使用原生 [ClawBot](WEIXIN.md)；Telegram 使用原生 [Bot 私聊入口](TELEGRAM.md)。默认在同一台服务器部署 AstrBot 与 Hindsight，配套安装需要 Docker Engine 和 Compose v2。平台与模型支持见 [兼容范围](SUPPORT.md)。
+需要 Linux、AstrBot **4.29.1 及以上**的内置执行器 `local` 和 Hindsight **1.1.0 或 1.2.0**。QQ 私聊可使用 OneBot v11，或官方机器人的 WebSocket、Webhook；微信使用原生 [ClawBot](WEIXIN.md)；Telegram 使用原生 [Bot 私聊入口](TELEGRAM.md)；飞书使用原生 [`lark`](FEISHU.md) 适配器。默认在同一台服务器部署 AstrBot 与 Hindsight，配套安装需要 Docker Engine 和 Compose v2。平台与模型支持见 [兼容范围](SUPPORT.md)。
 
 ## 一、安装插件
 
@@ -69,7 +69,7 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 ## 三、添加用户
 
-1. 在 AstrBot 配置并连接 QQ、微信 ClawBot 或 Telegram 机器人，进入插件 **用户与记忆 → 添加用户**，选择平台实例。OneBot 填用户自己的 QQ 号；QQ 官方机器人、微信 ClawBot 或 Telegram 填私聊 `/sid` 返回的 UID。
+1. 在 AstrBot 配置并连接 QQ、微信 ClawBot、Telegram 或飞书机器人，进入插件 **用户与记忆 → 添加用户**，选择平台实例。OneBot 填用户自己的 QQ 号；QQ 官方机器人、微信 ClawBot、Telegram 或飞书填私聊 `/sid` 返回的 UID。
 2. 点击 **添加用户**，核对实际机器人账号后点击 **确认开通**。机器人离线时名单仍会保存，连接后在用户页点击 **确认机器人身份** 重试。
 3. 选择用户，点击 **读写记忆 / 只读记忆 / 停用记忆** 直接切换，之后正常聊天即可。
 

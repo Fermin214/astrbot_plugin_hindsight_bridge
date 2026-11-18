@@ -39,7 +39,7 @@ class PlatformProbe(Star):
         pair = (event.get_platform_id(), event.get_sender_id())
         if (
             not self.config.get("enabled", False)
-            or event.get_platform_name() not in {"weixin_oc", "telegram"}
+            or event.get_platform_name() not in {"weixin_oc", "telegram", "lark"}
             or not event.is_private_chat() or event.get_group_id()
             or pair != (self.config.get("platform_instance_id"), self.config.get("user_id"))
         ):
@@ -74,6 +74,8 @@ class PlatformProbe(Star):
             })
             if event.get_platform_name() == "telegram":
                 report["python_telegram_bot"] = importlib.metadata.version("python-telegram-bot")
+            if event.get_platform_name() == "lark":
+                report["lark_oapi"] = importlib.metadata.version("lark-oapi")
             path = self.directory / (str(time.time_ns()) + "-" + secrets.token_hex(4) + ".json")
             self.write(path, json.dumps(report, ensure_ascii=True, indent=2).encode("utf-8"))
         except Exception as error:

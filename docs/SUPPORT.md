@@ -11,7 +11,8 @@
 | QQ 接入 | OneBot v11（`aiocqhttp`）、官方 WS（`qq_official`）、官方 Webhook（`qq_official_webhook`） |
 | 微信接入 | 原生 ClawBot（`weixin_oc`），配置与消息范围见 [微信接入](WEIXIN.md) |
 | Telegram 接入 | 原生 Bot（`telegram`），配置与实体限制见 [Telegram 接入](TELEGRAM.md) |
-| 对话类型 | OneBot、微信 ClawBot、Telegram Bot 私聊纯文字；官方 QQ 机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
+| 飞书接入 | 原生 `lark`，支持长连接和 Webhook，配置与消息范围见 [飞书接入](FEISHU.md) |
+| 对话类型 | OneBot、微信 ClawBot、Telegram Bot、飞书私聊纯文字；官方 QQ 机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
 | 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 自定义 bridge、默认 bridge、host 网络，Hindsight 运行于 Linux Docker |
 | 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
 

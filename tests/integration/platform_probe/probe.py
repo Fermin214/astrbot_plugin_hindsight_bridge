@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import math
 from collections.abc import Mapping
 from datetime import datetime
@@ -99,6 +100,14 @@ def producer(event, adapter, key):
             "account": identity(bot_id, key),
             "event_client_matches": getattr(event, "client", None) is client,
         }
+    if host == "lark":
+        return {
+            "available": bool(getattr(adapter, "bot_open_id", None)),
+            "application": identity(getattr(adapter, "appid", None), key),
+            "account": identity(getattr(adapter, "bot_open_id", None), key),
+            "event_client_matches": getattr(event, "bot", None) is getattr(adapter, "lark_api", None),
+            "self_matches_account": event.get_self_id() == getattr(adapter, "bot_open_id", None),
+        }
     return {"available": False}
 
 
@@ -183,6 +192,31 @@ def project(event, adapter, key):
         report["item_count"] = len(items) if isinstance(items, list) else None
         report["text_transform_matches_host"] = "\n".join(texts).strip() == host_text
         report["text_components_match"] = texts == plain
+    elif host == "lark":
+        names = ("message_id", "create_time", "update_time", "chat_id", "chat_type",
+                 "message_type", "root_id", "parent_id", "thread_id", "mentions", "content")
+        report["fields"] = {name: field(getattr(raw, name, None)) for name in names}
+        report["identifiers"] = {
+            name: identity(getattr(raw, name, None), key)
+            for name in ("message_id", "chat_id")
+        }
+        report["raw_id_matches_host"] = getattr(raw, "message_id", None) == message.message_id
+        report["private_chat_type"] = getattr(raw, "chat_type", None) == "p2p"
+        report["plain_text_type"] = getattr(raw, "message_type", None) == "text"
+        report["has_reference"] = bool(getattr(raw, "parent_id", None) or getattr(raw, "root_id", None))
+        report["has_mentions"] = bool(getattr(raw, "mentions", None))
+        timestamp = getattr(raw, "create_time", None)
+        if isinstance(timestamp, str) and timestamp.isascii() and timestamp.isdecimal() and len(timestamp) <= 16:
+            timestamp = int(timestamp)
+        report["raw_timestamp_seconds"] = timestamp / 1000 if type(timestamp) is int else None
+        content = getattr(raw, "content", None)
+        try:
+            parsed = json.loads(content) if isinstance(content, str) and len(content) <= 64_000 else None
+        except (ValueError, RecursionError):
+            parsed = None
+        text = parsed.get("text") if isinstance(parsed, dict) else None
+        report["text_transform_matches_host"] = isinstance(text, str) and text.strip() == host_text
+        report["text_components_match"] = isinstance(text, str) and plain == [text.strip()]
     elif host == "telegram":
         report["update_fields"] = {
             name: getattr(raw, name, None) is not None for name in TG_UPDATES

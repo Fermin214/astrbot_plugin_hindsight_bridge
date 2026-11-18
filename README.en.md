@@ -4,13 +4,13 @@
 
 Connect self-hosted Hindsight to let AstrBot remember you across new conversations.
 
-During normal conversations, the plugin sends private chat text from QQ, WeChat ClawBot, and Telegram to [Hindsight](https://github.com/vectorize-io/hindsight), organizing it into long-term memories and automatically retrieving relevant context in future conversations. Memories are isolated per user.
+During normal conversations, the plugin sends private chat text from QQ, WeChat ClawBot, Telegram, and Feishu to [Hindsight](https://github.com/vectorize-io/hindsight), organizing it into long-term memories and automatically retrieving relevant context in future conversations. Memories are isolated per user.
 
 Manage connections, add users, and adjust memory modes directly in the AstrBot plugin panel. Browse, search, and manage memory contents in Hindsight's official Control Plane. You can connect to an existing Hindsight instance or deploy a companion service via the setup wizard, reusing models already configured in AstrBot.
 
 ## Installation
 
-Supports **Linux server environments**, **AstrBot 4.29.1+ with the built-in `local` executor**, and **Hindsight 1.1.0 / 1.2.0**. Platforms supported: OneBot v11 (`aiocqhttp`), QQ Official Bot C2C (WebSocket `qq_official` and Webhook `qq_official_webhook`), WeChat native [ClawBot](docs/WEIXIN.md) (`weixin_oc`), and [Telegram Bot](docs/TELEGRAM.md) (`telegram`) private chats. You can connect an existing service or use the companion installer for single-host deployment. Full requirements are listed in [Compatibility](docs/SUPPORT.md).
+Supports **Linux server environments**, **AstrBot 4.29.1+ with the built-in `local` executor**, and **Hindsight 1.1.0 / 1.2.0**. Platforms supported: OneBot v11 (`aiocqhttp`), QQ Official Bot C2C (WebSocket `qq_official` and Webhook `qq_official_webhook`), WeChat native [ClawBot](docs/WEIXIN.md) (`weixin_oc`), [Telegram Bot](docs/TELEGRAM.md) (`telegram`), and [Feishu](docs/FEISHU.md) (`lark`) private chats. You can connect an existing service or use the companion installer for single-host deployment. Full requirements are listed in [Compatibility](docs/SUPPORT.md).
 
 1. In AstrBot, navigate to **Plugins → Install → Install from URL**, and enter:
 
@@ -23,7 +23,7 @@ Supports **Linux server environments**, **AstrBot 4.29.1+ with the built-in `loc
    - **Companion Service**: Generate the installation command and run it in the terminal of the Linux host running AstrBot.
    - **Existing Service**: Enter the API URL, API Key, and official Control Plane URL for your Hindsight 1.1.0 or 1.2.0 instance, click **Test Service Connection**, then **Save Connection**.
 4. When using the companion service, select the memory processing model and embedding model (reranker model is optional) in settings, then click **Save and Connect**.
-5. Go to **Users & Memories**, click **Add User**, and select the bot instance: enter the QQ number for OneBot, or the user UID returned by `/sid` in private chat for QQ Official Bot, WeChat ClawBot, or Telegram. Verify and confirm the bot identity to start chatting.
+5. Go to **Users & Memories**, click **Add User**, and select the bot instance: enter the QQ number for OneBot, or the user UID returned by `/sid` in private chat for QQ Official Bot, WeChat ClawBot, Telegram, or Feishu. Verify and confirm the bot identity to start chatting.
 
 The companion deployment reuses providers already configured in AstrBot for memory processing and embeddings—no need to re-enter endpoints or keys. If embedding models are missing, add one under AstrBot's "Model Providers → Embedding".
 
@@ -58,7 +58,7 @@ Copy the official management URL from **Plugin Settings → Connection & Access*
 - **Clear Memory**: Deletes all long-term memories, knowledge pages, source materials, and pending records for the selected memory bank. AstrBot's own local conversation history remains intact.
 - **State Recovery**: If a companion upgrade or service disruption leaves read/write operations paused, inspect the issue under **View Pause Status** and resume once checks pass. See [User Guide](docs/USAGE.md) for full instructions.
 
-Users can also manage their memories via private chat commands in QQ, WeChat ClawBot, or Telegram:
+Users can also manage their memories via private chat commands in QQ, WeChat ClawBot, Telegram, or Feishu:
 
 | Goal | Command |
 | --- | --- |

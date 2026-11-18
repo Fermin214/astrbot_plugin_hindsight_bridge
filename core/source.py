@@ -34,6 +34,10 @@ PLATFORMS = {
         "weixin_oc", "ClawBot 用户 UID", "填写微信私聊 /sid 中的用户 UID",
         supported=True,
     ),
+    "lark": Platform(
+        "lark", "用户 OpenID", "填写飞书私聊 /sid 中的用户 UID（ou_ 开头）",
+        supported=True,
+    ),
     "telegram": Platform(
         "telegram", "Telegram 用户 ID", "填写 Telegram 私聊 /sid 中的用户 UID",
         True, True,
@@ -43,6 +47,7 @@ TIME_SOURCES = {
     "aiocqhttp": "onebot.time",
     "qq_official": "qq_official.timestamp",
     "weixin_oc": "weixin_oc.create_time_ms",
+    "lark": "lark.create_time",
     "telegram": "telegram.message.date",
 }
 # Host queue timestamps use this process's wall clock, unlike platform clocks.
@@ -78,12 +83,18 @@ def valid_user_id(host_type, value):
     # UMO uses ':' as a field separator; IDs must not select a different profile.
     if ":" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
         return False
+    if host_type == "lark":
+        return value.startswith("ou_") and len(value) > 3 and value == value.strip()
     return not contract.numeric or (value.isascii() and value.isdecimal() and len(value) <= 20)
 
 
 def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=None) -> Incoming | None:
     """Validate original identity, time and text for both commands and capture."""
     host_type = event.get_platform_name()
+    if host_type == "lark":
+        from .lark_source import header
+
+        return header(event, plain_type, wake_prefixes, adapter, binding)
     if host_type in {"qq_official", "qq_official_webhook"}:
         from .qq_source import header
 
@@ -180,6 +191,16 @@ def native_snapshot(event, plain_type, command_prefixes=("/",)) -> Incoming | No
 
 def source_identity(event, incoming, adapter=None, *, authorization_revision=0, binding=None):
     """OneBot's original recipient is producer evidence, including queued events."""
+    if incoming.platform_type == "lark":
+        from .lark_source import bound_login
+
+        login = bound_login(event, adapter, binding)
+        if login is None or incoming.bot_id != login.bot_id:
+            return None
+        return SourceIdentity(
+            "lark", incoming.platform_instance_id, "lark",
+            login.bot_id, login.api, authorization_revision,
+        )
     if incoming.platform_type == "qq_official":
         from .qq_source import bound_login
 
@@ -226,6 +247,10 @@ def source_identity(event, incoming, adapter=None, *, authorization_revision=0, 
 def native_login(adapter):
     """Read each native adapter's login without keeping its credentials."""
     try:
+        if adapter.meta().name == "lark":
+            from .lark_source import native_login as lark_login
+
+            return lark_login(adapter)
         if adapter.meta().name == "weixin_oc":
             from .weixin_source import native_login as weixin_login
 
@@ -263,6 +288,11 @@ async def prepare_bot_identity(context, platform):
 
         login = native_login(adapter)
         return login.account_id if login else ""
+    if record.get("type") == "lark":
+        from .lark_source import native_login
+
+        login = native_login(adapter)
+        return login.bot_id if login and login.appid == record.get("app_id") else ""
     if record.get("type") == "telegram":
         from .telegram_source import native_login
 

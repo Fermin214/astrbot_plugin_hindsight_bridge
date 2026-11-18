@@ -16,6 +16,8 @@ docker compose -f /tmp/bridge-weixin/compose.yaml up -d
 
 Telegram 使用 `--platform telegram`、另一个输出目录和端口。工具只接受新目录，为每套环境生成独立名称、数据目录和初始管理密码。密码在输出目录的 `.env` 中，登录用户名为 `astrbot`。Docker 端口绑定 `127.0.0.1`；远程访问使用 SSH 隧道。
 
+飞书使用 `--platform lark`，例如输出目录 `/tmp/bridge-lark`、端口 `6190`。应用创建和事件订阅见[飞书接入](FEISHU.md)。
+
 没有 Docker 时，在已安装官方 AstrBot 及其依赖的独立 Python 环境启动：
 
 ```bash
@@ -25,7 +27,7 @@ sh /tmp/bridge-weixin/start-native.sh \
 
 此入口通过 `ASTRBOT_ROOT` 选择专属数据目录，Dashboard 使用指定的本机端口。两种启动方式使用同一份测试数据，一次只启动其中一种。
 
-在 AstrBot 平台管理中添加原生微信 ClawBot（`weixin_oc`）或 Telegram（`telegram`），由宿主管理扫码、Bot Token 和网络。测试用户先私聊 `/sid`，记录平台实例 ID 与 UID。
+在 AstrBot 平台管理中添加原生微信 ClawBot（`weixin_oc`）、Telegram（`telegram`）或飞书（`lark`），由宿主管理登录、凭证和网络。测试用户先私聊 `/sid`，记录平台实例 ID 与 UID。
 
 ## 单次字段采样
 
@@ -46,6 +48,7 @@ sh /tmp/bridge-weixin/start-native.sh \
 | --- | --- |
 | 微信 ClawBot | `from_user_id`、`to_user_id`、原始 `message_id`、`create_time_ms`、方向、状态、文字条目与组件转换 |
 | Telegram | 普通 `Update.message`、数字 Bot ID、事件客户端、chat/发送者关系、消息 ID、带时区的 date、实体与正文转换 |
+| 飞书 | 原生 API 客户端、应用与机器人 OpenID、SDK 消息 ID、毫秒 `create_time`、单聊文字类型、引用与组件转换 |
 
 ## Bridge 业务流程
 
