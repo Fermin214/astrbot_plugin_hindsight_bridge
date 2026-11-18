@@ -71,16 +71,16 @@ def publish_control(journal, latest, manifest):
                 saved_revision = int(saved_settings["revision"])
                 if incoming_revision < saved_revision:
                     raise ValueError(f"latest_control_revision_regression: {latest}")
-                if incoming_revision == saved_revision:
-                    same_content = (
-                        saved.execute("PRAGMA user_version").fetchone()
-                        == candidate.execute("PRAGMA user_version").fetchone()
-                        and sorted(saved.iterdump()) == sorted(candidate.iterdump())
-                    )
-                    if same_content:
-                        return
-                    archived = archive_control(incoming, latest)
-                    raise ValueError(f"latest_control_revision_conflict: {latest}; {archived}")
+                same_revision = incoming_revision == saved_revision
+                if same_revision and (
+                    saved.execute("PRAGMA user_version").fetchone()
+                    == candidate.execute("PRAGMA user_version").fetchone()
+                    and sorted(saved.iterdump()) == sorted(candidate.iterdump())
+                ):
+                    return
+            if same_revision:
+                archived = archive_control(incoming, latest)
+                raise ValueError(f"latest_control_revision_conflict: {latest}; {archived}")
             archive_control(previous, latest)
         incoming.replace(latest)
 

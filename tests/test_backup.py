@@ -69,7 +69,7 @@ class BackupTests(unittest.TestCase):
 
     def test_latest_control_failure_keeps_private_snapshot_and_allows_retry(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             latest, output = root / "latest.sqlite3", root / "output"
             BACKUP.backup(*self.fixture(root / "original"), root / "first", latest)
             fixture = self.fixture(root / "next", revision=10)

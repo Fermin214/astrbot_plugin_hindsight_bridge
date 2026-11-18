@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       host: ${{ steps.scope.outputs.host }}
       models: ${{ steps.scope.outputs.models }}
