@@ -227,8 +227,16 @@ async def verify(acceptance, page, frame, bank, short):
     assert "HB-FEEDBACK-LONG complete paragraph." not in payloads
     assert "neutral neutral" not in payloads
     await page.set_viewport_size({"width": 390, "height": 844})
-    assert await frame.locator("body").evaluate("() => document.documentElement.scrollWidth <= innerWidth + 1")
-    await page.screenshot(path=str(acceptance.runtime.parents[3] / "multiple-pages-phone.png"), full_page=True)
+    try:
+        await until(lambda: frame.locator("body").evaluate(
+            "() => innerWidth <= 390 && document.documentElement.scrollWidth <= innerWidth + 1"
+        ), timeout=10)
+    finally:
+        acceptance.report["measurements"]["multiple_pages_phone"] = await frame.locator("body").evaluate(
+            "() => ({viewport: innerWidth, document: document.documentElement.scrollWidth})"
+        )
+        acceptance.save()
+        await page.screenshot(path=str(acceptance.runtime.parents[3] / "multiple-pages-phone.png"), full_page=True)
     acceptance.passed("native_phone_layout_has_no_horizontal_overflow_with_ordered_selection")
     await page.set_viewport_size({"width": 1280, "height": 900})
     prepared = await acceptance.action(identifier, "forget_prepare")
