@@ -482,6 +482,25 @@ class Feedback(Acceptance):
                 if self.settings.get("recovery_only"):
                     await self.action(identifier, "mode", mode="active")
                     await asyncio.sleep(1.1)
+                    await backup("before-delivery")
+                    before_revision = database(latest_control, "SELECT value FROM settings WHERE key='revision'")
+                    before_requests = {row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests")}
+                    await self.bot.chat(ALICE, "A synthetic completed delivery between backups.")
+
+                    async def delivered():
+                        return {
+                            row["operation_id"] for row in database(
+                                control, "SELECT operation_id FROM requests WHERE bank=? AND dispatched=1 AND accepted=1", (bank,),
+                            )
+                        } - before_requests
+
+                    delivered_requests = await until(delivered, timeout=60, label="accepted delivery after the first backup")
+                    await backup("after-delivery")
+                    assert database(latest_control, "SELECT value FROM settings WHERE key='revision'") == before_revision
+                    assert delivered_requests <= {
+                        row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests WHERE accepted=1")
+                    }
+                    self.passed("consecutive_backups_include_native_delivery_without_control_revision_change")
                     await self.control("stop_hindsight")
                     try:
                         await self.bot.chat(ALICE, "A synthetic pending delivery in the old business snapshot.")

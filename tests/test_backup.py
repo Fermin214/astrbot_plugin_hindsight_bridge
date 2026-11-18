@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from plugins.astrbot_plugin_hindsight_bridge.core.control import Control
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
 
 
@@ -23,23 +25,29 @@ SPEC.loader.exec_module(BACKUP)
 class BackupTests(unittest.TestCase):
     def fixture(self, root, *, deployment="fixture", control_id="control", revision=9, request="X"):
         data, control = root / "data", root / "control"
-        for directory, name in ((data, "runtime.sqlite3"), (control, "control.sqlite3")):
-            directory.mkdir(parents=True)
-            with closing(sqlite3.connect(directory / name)) as db, db:
-                db.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
-                db.executemany("INSERT INTO settings VALUES (?,?)", [
-                    ("deployment_id", deployment), ("control_id", control_id),
-                    ("control_revision" if directory == data else "revision", str(revision)),
-                ])
-                if directory == control:
-                    db.execute("CREATE TABLE requests (id TEXT PRIMARY KEY)")
-                    if request is not None:
-                        db.execute("INSERT INTO requests VALUES (?)", (request,))
+        data.mkdir(parents=True)
+        with closing(sqlite3.connect(data / "runtime.sqlite3")) as db, db:
+            db.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+            db.executemany("INSERT INTO settings VALUES (?,?)", [
+                ("deployment_id", deployment), ("control_id", control_id), ("control_revision", str(revision)),
+            ])
+        with closing(Control(control, deployment)) as journal:
+            with journal.transaction():
+                journal.db.executemany("UPDATE settings SET value=? WHERE key=?", (
+                    (control_id, "control_id"), (str(revision), "revision"),
+                ))
+            if request is not None:
+                self.record(journal, request, dispatched=True)
         return data, control
+
+    def record(self, journal, operation, *, digest="digest", **flags):
+        journal.record_request({
+            "operation_id": operation, "connection_id": "connection", "bank": "bank", "payload_sha256": digest,
+        }, "owner", **flags)
 
     def control_state(self, path):
         with closing(BACKUP.connect(path)) as db:
-            return BACKUP.settings(db)["revision"], db.execute("SELECT id FROM requests").fetchall()
+            return BACKUP.settings(db)["revision"], db.execute("SELECT operation_id FROM requests").fetchall()
 
     def test_latest_control_preserves_conflicts_and_previous_revision(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -54,18 +62,81 @@ class BackupTests(unittest.TestCase):
                 ("recreated", {"control_id": "other"}, "latest_control_identity_mismatch"),
                 ("older", {"revision": 3}, "latest_control_revision_regression"),
                 ("fork", {"request": "Y"}, "latest_control_revision_conflict"),
+                ("higher-fork", {"revision": 10, "request": None}, "latest_control_evidence_conflict"),
             ):
-                output = root / ("output-" + name)
+                output = root / f"output-{name}"
+                source = self.fixture(root / name, **fields)
                 with self.assertRaisesRegex(ValueError, error):
-                    BACKUP.backup(*self.fixture(root / name, **fields), output, latest)
+                    BACKUP.backup(*source, output, latest)
                 self.assertFalse(output.exists())
                 self.assertEqual(self.control_state(latest), ("9", [("X",)]))
-            BACKUP.backup(*self.fixture(root / "clone", revision=10, request=None), root / "higher", latest)
-            self.assertEqual(self.control_state(latest), ("10", []))
+                if name.endswith("fork"):
+                    archives = set(latest.parent.glob("*.archive-*/control.sqlite3"))
+                    with self.assertRaisesRegex(ValueError, error) as conflict:
+                        BACKUP.backup(*source, output, latest)
+                    self.assertEqual(set(latest.parent.glob("*.archive-*/control.sqlite3")), archives)
+                    self.assertIn(str(latest.resolve()), str(conflict.exception))
+                    self.assertTrue(any(str(path.resolve()) in str(conflict.exception) for path in archives))
+            BACKUP.backup(*self.fixture(root / "advance", revision=10), root / "higher", latest)
+            self.assertEqual(self.control_state(latest), ("10", [("X",)]))
             archives = latest.parent.glob("*.archive-*/control.sqlite3")
             self.assertCountEqual([self.control_state(path) for path in archives], [
-                ("9", [("X",)]), ("9", [("Y",)]),
+                ("9", [("X",)]), ("9", [("Y",)]), ("10", []),
             ])
+
+    def test_delivery_progress_can_publish_over_existing_control_format(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, control = self.fixture(root / "桥接 存档", request=None)
+            latest = root / "备份" / "control.sqlite3"
+            with closing(sqlite3.connect(control / "control.sqlite3")) as db, db:
+                db.execute("DROP TABLE reflection_requests")
+                db.execute("PRAGMA user_version=5")
+            BACKUP.backup(data, control, root / "original", latest)
+            with closing(Control(control, "fixture", required=True)) as journal:
+                self.record(journal, "X", dispatched=True)
+                BACKUP.backup(data, control, root / "dispatch", latest)
+                self.record(journal, "X", accepted=True, cancel=True)
+                BACKUP.backup(data, control, root / "complete", latest)
+                self.assertEqual(journal.setting("revision"), "9")
+            with closing(BACKUP.connect(latest)) as db:
+                self.assertEqual(db.execute("SELECT dispatched,accepted,cancel_intent FROM requests").fetchone(), (1, 1, 1))
+            self.assertTrue((root / "complete/runtime.sqlite3").is_file())
+            for label, digest, flags in (
+                ("changed-digest", "other", {"dispatched": True, "accepted": True, "cancel": True}),
+                ("lost-acceptance", "digest", {"dispatched": True, "cancel": True}),
+            ):
+                with self.subTest(label=label):
+                    clone_data, clone_control = self.fixture(root / label, revision=10, request=None)
+                    with closing(Control(clone_control, "fixture", required=True)) as clone:
+                        self.record(clone, "X", digest=digest, **flags)
+                    with self.assertRaisesRegex(ValueError, "latest_control_evidence_conflict \\(requests\\)"):
+                        BACKUP.backup(clone_data, clone_control, root / f"snapshot-{label}", latest)
+
+    def test_higher_revision_clone_without_erasure_does_not_replace_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, control = self.fixture(root / "original")
+            latest = root / "backup" / "control.sqlite3"
+            clone = root / "clone"
+            clone.mkdir()
+            with closing(Control(control, "fixture", required=True)) as journal:
+                owner = journal.ensure_account("connection", Scope("fixture", "onebot", "bot", "1", "2"), 0)
+                BACKUP.snapshot(journal.db, clone / "control.sqlite3")
+                erased = journal.forget("connection", owner["owner_id"])
+                BACKUP.backup(data, control, root / "after-forget", latest)
+            with closing(Control(clone, "fixture", required=True)) as journal:
+                journal.set_mode("connection", owner["owner_id"], "paused")
+                journal.set_mode("connection", owner["owner_id"], "active")
+                self.assertGreater(int(journal.setting("revision")), 11)
+                with self.assertRaisesRegex(ValueError, "latest_control_evidence_conflict \\(erasures\\)"):
+                    BACKUP.backup(data, clone, root / "from-clone", latest)
+            with closing(BACKUP.connect(latest)) as db:
+                self.assertEqual(db.execute("SELECT forget_id,new_bank FROM erasures").fetchone(), (
+                    erased["forget_id"], erased["new_bank"],
+                ))
+            archived, = latest.parent.glob("*.archive-*/control.sqlite3")
+            self.assertEqual(self.control_state(archived), ("12", [("X",)]))
 
     def test_latest_control_failure_keeps_private_snapshot_and_allows_retry(self):
         with tempfile.TemporaryDirectory() as temporary:
