@@ -351,6 +351,13 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("assistant_capture"):
+                    from reading_e2e import verify_assistant_capture
+
+                    await verify_assistant_capture(self, frame)
+                    self.report.update(complete=True, acceptance_scope="native primary assistant retention in automatic and tool reading modes")
+                    self.save()
+                    return
                 if self.settings.get("reflect"):
                     from reflection_e2e import verify
 

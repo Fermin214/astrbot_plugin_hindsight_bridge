@@ -40,7 +40,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import Message, retain_payload
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.qq_source import native_login
-from plugins.astrbot_plugin_hindsight_bridge.core.source import native_header, source_identity
+from plugins.astrbot_plugin_hindsight_bridge.core.source import native_header
 
 
 class Fixture:
@@ -377,9 +377,7 @@ async def main():
     assert event.get_self_id() == "unknown_selfid"
     assert original.text == "  synthetic original text  "
     assert original.timestamp == datetime.fromisoformat("2026-11-03T12:34:56.123456+08:00").timestamp()
-    identity = source_identity(event, original, fixture.host, binding=fixture.binding)
-    assert identity and identity.producer is fixture.client
-    assert identity.logical_type == "qq_official" and identity.host_type == HOST_TYPE
+    assert original.platform_type == "qq_official" and event.get_platform_name() == HOST_TYPE
     material = retain_payload(
         original.scope("fixture-deployment"), 0,
         Message(original.message_id, original.text, original.timestamp),

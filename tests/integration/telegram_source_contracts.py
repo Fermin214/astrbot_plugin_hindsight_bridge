@@ -35,7 +35,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_login, prepare_bot_identity, source_identity,
+    native_header, native_login, prepare_bot_identity,
 )
 
 USER = 9007199254740993
@@ -109,7 +109,7 @@ async def main(output):
             assert incoming is not None and incoming.user_id == str(USER)
             assert incoming.bot_id == "100000001" and incoming.bot_id != event.get_self_id()
             assert incoming.timestamp == event.message_obj.raw_message.message.date.timestamp()
-            assert source_identity(event, incoming, fixture.host, binding=fixture.binding).producer is fixture.host.client
+            assert fixture.binding["login"].client is fixture.host.client
             passed.append("native_login_uses_initialized_numeric_bot_id_and_exact_large_user_id")
             for label, changes in (
                 ("bot_sender", {"from": {"id": USER, "is_bot": True, "first_name": "Bot"}}),

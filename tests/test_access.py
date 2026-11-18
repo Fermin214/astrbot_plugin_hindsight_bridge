@@ -20,7 +20,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import Message, retain_payload
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_snapshot, platform_details, source_identity, valid_user_id,
+    native_header, platform_details, valid_user_id,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
@@ -54,6 +54,13 @@ class AuthorizationTests(unittest.TestCase):
 
     def test_selection_requires_explicit_activation_and_old_config_does_not_reactivate(self):
         pair = [("onebot", "2001")]
+        self.assertFalse(self.queue.accepts(self.incoming))
+        with self.assertRaisesRegex(QueueError, "permissions_not_synced"):
+            self.queue.capture(self.incoming, "conversation")
+        self.queue.sync_permissions([])
+        self.assertFalse(self.queue.accepts(self.incoming))
+        with self.assertRaisesRegex(QueueError, "scope_not_active"):
+            self.queue.capture(self.incoming, "conversation")
         self.queue.sync_permissions(pair)
         self.assertFalse(self.queue.accepts(self.incoming))
         self.authorize()
@@ -81,14 +88,19 @@ class AuthorizationTests(unittest.TestCase):
         self.assertTrue(self.queue.accepts(replace(self.incoming, timestamp=201, received_at=201.5)))
 
     def test_legacy_identity_frozen_requests_and_operation_ids_survive_upgrade(self):
+        self.authorize()
         before = self.queue.capture(self.incoming, "conversation")
         frozen = dict(self.queue.get(before.task_id))
         original_scope = dict(self.queue.scope(self.incoming))
-        self.queue.sync_permissions([("onebot", "2001")])
-        self.assertTrue(self.queue.accepts(self.incoming))
+        with self.queue.control.transaction():
+            self.queue.control.db.execute("DELETE FROM authorizations")
+            self.queue.control.db.execute("DELETE FROM settings WHERE key='authorization_migration:service'")
         self.queue.close()
         self.open()
+        with self.assertRaisesRegex(QueueError, "permissions_not_synced"):
+            self.queue.capture_assistant(before.task_id, "new reply")
         self.queue.sync_permissions([("onebot", "2001")])
+        self.assertTrue(self.queue.accepts(self.incoming))
         after_scope = self.queue.scope(self.incoming)
         for field in ("scope_id", "identity_json", "bank", "generation", "accept_from"):
             self.assertEqual(after_scope[field], original_scope[field])
@@ -448,7 +460,6 @@ class SourceContracts(unittest.TestCase):
         header = native_header(event, self.Plain)
         self.assertEqual(header.timestamp, 100)
         self.assertEqual(header.message_id, "30")
-        self.assertIsNone(native_snapshot(event, self.Plain))
         event.message_obj.raw_message["time"] = None
         self.assertIsNone(native_header(event, self.Plain))
 
@@ -496,7 +507,6 @@ class SourceContracts(unittest.TestCase):
 
     def test_old_event_producer_is_not_assigned_current_client(self):
         event = self.event("hello")
-        incoming = native_header(event, self.Plain)
         adapter = SimpleNamespace(
             get_client=lambda: event.bot,
             meta=lambda: SimpleNamespace(id=event.get_platform_id(), name="aiocqhttp"),
@@ -504,11 +514,11 @@ class SourceContracts(unittest.TestCase):
         with patch.object(
             onebot_source, "native_types", return_value=(SimpleNamespace, SimpleNamespace, type(event.bot), dict),
         ):
-            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+            self.assertEqual(native_header(event, self.Plain, adapter=adapter).bot_id, "10")
             adapter.get_client = lambda: object()
-            self.assertIsNone(source_identity(event, incoming, adapter))
+            self.assertIsNone(native_header(event, self.Plain, adapter=adapter))
             adapter.get_client = lambda: event.bot
-            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+            self.assertEqual(native_header(event, self.Plain, adapter=adapter).bot_id, "10")
 
     def test_unreleased_platforms_and_opaque_ids_do_not_inherit_onebot_rules(self):
         self.assertTrue(platform_details("aiocqhttp")["supported"])

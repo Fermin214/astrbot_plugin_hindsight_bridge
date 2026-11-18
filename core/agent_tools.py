@@ -108,6 +108,30 @@ def incoming_digest(incoming, deployment):
     ]))
 
 
+def request_marker():
+    return "<hb-read-request:" + secrets.token_hex(12) + ">\n"
+
+
+def matches_request(request, prefix, context):
+    prompt = getattr(request, "prompt", None)
+    if not prefix or not isinstance(prompt, str) or not prompt.strip():
+        return False
+    for message in getattr(context, "messages", []):
+        if getattr(message, "role", None) != "user":
+            continue
+        parts = getattr(message, "content", [])
+        if not any(getattr(part, "text", None) == prompt and not getattr(part, "_no_save", False) for part in parts):
+            continue
+        if any(getattr(part, "_no_save", False) and getattr(part, "text", "").startswith(prefix) for part in parts):
+            return True
+    return False
+
+
+def belongs_to_event(plugin, event, context):
+    actual = getattr(context, "context", None)
+    return getattr(actual, "context", None) is plugin.context and getattr(actual, "event", None) is event
+
+
 @dataclass
 class ToolTurn:
     guard: ReadGuard
@@ -142,7 +166,7 @@ class MemoryTools:
         self.owned = {}
         self.manager = None
         self.closed = False
-        self.turns = weakref.WeakKeyDictionary()
+        self.tool_turns = weakref.WeakKeyDictionary()
         self.observed = {}
         self.outcomes = {}
         self.sequence = 0
@@ -177,7 +201,7 @@ class MemoryTools:
             self.owned[name] = tool
 
     def invalidate(self):
-        self.turns.clear()
+        self.tool_turns.clear()
         self.observed.clear()
         self.outcomes.clear()
         self.plugin.reflection.outcomes.clear()
@@ -242,7 +266,7 @@ class MemoryTools:
         if original is None:
             return None
         try:
-            turn = self.turns.get(event)
+            turn = self.tool_turns.get(event)
         except TypeError:
             turn = None
         if not enable:
@@ -280,11 +304,10 @@ class MemoryTools:
         return getter("selected_provider") if getter else None
 
     def begin(self, event, context):
-        turn = self.turns.get(event)
+        turn = self.tool_turns.get(event)
         if turn is None:
             return
-        actual = getattr(context, "context", None)
-        if getattr(actual, "context", None) is not self.plugin.context or getattr(actual, "event", None) is not event:
+        if not belongs_to_event(self.plugin, event, context):
             return
         if not self.matches_request(turn, context):
             return
@@ -297,41 +320,25 @@ class MemoryTools:
         turn.context_ref = weakref.ref(context)
 
     def finish(self, event, context):
-        turn = self.turns.get(event)
+        turn = self.tool_turns.get(event)
         if turn is None:
             return True
-        actual = getattr(context, "context", None)
-        if getattr(actual, "context", None) is not self.plugin.context or getattr(actual, "event", None) is not event:
+        if not belongs_to_event(self.plugin, event, context):
             return False
         if (turn.context_ref and turn.context_ref() is context) or (
             turn.context_ref is None and self.matches_request(turn, context)
         ):
             self.retire(turn)
-            self.turns.pop(event, None)
+            self.tool_turns.pop(event, None)
             return True
         return False
 
     @staticmethod
     def matches_request(turn, context):
-        if not turn.prefix:
-            return False
-        request = turn.request_ref()
-        prompt = getattr(request, "prompt", None)
-        if not isinstance(prompt, str) or not prompt.strip():
-            return False
-        for message in getattr(context, "messages", []):
-            if getattr(message, "role", None) != "user":
-                continue
-            parts = getattr(message, "content", [])
-            if not any(getattr(part, "text", None) == prompt and not getattr(part, "_no_save", False) for part in parts):
-                continue
-            for part in getattr(message, "content", []):
-                if getattr(part, "_no_save", False) and getattr(part, "text", "").startswith(turn.prefix):
-                    return True
-        return False
+        return matches_request(turn.request_ref(), turn.prefix, context)
 
     def request_prefix(self, event):
-        turn = self.turns.get(event)
+        turn = self.tool_turns.get(event)
         return turn.prefix if turn else ""
 
     def retire(self, turn):
@@ -340,7 +347,7 @@ class MemoryTools:
 
     def remove_turn_tools(self, turn, names):
         event, request = turn.event_ref(), turn.request_ref()
-        if event is not None and self.turns.get(event) is turn:
+        if event is not None and self.tool_turns.get(event) is turn:
             if request is not None:
                 original = getattr(request, "func_tool", None)
                 if original is not None:
@@ -354,7 +361,7 @@ class MemoryTools:
                 source.tools = [tool for tool in source.tools if tool.name not in names or not self.own_entry(tool)]
         turn.names = turn.names - names
 
-    async def prepare(self, event, request, incoming, scope, original):
+    async def prepare(self, event, request, incoming, scope, original, *, marker=""):
         guard = ReadGuard.freeze(self.plugin, scope)
         options = read_options(guard.queue, scope)
         reflect_options = reflection.runtime_options(guard.queue, scope)
@@ -370,8 +377,10 @@ class MemoryTools:
             request_ref = weakref.ref(request)
             available = bool(supported and self.eligible_tools(original))
             reflect_available = bool(supported and self.eligible_tools(original, frozenset({REFLECT_NAME})))
-        except Exception:  # Capability discovery must not interrupt the existing automatic path.
+        except TimeoutError:
             pass
+        except Exception as exc:
+            self.plugin.warning_log.warning("tool_capability_" + type(exc).__name__)
         if not guard.valid(self.plugin, event):
             raise QueueError("reading_changed")
         self.observed[key] = {
@@ -393,13 +402,13 @@ class MemoryTools:
         )
         if names:
             limits = context_limits(self.plugin.config)
-            turn = self.turns[event] = ToolTurn(
+            turn = self.tool_turns[event] = ToolTurn(
                 guard, options, incoming_digest(incoming, guard.queue.deployment_id), incoming.iso_timestamp,
                 event.unified_msg_origin, fingerprint, model, sequence, time.monotonic() + 120,
                 limits["tokens"], limits["chars"],
                 request_ref=request_ref, event_ref=weakref.ref(event),
                 selected_provider=selected_provider,
-                prefix="<hb-read-request:" + secrets.token_hex(12) + ">\n",
+                prefix=marker or request_marker(),
                 names=names, reflect_options=reflect_options,
             )
             self.filter_request(event, request, original, enable=True)
@@ -542,7 +551,7 @@ class MemoryTools:
         actual = getattr(context, "context", None)
         event = getattr(actual, "event", None)
         try:
-            turn = self.turns.get(event) if event is not None else None
+            turn = self.tool_turns.get(event) if event is not None else None
         except TypeError:
             turn = None
         if (
@@ -558,7 +567,7 @@ class MemoryTools:
                 asyncio.timeout(turn.reflect_options["timeout"] if kind == "reflect" else min(3, recall_timeout(self.plugin.config))),
                 turn.lock,
             ):
-                if self.turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
+                if self.tool_turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
                     return canonical({"error": "tool_context_unavailable"})
                 if PREFIX + kind not in turn.names:
                     return canonical({"error": "tool_context_unavailable"})
@@ -616,11 +625,11 @@ class MemoryTools:
                     if kind == "reflect":
                         self.remove_turn_tools(turn, frozenset({REFLECT_NAME}))
         except QueueError as exc:
-            if self.turns.get(event) is not turn or turn.expires == 0:
+            if self.tool_turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
             return self.deliver(turn, {"error": str(exc)})
         except TimeoutError:
-            if self.turns.get(event) is not turn or turn.expires == 0:
+            if self.tool_turns.get(event) is not turn or turn.expires == 0:
                 return canonical({"error": "tool_context_unavailable"})
             code = "reflect_timeout" if kind == "reflect" else "tool_read_timeout"
             self.record(turn, "error", code, kind=kind)

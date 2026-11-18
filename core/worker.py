@@ -225,7 +225,7 @@ class Worker:
             self.warning_log.warning(exc.code)
         except (OSError, sqlite3.OperationalError):
             raise
-        except Exception as exc:  # noqa: BLE001 -- preserve durable work on adapter failures
+        except Exception as exc:
             self.outbox.update(
                 task_id,
                 "failed",
@@ -345,9 +345,9 @@ class Worker:
                 self.wake.clear()
                 delay = max(0.01, min(self.poll_interval, 0.5))
                 try:
-                    for scope_id, task in list(self.running.items()):
+                    for owner_id, task in list(self.running.items()):
                         if task.done():
-                            del self.running[scope_id]
+                            del self.running[owner_id]
                             error = None if task.cancelled() else task.exception()
                             if error:
                                 raise error

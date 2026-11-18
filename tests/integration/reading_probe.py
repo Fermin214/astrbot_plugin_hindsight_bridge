@@ -25,9 +25,16 @@ class ReadingProbe(Star):
     async def change_request_model(self, event, request):
         if event.message_str == "HB-TOOLS-REQUEST-MODEL":
             request.model = "fixture-late-request-model"
+        elif event.message_str.startswith("HB-CAPTURE-PRIMARY-"):
+            provider = await self.context.get_using_provider_async(event.unified_msg_origin)
+            reply = await self.context.tool_loop_agent(
+                event=event, chat_provider_id=provider.provider_config["id"],
+                prompt="HB-CAPTURE-SECONDARY", agent_hooks=MAIN_AGENT_HOOKS, max_steps=3,
+            )
+            self.save(event.message_str, reply.completion_text)
         elif event.message_str == "HB-TOOLS-GUARDS":
             bridge = self.bridge()
-            turn = bridge.read_tools.turns[event]
+            turn = bridge.read_tools.tool_turns[event]
             assert turn.context_ref is None and turn.calls == 0
             provider = await self.context.get_using_provider_async(event.unified_msg_origin)
             await self.context.tool_loop_agent(
@@ -37,7 +44,7 @@ class ReadingProbe(Star):
                 agent_hooks=MAIN_AGENT_HOOKS, max_steps=3,
             )
             assert turn.context_ref is None and turn.calls == 0
-            assert event in bridge.turns
+            assert event in bridge.pending_assistant_captures
             self.save("secondary_main_hooks_cannot_claim_request_before_primary_agent", True)
 
     @filter.on_agent_begin(priority=-100)
@@ -45,7 +52,7 @@ class ReadingProbe(Star):
         if event.message_str != "HB-TOOLS-GUARDS":
             return
         bridge = self.bridge()
-        turn = bridge.read_tools.turns[event]
+        turn = bridge.read_tools.tool_turns[event]
         if not bridge.read_tools.matches_request(turn, run_context):
             return
         assert turn.context_ref() is run_context and turn.calls == 0
@@ -64,10 +71,10 @@ class ReadingProbe(Star):
         if event.message_str not in {"HB-TOOLS-GUARDS", "HB-TOOLS-IDLE", "HB-TOOLS-REQUEST-MODEL"}:
             return
         bridge = self.bridge()
-        if event in bridge.read_tools.turns:
-            assert not bridge.read_tools.matches_request(bridge.read_tools.turns[event], run_context)
+        if event in bridge.read_tools.tool_turns:
+            assert not bridge.read_tools.matches_request(bridge.read_tools.tool_turns[event], run_context)
             return
-        assert event not in bridge.read_tools.turns
+        assert event not in bridge.read_tools.tool_turns
         result = await bridge.read_tools.owned["hindsight_bridge_recall"].call(run_context, query="Cedar-120")
         assert json.loads(result)["error"] == "tool_context_unavailable"
         self.save("finished_agent_cannot_reuse_ledger", True)

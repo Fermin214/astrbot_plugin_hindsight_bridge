@@ -131,7 +131,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.func_tool.tools, [foreign])
         self.assertEqual(len(original.tools), len(NAMES) + 1)
         with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "external_data": True, "items": []})) as read:
-            turn = self.tools.turns[event]
+            turn = self.tools.tool_turns[event]
             results = await asyncio.gather(*(self.tools.execute(context, "recall", {"query": "q"}) for _ in range(9)))
         self.assertEqual(read.await_count, 4)
         self.assertEqual(turn.calls, 4)
@@ -140,14 +140,14 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.request.func_tool.tools, [])
         self.assertEqual(turn.expires, 0)
         self.tools.finish(event, context)
-        self.assertNotIn(event, self.tools.turns)
+        self.assertNotIn(event, self.tools.tool_turns)
 
     async def test_only_agent_begin_binds_context_and_agent_done_retires_unused_turn(self):
         event, context = await self.ready()
         foreign = RunContext()
         foreign.context = context.context
         foreign.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(text="independent task", _no_save=False)])]
-        turn = self.tools.turns[event]
+        turn = self.tools.tool_turns[event]
         turn.context_ref = None
         with patch.object(self.tools, "read", AsyncMock()) as read:
             self.tools.begin(event, foreign)
@@ -160,9 +160,9 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
             self.tools.begin(event, context)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
             self.tools.finish(event, foreign)
-            self.assertIn(event, self.tools.turns)
+            self.assertIn(event, self.tools.tool_turns)
             self.tools.finish(event, context)
-            self.assertNotIn(event, self.tools.turns)
+            self.assertNotIn(event, self.tools.tool_turns)
             self.assertIn("tool_context_unavailable", await self.tools.execute(context, "recall", {"query": "q"}))
             read.assert_not_awaited()
 
@@ -184,11 +184,11 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.tools.finish(event, context)
         await self.tools.prepare(event, self.request, self.incoming, self.scope(), self.request.func_tool)
         self.assertFalse(self.tools.public(self.scope())["observed_available"])
-        self.assertNotIn(event, self.tools.turns)
+        self.assertNotIn(event, self.tools.tool_turns)
 
     async def test_native_light_schemas_preserve_request_ownership_and_retire_cached_source_tools(self):
         event, context = await self.ready()
-        turn = self.tools.turns[event]
+        turn = self.tools.tool_turns[event]
         turn.context_ref = None
         source = self.request.func_tool
         foreign = SimpleNamespace(name="foreign", description="foreign", active=True, handler_module_path="other.main")
@@ -209,7 +209,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_exhaustion_returns_a_notice_and_never_ends_host_chat_with_none(self):
         event, context = await self.ready()
-        turn = self.tools.turns[event]
+        turn = self.tools.tool_turns[event]
         turn.tokens = 256
         with patch.object(self.tools, "read", AsyncMock(return_value={"content": "word " * 245})):
             results = [await self.tools.execute(context, "recall", {"query": "q"}) for _ in range(2)]

@@ -7,6 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from queue_fixture import confirm_sources
 from unittest.mock import AsyncMock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
@@ -31,6 +32,7 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.client.list_operations = AsyncMock(return_value=[])
         self.queue = Outbox(self.root / "runtime", "test", self.client.url,
                             credential_fingerprint=sha256(self.client.api_key), control_directory=self.root / "control")
+        confirm_sources(self.queue, ("onebot", "bot", "alice"), ("onebot", "bot", "bob"))
         self.rows = [dict(self.queue.scope(Incoming("aiocqhttp", "onebot", "bot", user, "1", 1, "hello")))
                      for user in ("alice", "bob")]
         self.maintenance = Maintenance(self.queue, self.client)

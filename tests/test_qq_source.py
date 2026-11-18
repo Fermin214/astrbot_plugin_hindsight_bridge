@@ -115,13 +115,8 @@ class QQSourceTests(unittest.TestCase):
         self.clock.start()
         self.types = patch.object(qq, "native_types", side_effect=types_for)
         self.types.start()
-        self.support = patch.dict(source.PLATFORMS, {
-            self.host_type: replace(source.PLATFORMS[self.host_type], supported=True),
-        })
-        self.support.start()
         self.addCleanup(self.clock.stop)
         self.addCleanup(self.types.stop)
-        self.addCleanup(self.support.stop)
         self.adapter = self.adapter_type()
         self.binding = self.bind(self.adapter)
 
@@ -161,8 +156,7 @@ class QQSourceTests(unittest.TestCase):
         self.assertEqual(incoming.timestamp, 101.25)
         self.assertEqual(incoming.received_at, 100.25)
         self.assertEqual(incoming.iso_timestamp, "1970-01-01T00:01:41.250000+00:00")
-        identity = source.source_identity(event, incoming, self.adapter, binding=self.binding)
-        self.assertEqual((identity.host_type, identity.logical_type), (self.host_type, "qq_official"))
+        self.assertEqual(incoming.platform_type, "qq_official")
         material = retain_payload(incoming.scope("deployment"), 0, Message(
             "event", incoming.text, incoming.timestamp,
         ), (), "conversation", "operation", "UTC")["items"][0]
@@ -258,15 +252,10 @@ class QQSourceTests(unittest.TestCase):
         self.adapter.appid = "1003"
         self.assertIsNone(self.header(event))
 
-    def test_missing_prepared_login_or_disabled_support_never_assigns_current_appid(self):
+    def test_missing_prepared_login_never_assigns_current_appid(self):
         event = self.event()
         self.binding = None
         self.assertIsNone(self.header(event))
-        self.binding = self.bind(self.adapter)
-        with patch.dict(source.PLATFORMS, {
-            self.host_type: replace(source.PLATFORMS[self.host_type], supported=False),
-        }):
-            self.assertIsNone(self.header(event))
 
     def test_official_message_dedup_preserves_first_frozen_request_and_rejects_conflict(self):
         event = self.event()

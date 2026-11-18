@@ -1,43 +1,27 @@
-"""Exercise real request hooks without installing or changing the AstrBot host."""
-
-import ast
 import asyncio
-from contextlib import asynccontextmanager
 from dataclasses import replace
+import importlib.util
 import json
 import os
-import secrets
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
-import weakref
 
 import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
-from plugins.astrbot_plugin_hindsight_bridge.core.catalog import render_memory, render_page
-from plugins.astrbot_plugin_hindsight_bridge.core.background import ReadGuard, compose_backgrounds, context_limits, reference
-from plugins.astrbot_plugin_hindsight_bridge.core.agent_tools import MemoryTools
-from plugins.astrbot_plugin_hindsight_bridge.core.reflection import Reflection
-from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
-from plugins.astrbot_plugin_hindsight_bridge.core.dialogue import (
-    appended_history, final_reply, history_boundary, history_messages,
-)
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
-from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
-    TokenizerError, load_encoding, memory_block, recall_query, token_count,
-)
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, PanelError
-from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
-from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity, source_identity
+from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
+from queue_fixture import confirm_sources
 
 
 def directory_link(path, target):
@@ -67,46 +51,51 @@ class Plain:
         self.text = text
 
 
+class Request(SimpleNamespace):
+    pass
+
+
 class Configuration(dict):
     def save_config(self):
         pass
 
 
 def bridge_class(directory, logger):
-    source = Path(__file__).resolve().parents[1] / "main.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    bridge = next(node for node in tree.body if isinstance(node, ast.ClassDef))
-    selected = {
-        "__init__", "initialize", "diagnostic", "error_code", "refresh_permissions",
-        "control_root", "control_directory", "warning", "monitor_connection", "record_recall",
-        "recall_status", "recall_text", "recall_background", "conversation_history", "add_memory",
-        "record_history", "_close_resources", "using_resources", "terminate",
-        "prepare_sources",
-        "allowed", "snapshot", "source_header", "observe_incoming", "command_scope",
-        "prepare_command", "apply_command", "mode", "memory_forget", "memory_retry",
-        "memory_cancel",
-        "readable", "unavailable_message", "memory_recall", "memory_show", "memory_view",
-        "memory_background", "bind_memory_tools",
-    }
-    bridge.body = [node for node in bridge.body if node.name in selected]
-    for method in bridge.body:
-        method.decorator_list = [node for node in method.decorator_list if isinstance(node, ast.Name)]
-    namespace = dict(globals())
-    namespace.update({name: getattr(diagnostics, name) for name in (
-        "ConfigurationError", "WarningLog", "configuration_message", "connection_fields",
-        "missing_connection", "recall_description", "recall_notice", "recall_timeout",
-    )})
-    namespace.update(
-        __package__="plugins.astrbot_plugin_hindsight_bridge",
-        AstrBotConfig=dict, Context=object, AstrMessageEvent=object, ProviderRequest=object,
-        logger=logger, Worker=Mock(return_value=SimpleNamespace(run=AsyncMock())),
-        StarTools=SimpleNamespace(get_data_dir=lambda name: directory / (
-            "control" if name.endswith("_control") else "runtime"
-        )),
-        get_astrbot_data_path=lambda: str(directory),
+    def hook(*args, **kwargs):
+        return lambda handler: handler
+
+    def command_group(name):
+        def register(handler):
+            handler.command = hook
+            return handler
+        return register
+
+    filters = SimpleNamespace(
+        EventMessageType=SimpleNamespace(PRIVATE_MESSAGE="private"),
+        event_message_type=hook, on_agent_begin=hook, on_agent_done=hook,
+        on_llm_request=hook, command_group=command_group,
     )
-    exec(compile(ast.Module(body=[bridge], type_ignores=[]), str(source), "exec"), namespace)
-    return namespace["HindsightBridge"]
+    modules = {}
+    for module_name, exports in {
+        "astrbot.api": {"AstrBotConfig": Configuration, "logger": logger},
+        "astrbot.api.event": {"AstrMessageEvent": object, "MessageChain": object, "filter": filters},
+        "astrbot.api.message_components": {"File": object, "Plain": Plain},
+        "astrbot.api.provider": {"ProviderRequest": Request},
+        "astrbot.api.star": {"Context": object, "Star": Star,
+                             "StarTools": SimpleNamespace(get_data_dir=lambda name: directory / "runtime")},
+        "astrbot.core.agent.message": {"TextPart": TextPart},
+        "astrbot.core.utils.astrbot_path": {"get_astrbot_data_path": lambda: str(directory)},
+    }.items():
+        stub = ModuleType(module_name)
+        vars(stub).update(exports)
+        modules[module_name] = stub
+    source = Path(__file__).resolve().parents[1] / "main.py"
+    spec = importlib.util.spec_from_file_location("plugins.astrbot_plugin_hindsight_bridge.test_main", source)
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, modules):
+        spec.loader.exec_module(module)
+    module.Worker = Mock(return_value=SimpleNamespace(run=AsyncMock()))
+    return module.HindsightBridge
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -180,7 +169,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin.client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(self.service))
         self.plugin.allowed = lambda event: not self.plugin.stopping and self.enabled
         self.enabled = True
-        self.plugin.snapshot = lambda event: self.incoming
+        self.plugin.snapshot = lambda event: self.incoming if self.plugin.allowed(event) else None
         self.incoming = Incoming("aiocqhttp", "qq", "456", "123", "one", int(time.time()), "hello")
         self.plugin.refresh_permissions()
         grant = self.plugin.outbox.access.authorization("qq", "123")
@@ -203,9 +192,9 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.incoming = Incoming("aiocqhttp", "qq", "456", "123", message_id, int(time.time()) + 1, "hello")
         event = type("Event", (), {"unified_msg_origin": "private"})()
         self.plugin.incoming[event] = self.incoming
-        req = SimpleNamespace(
+        req = Request(
             conversation=SimpleNamespace(cid="conversation") if conversation else None,
-            extra_user_content_parts=[],
+            extra_user_content_parts=[], prompt="hello",
         )
         return event, req
 
@@ -221,12 +210,12 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.results = []
         event, req = self.turn("two")
         await self.plugin.add_memory(event, req)
-        self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 检索完成，本轮未匹配到相关记忆。")
+        self.assertTrue(req.extra_user_content_parts[0].text.endswith("Hindsight 检索完成，本轮未匹配到相关记忆。"))
         self.plugin.recall_text = AsyncMock(side_effect=HindsightError("recall_timeout"))
         for message_id in ("three", "four"):
             event, req = self.turn(message_id)
             await self.plugin.add_memory(event, req)
-            self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。")
+            self.assertTrue(req.extra_user_content_parts[0].text.endswith("Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"))
         summary = self.plugin.recall_status(scope)
         self.assertEqual(summary["consecutive_failures"], 2)
         self.assertNotIn("hello", json.dumps(summary))
@@ -510,7 +499,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(wait_checked(), 1)
         event, req = self.turn()
         await self.plugin.add_memory(event, req)
-        self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 连接失败，记忆暂未载入。")
+        text = req.extra_user_content_parts[0].text
+        self.assertTrue(text.endswith("Hindsight 连接失败，记忆暂未载入。"), text)
         self.assertTrue(self.plugin.outbox.db.execute("SELECT released FROM outbox").fetchone()[0])
 
     async def test_offline_restart_with_saved_auth_pause_still_captures_new_messages(self):
@@ -533,7 +523,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.outbox.connection_error(), "http_401")
         event, req = self.turn("after-restart")
         await self.plugin.add_memory(event, req)
-        self.assertEqual(req.extra_user_content_parts[0].text, "Hindsight 连接失败，记忆暂未载入。")
+        self.assertTrue(req.extra_user_content_parts[0].text.endswith("Hindsight 连接失败，记忆暂未载入。"))
         rows = self.plugin.outbox.db.execute("SELECT released,accepted FROM outbox").fetchall()
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["released"])
@@ -547,6 +537,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
                 queue = Outbox(runtime, "test-service", "http://memory.test",
                                credential_fingerprint=sha256("key"), control_directory=control)
                 try:
+                    confirm_sources(queue, ("qq", "456", "123"))
                     incoming = replace(self.incoming, timestamp=int(time.time()) + 1)
                     scope = queue.scope(incoming)
                     if blocked_by == "accepted":

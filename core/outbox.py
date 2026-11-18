@@ -430,15 +430,6 @@ class Outbox:
                 (error, self.connection_id),
             )
 
-    def known_accounts(self):
-        return [
-            (r["platform_instance_id"], r["user_id"])
-            for r in self.db.execute(
-                "SELECT platform_instance_id,user_id FROM scopes WHERE connection_id=?",
-                (self.connection_id,),
-            )
-        ]
-
     def list_scopes(self):
         return self.db.execute(
             "SELECT * FROM scopes WHERE connection_id=? ORDER BY platform_instance_id,user_id",
@@ -446,13 +437,13 @@ class Outbox:
         ).fetchall()
 
     def sync_permissions(self, accounts):
-        self.permission_pairs = frozenset(accounts)
+        accounts = frozenset(accounts)
         migration = "authorization_migration:" + self.connection_id
         legacy = not self.control.setting(migration)
         legacy_sources = {
             row["scope_id"] for row in self.list_scopes() if row["allowed"]
         } if legacy else set()
-        self.access.sync(self.permission_pairs, legacy_sources=legacy_sources)
+        self.access.sync(accounts, legacy_sources=legacy_sources)
         if legacy:
             with self.control.transaction():
                 self.control.db.execute(
@@ -467,7 +458,7 @@ class Outbox:
                 allowed = (
                     row["platform_instance_id"],
                     row["user_id"],
-                ) in self.permission_pairs and self.access.permitted(
+                ) in accounts and self.access.permitted(
                     Scope(*json.loads(row["identity_json"]))
                 )
                 self.db.execute(
@@ -479,6 +470,7 @@ class Outbox:
                         "DELETE FROM window WHERE connection_id=? AND scope_id=?",
                         (self.connection_id, row["scope_id"]),
                     )
+        self.permission_pairs = accounts
 
     def activate(self, incoming, expected_revision, *, now=None):
         identity = incoming.scope(self.deployment_id)
@@ -498,8 +490,10 @@ class Outbox:
         return self.scope_owner(identity.id)
 
     def accepts(self, incoming):
-        return self.permission_pairs is None or self.access.accept(
-            incoming, incoming.scope(self.deployment_id),
+        return (
+            self.permission_pairs is not None
+            and (incoming.platform_instance_id, incoming.user_id) in self.permission_pairs
+            and self.access.accept(incoming, incoming.scope(self.deployment_id))
         )
 
     def scope(self, incoming: Incoming) -> sqlite3.Row:
@@ -513,11 +507,9 @@ class Outbox:
         if account["agent_id"] != self.agent_id:
             raise QueueError("agent_mapping_change_requires_migration")
         permitted = (
-            self.permission_pairs is None
-            or (
-                (identity.platform_instance_id, identity.user_id) in self.permission_pairs
-                and self.access.permitted(identity)
-            )
+            self.permission_pairs is not None
+            and (identity.platform_instance_id, identity.user_id) in self.permission_pairs
+            and self.access.permitted(identity)
         )
         with self.db:
             self.db.execute(
@@ -589,6 +581,10 @@ class Outbox:
             or not conversation_id
         ):
             raise QueueError("invalid_capture")
+        if self.permission_pairs is None:
+            raise QueueError("permissions_not_synced")
+        if (incoming.platform_instance_id, incoming.user_id) not in self.permission_pairs:
+            raise QueueError("scope_not_active")
         scope = self.scope(incoming)
         if not self.can_recall(scope) or scope["mode"] != "active":
             raise QueueError("scope_not_active")
@@ -752,6 +748,8 @@ class Outbox:
     def capture_assistant(self, user_task_id, text, *, observed_at=None):
         if not isinstance(text, str) or not text.strip() or len(text) > 8000:
             raise QueueError("invalid_capture")
+        if self.permission_pairs is None:
+            raise QueueError("permissions_not_synced")
         source = self.get(user_task_id)
         anchor = self.db.execute(
             "SELECT * FROM window WHERE task_id=? AND connection_id=?",
@@ -842,12 +840,12 @@ class Outbox:
     def get(self, task_id: int):
         return self.db.execute("SELECT * FROM outbox WHERE id=?", (task_id,)).fetchone()
 
-    def due(self, exclude_scopes=()):
+    def due(self, exclude_owners=()):
         if self.connection_error():
             return None
-        return self._due(exclude_scopes)
+        return self._due(exclude_owners)
 
-    def _due(self, exclude_scopes):
+    def _due(self, exclude_owners):
         exclusion = ""
         args = [self.connection_id, time.time()]
         blocked = {
@@ -873,11 +871,11 @@ class Outbox:
                 " AND o.state NOT IN ('ready','failed')"
                 " AND NOT (o.state='deferred' AND s.allowed=1 AND s.mode='active')"
             )
-        if exclude_scopes:
+        if exclude_owners:
             exclusion += (
-                " AND s.owner_id NOT IN (" + ",".join("?" for _ in exclude_scopes) + ")"
+                " AND s.owner_id NOT IN (" + ",".join("?" for _ in exclude_owners) + ")"
             )
-            args.extend(exclude_scopes)
+            args.extend(exclude_owners)
         if self.recovering:
             return None
         return self.db.execute(
