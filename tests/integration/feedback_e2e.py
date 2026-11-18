@@ -152,6 +152,25 @@ class Feedback(Acceptance):
             scope = await self.scope()
             return await self.http("GET", self.prefix + "/scopes/" + scope["scope_id"] + "/background")
 
+        async def check_row(value, page_id, *, exceeded=False):
+            native = next(item for item in value["pages"] if item["page_id"] == page_id)
+            check = next(item for item in value["checks"] if item["page_id"] == page_id)
+            assert value["selection"]["page_id"] == page_id
+            row = frame.locator(".knowledge-page").filter(
+                has=frame.get_by_text("1. " + native["path"], exact=True)
+            )
+            metrics = f'{check["tokens"]} / {check["limits"]["tokens"]} token'
+            if exceeded:
+                metrics += "（超限）"
+            await row.locator(".page-metrics").filter(
+                has_text=re.compile("^" + re.escape(metrics) + "$")
+            ).wait_for(timeout=15000)
+            index = row.get_by_text("有新记忆待刷新", exact=True)
+            if native.get("index_stale") is True:
+                await index.wait_for()
+            else:
+                assert await index.count() == 0
+
         async def chat(used, code=""):
             before = (await self.scope())["background"].get("status", {}).get("checked_at", 0)
             count = len(self.requests())
@@ -187,8 +206,7 @@ class Feedback(Acceptance):
         await page.reload()
         await self.dismiss_host_notice(page)
         await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-        await frame.locator("#background-check").filter(has_text="知识页太长").wait_for(timeout=15000)
-        await frame.locator("#background-index").filter(has_text="目录标记").wait_for()
+        await check_row(checked, long, exceeded=True)
         assert "HB-FEEDBACK-LONG complete paragraph." not in await chat(False, "知识页太长")
         self.report["measurements"]["long_page_check"] = checked["check"]
         self.passed("selection_size_warning_and_index_state_survive_native_dashboard_reload")
@@ -210,7 +228,7 @@ class Feedback(Acceptance):
         assert (await self.bootstrap())["parameters"]["values"] == saved_parameters
         assert (await self.scope())["background"]["page_id"] == long
         await frame.locator("#background-recheck").click()
-        await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        await check_row(await selected_check(), long)
         assert ("HB-FEEDBACK-LONG complete paragraph. " * 120).rstrip() in await chat(True)
         self.passed("native_panel_expands_three_budgets_and_injects_entire_long_page_after_reload_without_material_backflow")
         for settings in ({"context_max_chars": 256}, {"context_max_chars": 24000, "recall_max_tokens": 256},
@@ -245,7 +263,7 @@ class Feedback(Acceptance):
         await page.reload()
         await self.dismiss_host_notice(page)
         await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-        await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        await check_row(await selected_check(), short)
         from parameter_panel import verify_advanced
 
         await verify_advanced(self, frame)

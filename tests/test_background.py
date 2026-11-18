@@ -309,6 +309,35 @@ class References(unittest.TestCase):
 
 
 class ContextComposition(unittest.TestCase):
+    def test_zero_and_eight_pages_fit_exact_budget_including_request_marker(self):
+        options = {"tokens": 8192, "chars": 32768, "tokenizer": "o200k_base"}
+        fact = {"text": "A complete recalled fact."}
+        empty, facts_used, outcomes = compose_backgrounds([], [fact], **options)
+        self.assertTrue(facts_used)
+        self.assertEqual(outcomes, [])
+        self.assertIn(fact["text"], empty)
+
+        reads = [
+            {"reference": {"page_id": f"kp-{index}"}, "code": "",
+             "page": native_model(content=f"Complete page {index}. " * 10)}
+            for index in range(8)
+        ]
+        marker = "<hb-read-request:0123456789abcdef01234567>\n"
+        block, _, outcomes = compose_backgrounds(reads, [], prefix=marker, **options)
+        self.assertTrue(all(page["used"] for page in outcomes))
+        bounded = {**options, "chars": len(marker + block), "tokens": token_count(marker + block)}
+        exact, _, outcomes = compose_backgrounds(reads, [], prefix=marker, **bounded)
+        self.assertEqual(exact, block)
+        self.assertTrue(all(page["used"] for page in outcomes))
+
+        smaller = {**bounded, "chars": bounded["chars"] - 1}
+        reduced, _, outcomes = compose_backgrounds(reads, [], prefix=marker, **smaller)
+        self.assertTrue(all(page["used"] for page in outcomes[:-1]))
+        self.assertFalse(outcomes[-1]["used"])
+        self.assertIn("共享字符上限", outcomes[-1]["exceeded"])
+        self.assertIn("部分知识页未使用", reduced)
+        self.assertNotIn(reads[-1]["page"]["content"], reduced)
+
     def test_multiple_pages_are_whole_ordered_and_feedback_matches_every_budget(self):
         pages = [
             native_model(content="first-native-page " * 4),

@@ -26,7 +26,12 @@ async def verify(acceptance, page, frame, bank):
     await frame.locator("#reflect-enabled").check()
     await frame.locator("#reflect-timeout").fill("8")
     await frame.locator("#reflect-save").click()
-    await until(lambda: frame.locator("#reflect-effective").filter(has_text="开启").is_visible(), timeout=15)
+    await until(lambda: reflect_enabled(acceptance), timeout=15)
+    await page.reload()
+    await acceptance.dismiss_host_notice(page)
+    await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+    await until(lambda: frame.locator("#reflect-enabled").is_checked(), timeout=15)
+    assert await frame.locator("#reflect-timeout").input_value() == "8"
     current = await acceptance.scope()
     assert current["bank"] == bank and current["mode"] == scope["mode"]
     assert current["reflect"]["enabled"] and current["reflect"]["timeout"] == 8

@@ -12,9 +12,8 @@ async def save_parameters(acceptance, frame, **updates):
     for key, value in updates.items():
         await frame.locator("#memory-" + key).fill(", ".join(value) if isinstance(value, list) else str(value))
     await frame.locator("#save-parameters").click()
-    await until(lambda: frame.locator("#save-parameters").is_enabled(), timeout=40)
-    feedback = await frame.locator("#parameters-feedback").inner_text()
-    assert "已保存" in feedback, feedback
+    await frame.locator("#parameters-feedback").filter(has_text="已保存").wait_for(timeout=40000)
+    await until(lambda: frame.locator("#parameters-fields").is_enabled(), timeout=40)
     stored = await acceptance.config()
     snapshot = await acceptance.bootstrap()
     for key, value in updates.items():
