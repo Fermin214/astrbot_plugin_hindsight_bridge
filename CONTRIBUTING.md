@@ -2,22 +2,22 @@
 
 安装与日常操作见 [安装指南](docs/INSTALL.md) 和 [使用指南](docs/USAGE.md)。消息采集、队列、用户隔离和数据格式见 [实现说明](docs/ARCHITECTURE.md)。
 
-## 目录
+## 阅读路线
 
-- `main.py`：AstrBot 插件入口、事件接入和用户命令。
-- `core/`：身份权限、记忆材料、队列、后端客户端，以及管理 API、供应商适配与 Linux 安装命令生成。
-- `views/memory/`：AstrBot 内「用户与记忆」和「插件设置」两个标签页的 HTML、JavaScript 和样式；用户页管理用户、记忆模式和知识页选择，设置页管理模型、连接与服务。
-- `.astrbot-plugin/i18n/`：插件视图标题的中文和英文资源。
-- `docs/`：安装、使用、兼容范围、数据维护和实现说明。
-- `examples/`：插件配置示例。
-- `deploy/`：独立 Hindsight/PostgreSQL 部署模板。
-- `scripts/`：备份等数据维护脚本。
-- `tests/`：可靠写入、隔离、用户控制、导出、更正与双方历史的回归测试。
-- `tools/`：安装包元数据、文档链接和文件边界检查。
+| 流程 | 数据流 | 验证入口 |
+| --- | --- | --- |
+| 私聊记录 | `observe_incoming` 核对来源。`add_memory` 冻结用户材料，由 `Outbox.capture`、`Worker`、`HindsightClient` 投递。`remember_assistant` 和 `persist_history` 从宿主持久历史补录主回复。 | `python tools/run-feedback-e2e.py --scope assistant-capture --output /tmp/bridge-capture` |
+| 遗忘与恢复 | 私聊命令或面板提交控制事务。队列重放新代次，清理旧 Bank 和任务。恢复业务快照时读取独立控制库。 | `python tools/run-feedback-e2e.py --scope recovery --output /tmp/bridge-recovery` |
+| 配套部署 | `core/panel.py` 提供管理 API。启动命令来自 `core/installer.py`。`core/managed_connections.py` 持久化接入进度，配套容器验证并应用模型配置。 | `python tools/run-managed-e2e.py --scenario connection --output /tmp/bridge-connection` |
 
-## 文档分工
+| 名称 | 含义 |
+| --- | --- |
+| `Scope.id`、`scope_id`、`source_id` | 同一个平台来源标识。业务库使用 `scope_id`，控制库映射使用 `source_id`。 |
+| `principal_id`、`owner_id` | 逻辑用户和该用户在部署、Agent、记忆空间中的归属。队列按 `owner_id` 排他投递。 |
+| Bank、代次 | Hindsight 记忆库及其版本。清空记忆推进代次，作废旧 Bank 与旧待保存材料。 |
+| `background`、`reading`、`reflection` | 随请求附带的知识页、按需读取工具和原生 Reflect 执行。配置键及接口沿用这些名称。 |
 
-README 介绍用途、安装入口和常用操作。`docs/INSTALL.md` 说明向导安装、模型选择与已有服务连接；`docs/USAGE.md` 说明管理视图和私聊命令；`deploy/README.md` 提供维护者可选的手工 Linux 部署；`docs/DATA-MAINTENANCE.md` 面向服务维护者；`docs/ARCHITECTURE.md` 保存核心实现细节；[安装与管理设计](docs/SETUP-DESIGN.md) 说明向导、供应商复用和管理视图的边界。
+面板资产在 `views/memory/`。兼容范围、恢复和配套管理分别见 [兼容范围](docs/SUPPORT.md)、[备份与恢复](docs/DATA-MAINTENANCE.md)、[安装与管理设计](docs/SETUP-DESIGN.md)。
 
 ## 提交要求
 
@@ -32,6 +32,7 @@ CI 面向项目回归与社区兼容，按新增提交涉及的文件选择检�
 | 检查 | 用途 | 触发范围 |
 | --- | --- | --- |
 | `check` | 回归、页面、语法及分发边界 | 按代码类型选择回归，基础检查始终执行 |
+| `windows` | Windows 回归、分发包安装与宿主重载 | 每次插件检查 |
 | `astrbot-smoke` | 官方宿主中的安装、重载、消息、临时内容、升级与卸载 | 插件入口、核心模块、配置结构、运行依赖及宿主检查代码 |
 | `hindsight-model-contracts` | 两版 Hindsight SDK 的聊天、嵌入及重排协议兼容 | 供应商适配、协议转换、模型探测、运行依赖及后端版本配置 |
 
@@ -50,6 +51,8 @@ CI 面向项目回归与社区兼容，按新增提交涉及的文件选择检�
 `--scope multi-page` 验证 0.2.8 单页升级、多页添加与排序、共享预算、逐页反馈、重载、按序号查看及完整遗忘；`--scope multi-page-recovery` 专门验证多篇原生页删除后的逐个移除，以及机器人身份查询耗时 300ms 时保存和排序 8 篇页面。只修改选页恢复或身份检查时使用后者，复用既有预算和聊天注入证据。
 
 `--scope read-tools` 验证有序知识页版本升级后的按需工具：原生 Agent 搜索、整行续读、版本变化、事实 Recall、来源和最近历史、同消息额度、按用户隔离、停用、实际保存材料、宿主会话与 Docker 日志、重载及完整遗忘。使用合成工具模型和 OneBot 平台端，不改变已有部署。
+
+Linux 与 Windows 的分发验收使用 `python tools/build-test-package.py --distribution --revision <提交> --output <目录>`。清单包含提交和每个分发文件的摘要。同包重装验证安装与重载。历史版本升级验证数据迁移，并记录历史包来源。
 
 `python tools/run-parameters-e2e.py --mode existing --astrbot-version 4.29.4 --hindsight-version 1.2.0 --output /tmp/新的测试目录` 验证面板参数到实际聊天的完整流程；`--mode managed` 使用独立配套安装。只涉及高级参数、队列或排除规则时，添加 `--scope advanced`，复用其他场景的已有证据。按变更选择接入方式、范围和版本，不以固定矩阵重复执行。
 
