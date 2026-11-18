@@ -13,6 +13,10 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 PORT = 8765
+LOOPBACK_ENDPOINT = "http://127.0.0.1:8765"
+LEGACY_ENDPOINT = "http://memory-models:8765"
+TRANSPORT_KEY = "__ASTRBOT_MEMORY_TRANSPORT_KEY__"
+TRANSPORT_HEADER = "X-Astrbot-Transport-Key"
 MAX_BODY = 8 * 1024 * 1024
 MAX_RESPONSE = 32 * 1024 * 1024
 _ERROR = "Model transport failed"
@@ -20,6 +24,48 @@ _CHAT_HEADERS = {
     "authorization", "api-key", "anthropic-version", "x-api-key", "content-type",
     "x-goog-api-key",
 }
+
+
+def transport_environment(environment, descriptors, endpoint=LOOPBACK_ENDPOINT, token=TRANSPORT_KEY):
+    values = dict(environment)
+
+    def is_relay(value, path):
+        return value in (LOOPBACK_ENDPOINT + path, LEGACY_ENDPOINT + path)
+
+    for kind, field, path, key in (
+        ("embedding", "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL", "/v1", "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"),
+        ("rerank", "HINDSIGHT_API_RERANKER_COHERE_BASE_URL", "/rerank", "HINDSIGHT_API_RERANKER_COHERE_API_KEY"),
+    ):
+        if kind in descriptors and is_relay(values.get(field), path) and values.get(key) == TRANSPORT_KEY:
+            values[field], values[key] = endpoint + path, token
+
+    if "chat" not in descriptors:
+        return values
+    field = "HINDSIGHT_API_LLM_BASE_URL"
+    headers_field = "HINDSIGHT_API_LLM_DEFAULT_HEADERS"
+    if is_relay(values.get(field), "/chat") and headers_field in values:
+        headers = json.loads(values[headers_field])
+        if (
+            isinstance(headers, dict) and headers.get(TRANSPORT_HEADER) == TRANSPORT_KEY
+            and (values[field] != endpoint + "/chat" or token != TRANSPORT_KEY)
+        ):
+            values[field] = endpoint + "/chat"
+            headers[TRANSPORT_HEADER] = token
+            values[headers_field] = json.dumps(headers, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+    extra_field = "HINDSIGHT_API_LLM_EXTRA_BODY"
+    if descriptors["chat"].get("protocol") == "gemini" and extra_field in values:
+        body = json.loads(values[extra_field])
+        options = body.get("http_options") if isinstance(body, dict) else None
+        headers = options.get("headers") if isinstance(options, dict) else None
+        url = options.get("base_url") if isinstance(options, dict) else None
+        if (
+            is_relay(url, "/chat") and isinstance(headers, dict) and headers.get(TRANSPORT_HEADER) == TRANSPORT_KEY
+            and (url != endpoint + "/chat" or token != TRANSPORT_KEY)
+        ):
+            options["base_url"], headers[TRANSPORT_HEADER] = endpoint + "/chat", token
+            values[extra_field] = json.dumps(body, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    return values
 
 
 class TransportError(ValueError):

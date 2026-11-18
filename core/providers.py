@@ -21,7 +21,7 @@ _KINDS = {"chat": "chat_completion", "embedding": "embedding", "rerank": "rerank
 _ALIBABA = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
 _EMBEDDING_TIMEOUT = 15
 _DIMENSIONS_ENV = "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS"
-_TRANSPORT = "http://memory-models:8765"
+_TRANSPORT = "http://127.0.0.1:8765"
 _TRANSPORT_KEY = "__ASTRBOT_MEMORY_TRANSPORT_KEY__"
 _CHAT_OPENAI = {
     "openai_chat_completion", "groq_chat_completion", "openrouter_chat_completion",

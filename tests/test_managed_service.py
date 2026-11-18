@@ -62,6 +62,39 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(reloaded.status()["configuration_fingerprint"], first["configuration_fingerprint"])
                 self.assertNotIn("secret", json.dumps(reloaded.status()))
 
+    def test_existing_relay_configuration_reloads_and_reuses_equivalent_loopback_without_restarting(self):
+        old = {
+            **self.environment,
+            "HINDSIGHT_API_LLM_MODEL": "chat-http://memory-models:8765",
+            "HINDSIGHT_API_LLM_BASE_URL": "http://memory-models:8765/custom",
+            "HINDSIGHT_API_LLM_API_KEY": "__ASTRBOT_MEMORY_TRANSPORT_KEY__",
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": "http://memory-models:8765/v1",
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "__ASTRBOT_MEMORY_TRANSPORT_KEY__",
+            "ASTRBOT_MEMORY_MODEL_CONFIG": json.dumps({"embedding": {"base_url": "https://upstream.invalid/v1"}}),
+            "ASTRBOT_MEMORY_EMBEDDING_IDENTITY": json.dumps({"model": "embedding"}),
+        }
+        new = {**old, "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": "http://127.0.0.1:8765/v1"}
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "models.json").write_text(json.dumps(service.configuration(old)))
+            with patch.object(service.Runtime, "start") as start:
+                runtime = service.Runtime(directory, "service-key", "012345abcdef")
+            start.assert_called_once_with(service.configuration(old))
+            values, descriptors = runtime.environment(runtime.active)
+            for field in ("HINDSIGHT_API_LLM_MODEL", "HINDSIGHT_API_LLM_BASE_URL", "HINDSIGHT_API_LLM_API_KEY"):
+                self.assertEqual(values[field], old[field])
+            self.assertEqual(values["HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"], new["HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"])
+            self.assertEqual(values["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"], "service-key")
+            self.assertEqual(descriptors, json.loads(old["ASTRBOT_MEMORY_MODEL_CONFIG"]))
+            identity = runtime.active["embedding_fingerprint"]
+            with patch.object(runtime, "status", wraps=runtime.status), patch.object(runtime, "stop") as stop:
+                runtime.process = Mock()
+                runtime.process.poll.return_value = None
+                with patch.object(runtime, "healthy", return_value=True):
+                    self.assertEqual(runtime.apply(new)["configuration_fingerprint"], runtime.fingerprint(new))
+                    self.assertEqual(runtime.apply(old)["configuration_fingerprint"], runtime.fingerprint(old))
+                stop.assert_not_called()
+            self.assertEqual(runtime.active["embedding_fingerprint"], identity)
+
     def test_status_exposes_pending_configuration_without_claiming_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = service.Runtime(directory, "service-key", "012345abcdef")

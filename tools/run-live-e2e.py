@@ -347,8 +347,7 @@ class Environment:
         self.transport_token = secrets.token_hex(20)
         self.transport = transport.TransportServer(("127.0.0.1", 0), descriptors, self.transport_token)
         transport_url = f"http://127.0.0.1:{self.transport.server_port}"
-        self.models = {name: value.replace("http://memory-models:8765", transport_url).replace(
-            "__ASTRBOT_MEMORY_TRANSPORT_KEY__", self.transport_token) for name, value in environment.items()}
+        self.models = transport.transport_environment(environment, descriptors, transport_url, self.transport_token)
         self.models.update(HINDSIGHT_API_LLM_PROVIDER="openai", HINDSIGHT_API_LLM_MODEL=args.chat_model,
                            HINDSIGHT_API_LLM_BASE_URL=self.settings["chat_url"], HINDSIGHT_API_LLM_API_KEY=self.settings["chat_token"])
         private_json(self.output / "live-settings.json", self.settings)

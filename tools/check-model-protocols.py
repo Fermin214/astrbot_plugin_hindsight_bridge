@@ -149,11 +149,7 @@ async def main():
             for key in list(os.environ):
                 if key.startswith(("HINDSIGHT_API_LLM_", "HINDSIGHT_API_EMBEDDINGS_", "HINDSIGHT_API_RERANKER_")):
                     del os.environ[key]
-            os.environ.update({
-                key: value.replace("http://memory-models:8765", relay).replace(
-                    "__ASTRBOT_MEMORY_TRANSPORT_KEY__", "transport-key"
-                ) for key, value in env.items()
-            })
+            os.environ.update(transport.transport_environment(env, gateway.model_config, relay, "transport-key"))
             clear_config_cache()
 
         checked = []

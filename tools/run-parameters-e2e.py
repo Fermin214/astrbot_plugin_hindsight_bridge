@@ -44,6 +44,7 @@ def main():
         parser.error("new managed installations use Hindsight 1.2.0")
     args.magpie_url, args.chat_model = "http://127.0.0.1:3425/v1", "compatibility-fixture"
     args.upgrade_from_1_1 = args.verify_panel = False
+    args.network_mode = "custom"
     with tempfile.TemporaryDirectory(prefix="hb-parameter-models-") as directory:
         args.model_environment = Path(directory) / "environment.json"
         args.model_environment.write_text(json.dumps({"ASTRBOT_MEMORY_MODEL_CONFIG": "{}"}))
@@ -60,7 +61,7 @@ def main():
             live.private_json(state.output / "live-settings.json", state.settings)
             with live.serving(model), live.serving(state.gateway):
                 state.start()
-                live.run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", "--output", str(state.output))
+                live.run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", "--working-tree", "--output", str(state.output))
                 state.verify()
         finally:
             state.transport.server_close()
