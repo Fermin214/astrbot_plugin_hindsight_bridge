@@ -27,19 +27,28 @@ def native_types(host_type):
     from botpy.message import C2CMessage
 
     if host_type == "qq_official":
+        from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
+            QQOfficialMessageEvent,
+        )
         from astrbot.core.platform.sources.qqofficial.qqofficial_platform_adapter import (
             QQOfficialPlatformAdapter, botClient,
         )
 
-        return C2CMessage, At, QQOfficialPlatformAdapter, botClient, None
+        return C2CMessage, At, QQOfficialPlatformAdapter, botClient, None, QQOfficialMessageEvent
     from astrbot.core.platform.sources.qqofficial_webhook.qo_webhook_adapter import (
         QQOfficialWebhookPlatformAdapter, botClient,
+    )
+    from astrbot.core.platform.sources.qqofficial_webhook.qo_webhook_event import (
+        QQOfficialWebhookMessageEvent,
     )
     from astrbot.core.platform.sources.qqofficial_webhook.qo_webhook_server import (
         QQOfficialWebhook,
     )
 
-    return C2CMessage, At, QQOfficialWebhookPlatformAdapter, botClient, QQOfficialWebhook
+    return (
+        C2CMessage, At, QQOfficialWebhookPlatformAdapter, botClient,
+        QQOfficialWebhook, QQOfficialWebhookMessageEvent,
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -68,7 +77,7 @@ def native_login(adapter):
         types = native_types(host_type)
         if types is None:
             return None
-        _, _, adapter_type, client_type, helper_type = types
+        _, _, adapter_type, client_type, helper_type, _ = types
         if type(adapter) is not adapter_type:
             return None
         appid, client = adapter.appid, adapter.get_client()
@@ -142,9 +151,12 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
-    c2c_type, at_type, _, _, _ = native_types(event.get_platform_name())
+    c2c_type, at_type, _, _, _, event_type = native_types(event.get_platform_name())
     raw = getattr(event.message_obj, "raw_message", None)
-    if not isinstance(raw, c2c_type) or getattr(raw, "_api", None) is not login.api:
+    if (
+        type(event) is not event_type or not isinstance(raw, c2c_type)
+        or getattr(raw, "_api", None) is not login.api
+    ):
         return None
     data = getattr(raw, "raw_data", None)
     if not isinstance(data, Mapping) or set(data) - TEXT_FIELDS:

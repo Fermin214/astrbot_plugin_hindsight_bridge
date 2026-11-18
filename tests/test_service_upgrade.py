@@ -18,6 +18,9 @@ from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, Pane
 
 class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        support = patch("plugins.astrbot_plugin_hindsight_bridge.core.panel.local_installation_supported", return_value=True)
+        self.installation_supported = support.start()
+        self.addCleanup(support.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.client = HindsightClient("http://memory.test", "valid-key")
@@ -336,6 +339,13 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.panel.state()["upgrade_pauses"]["banks"]), 1)
         await self.action("prepare", backup_confirmed=True)
         self.panel = self.reload_panel()
+        self.installation_supported.return_value = False
+        status = await self.panel.service_status()
+        self.assertTrue(status["pending"])
+        self.assertFalse(status["upgrade_available"])
+        for action in ("begin", "prepare"):
+            with self.assertRaisesRegex(PanelError, "Linux Docker Engine"):
+                await self.action(action, backup_confirmed=True)
         self.client.request.return_value = {"api_version": "1.2.0"}
         with self.assertRaises(PanelError):
             await self.action("resume")
@@ -348,6 +358,7 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.queue.summary(self.rows[1]["scope_id"])["maintenance"])
         self.assertEqual(self.queue.scope_owner(self.rows[0]["scope_id"])["mode"], "readonly")
         self.assertFalse((await self.panel.service_status())["upgrade_paused"])
+        self.panel.ensure_no_upgrade()
 
     async def test_cancelling_before_command_restores_only_upgrade_pauses(self):
         self.queue.set_mode(self.rows[0]["scope_id"], "paused")
@@ -355,6 +366,12 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         await self.action("begin")
         await self.action("begin")
         self.panel = self.reload_panel()
+        self.installation_supported.return_value = False
+        self.panel.managed_request.side_effect = PanelError("管理接口连接失败")
+        with self.assertRaisesRegex(PanelError, "原 Linux 部署环境"):
+            await self.action("cancel")
+        self.assertTrue((await self.panel.service_status())["upgrade_paused"])
+        self.panel.managed_request.side_effect = None
         result = await self.action("cancel")
         self.assertNotIn("upgrade_pauses", self.panel.state())
         self.assertIsNone(self.queue.summary(self.rows[0]["scope_id"])["maintenance"])

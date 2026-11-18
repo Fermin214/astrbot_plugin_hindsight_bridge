@@ -27,6 +27,14 @@ class At:
         self.qq = qq
 
 
+class WsEvent(SimpleNamespace):
+    pass
+
+
+class WebhookEvent(SimpleNamespace):
+    pass
+
+
 class C2C:
     def __init__(self, data):
         self.raw_data = data
@@ -86,9 +94,9 @@ class WebhookAdapter(Adapter):
 
 def types_for(host_type):
     if host_type == "qq_official":
-        return C2C, At, Adapter, Client, None
+        return C2C, At, Adapter, Client, None, WsEvent
     if host_type == "qq_official_webhook":
-        return C2C, At, WebhookAdapter, WebhookClient, WebhookHelper
+        return C2C, At, WebhookAdapter, WebhookClient, WebhookHelper, WebhookEvent
 
 
 def replace_login(adapter):
@@ -131,7 +139,7 @@ class QQSourceTests(unittest.TestCase):
         data.update(updates)
         raw = C2C(data)
         raw._api = self.adapter.client.api
-        return SimpleNamespace(
+        return types_for(self.host_type)[-1](
             bot=self.adapter.client, message_obj=SimpleNamespace(raw_message=raw, message_id=raw.id),
             get_platform_name=lambda: self.host_type, get_platform_id=lambda: "qq",
             get_self_id=lambda: "unknown_selfid", get_sender_id=lambda: "OpenID_A",
@@ -179,6 +187,7 @@ class QQSourceTests(unittest.TestCase):
         self.assertIsNone(self.header(event, ["!"]))
 
     def test_sdk_type_and_original_identifiers_are_required(self):
+        self.assertIsNone(self.header(SimpleNamespace(**vars(self.event()))))
         for change in ("raw_type", "raw_api", "openid", "id", "raw_id", "host_id", "raw_timestamp",
                        "raw_content", "bot_author", "host_group", "host_private"):
             with self.subTest(change=change):
@@ -362,6 +371,38 @@ class QQLoginHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["bot_id"], "1001")
         self.assertIsNot(current["client"], first["client"])
         self.assertFalse(current["invalid_login"])
+
+    async def test_same_adapter_rebinds_only_to_a_new_producer(self):
+        first = self.plugin.source_accounts["qq"]
+        producers = self.adapter_type()
+        self.adapter.client = producers.client
+        self.adapter.client.platform = self.adapter
+        if self.adapter_type is WebhookAdapter:
+            self.adapter.webhook_helper = producers.webhook_helper
+        self.plugin.refresh_permissions()
+        self.assertEqual(first["bot_id"], "")
+        await self.plugin.prepare_sources()
+        current = self.plugin.source_accounts["qq"]
+        self.assertEqual(current["bot_id"], "1001")
+        self.assertIsNot(current["client"], first["client"])
+        self.assertFalse(current["invalid_login"])
+
+    async def test_temporary_disconnect_does_not_invalidate_same_login(self):
+        with patch.object(self.adapter.client, "is_closed", return_value=True):
+            await self.plugin.prepare_sources()
+            self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "")
+        await self.plugin.prepare_sources()
+        self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "1001")
+
+    async def test_login_change_cannot_rebind_reused_client_after_adapter_disappears(self):
+        adapter, self.adapter = self.adapter, None
+        await self.plugin.prepare_sources()
+        self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "")
+        replace_login(adapter)
+        self.adapter = adapter
+        await self.plugin.prepare_sources()
+        self.assertTrue(self.plugin.source_accounts["qq"]["invalid_login"])
+        self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "")
 
     async def test_same_client_login_change_stays_invalid_until_native_adapter_replacement(self):
         replace_login(self.adapter)

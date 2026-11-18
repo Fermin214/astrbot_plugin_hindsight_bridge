@@ -284,7 +284,11 @@ class HindsightBridge(Star):
                         self.confirmations.clear()
                         self.permission_revision += 1
                 if login is not None and not login.matches(observed):
-                    evidence["invalid_login"] = evidence.get("host_type") not in {"weixin_oc", "telegram"}
+                    if (
+                        observed is not None and observed.client is login.client
+                        and evidence.get("host_type") in {"qq_official", "qq_official_webhook"}
+                    ):
+                        evidence["invalid_login"] = True
                     evidence["bot_id"] = ""
                 if (
                     adapter is None or adapter is not evidence["adapter"]
@@ -303,7 +307,7 @@ class HindsightBridge(Star):
                         )
             self.outbox.db.commit()
 
-    async def prepare_sources(self):
+    async def prepare_sources(self, platform=None):
         getter = getattr(self.context, "get_platform_inst", None)
         if getter is None or self.outbox is None or self.stopping:
             return
@@ -314,7 +318,10 @@ class HindsightBridge(Star):
             except QueueError:
                 self.refresh_permissions()
                 return
-            for instance in sorted({platform for platform, _ in accounts}):
+            instances = {instance for instance, _ in accounts}
+            if platform is not None:
+                instances.intersection_update({platform})
+            for instance in sorted(instances):
                 adapter = getter(instance)
                 client = adapter.get_client() if adapter else None
                 bot = await prepare_bot_identity(self.context, instance)
@@ -329,17 +336,21 @@ class HindsightBridge(Star):
                 login = native_login(adapter)
                 record = next((row for row in self.context.get_config().get("platform", [])
                                if str(row.get("id")) == instance), {})
-                same_adapter = previous.get("adapter") is adapter
-                invalid = record.get("type") not in {"weixin_oc", "telegram"} and same_adapter and (
+                previous_login = previous.get("login")
+                unresolved_qq_login = (
+                    record.get("type") in {"qq_official", "qq_official_webhook"}
+                    and previous_login is not None
+                    and (client is None or previous_login.client is client)
+                )
+                invalid = unresolved_qq_login and (
                     previous.get("invalid_login", False)
-                    or previous.get("login") is not None
-                    and not previous["login"].matches(login)
+                    or login is not None and not previous_login.matches(login)
                 )
                 if invalid:
                     bot = ""
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
-                    "login": previous.get("login") if invalid else login,
+                    "login": previous_login if unresolved_qq_login and (invalid or login is None) else login,
                     "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
                 logical_type = platform_details(record.get("type", ""))["logical_type"]
@@ -393,7 +404,14 @@ class HindsightBridge(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
-        if self.outbox is not None and event not in self.incoming:
+        if self.outbox is not None and not self.stopping and event not in self.incoming:
+            if event.get_platform_name() == "aiocqhttp":
+                header = self.source_header(event)
+                if (
+                    header and (header.platform_instance_id, header.user_id) in (self.permissions or ())
+                    and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
+                ):
+                    await self.prepare_sources(header.platform_instance_id)
             incoming = self.snapshot(event)
             if incoming:
                 self.incoming[event] = incoming

@@ -2,7 +2,9 @@
 
 import asyncio
 import copy
+from dataclasses import asdict
 from datetime import datetime, timezone
+from importlib import import_module
 import importlib.metadata
 import json
 import os
@@ -42,11 +44,12 @@ from plugins.astrbot_plugin_hindsight_bridge.core.source import native_header, s
 
 
 class Fixture:
-    def __init__(self, instance="qq-fixture", appid="1000001"):
+    def __init__(self, instance="qq-fixture", appid="1000001", host_type=HOST_TYPE):
+        self.host_type = host_type
         self.queue = asyncio.Queue()
-        adapter = QQOfficialPlatformAdapter if HOST_TYPE == "qq_official" else QQOfficialWebhookPlatformAdapter
+        adapter = QQOfficialPlatformAdapter if host_type == "qq_official" else QQOfficialWebhookPlatformAdapter
         self.host = adapter({
-            "id": instance, "type": HOST_TYPE, "appid": appid, "enable": True,
+            "id": instance, "type": host_type, "appid": appid, "enable": True,
             "secret": "synthetic-offline-secret", "enable_group_c2c": True,
             "enable_guild_direct_message": False,
         }, {}, self.queue)
@@ -55,7 +58,7 @@ class Fixture:
 
     async def login(self, appid="1000001"):
         identity = {"id": "9000" + appid, "username": "synthetic-bot", "avatar": ""}
-        if HOST_TYPE == "qq_official":
+        if self.host_type == "qq_official":
             with (
                 patch.object(self.client.http, "check_session", AsyncMock()),
                 patch.object(self.client.http, "request", AsyncMock(return_value=identity)),
@@ -107,6 +110,68 @@ class Fixture:
         return native_header(
             event, Plain, ["/"], adapter=self.host, binding=self.binding,
         )
+
+
+async def transport_upgrade_contract(fixture, directory):
+    legacy_root = os.environ.get("QQ_BASELINE_ROOT")
+    legacy_queue, legacy_header, legacy_login = Outbox, native_header, native_login
+    if legacy_root:
+        package = types.ModuleType("bridge_qq_baseline")
+        package.__path__ = [str(Path(legacy_root).resolve(strict=True))]
+        sys.modules[package.__name__] = package
+        legacy_queue = import_module("bridge_qq_baseline.core.outbox").Outbox
+        legacy_header = import_module("bridge_qq_baseline.core.source").native_header
+        legacy_login = import_module("bridge_qq_baseline.core.qq_source").native_login
+
+    runtime = Path(directory) / "transport-runtime"
+    options = {"credential_fingerprint": "fixture"}
+    account = ("qq-fixture", "synthetic-openid")
+    queue = legacy_queue(runtime, "fixture-deployment", "http://memory.test", **options)
+    try:
+        login = legacy_login(fixture.host)
+        assert login is not None
+        binding = {**fixture.binding, "login": login}
+        queue.sync_permissions([account])
+        authorizing = await fixture.event(data={"id": "transport-grant"})
+        incoming = legacy_header(authorizing, Plain, adapter=fixture.host, binding=binding)
+        assert incoming is not None
+        queue.activate(incoming, queue.access.authorization(*account)["revision"])
+        with patch.object(time, "time", return_value=time.time() + 3):
+            delayed = await fixture.event(data={"id": "transport-replay"})
+            incoming = legacy_header(delayed, Plain, adapter=fixture.host, binding=binding)
+            assert asdict(incoming) == asdict(fixture.header(delayed))
+            capture = queue.capture(incoming, "transport-conversation")
+            queue.release(capture.task_id)
+        frozen = dict(queue.get(capture.task_id))
+        grant = dict(queue.access.authorization(*account))
+        scope = dict(queue.scope(incoming))
+        deployment = queue.deployment_id
+    finally:
+        queue.close()
+
+    alternate = "qq_official_webhook" if fixture.host_type == "qq_official" else "qq_official"
+    switched = Fixture(host_type=alternate)
+    await switched.login()
+    assert switched.header(delayed) is None
+    queue = Outbox(runtime, "fixture-deployment", "http://memory.test", **options)
+    try:
+        assert queue.deployment_id == deployment
+        assert not queue.access.observe_bot(account[0], "qq_official", switched.binding["bot_id"])
+        queue.sync_permissions([account])
+        assert dict(queue.access.authorization(*account)) == grant
+        with patch.object(time, "time", return_value=time.time() + 4):
+            replay = switched.header(await switched.event(data={"id": "transport-replay"}))
+            assert replay is not None
+            target = queue.scope(replay)
+            assert (target["scope_id"], target["bank"], target["generation"]) == (
+                scope["scope_id"], scope["bank"], scope["generation"],
+            )
+            duplicate = queue.capture(replay, "transport-conversation")
+            assert duplicate.task_id == capture.task_id and not duplicate.created
+            assert dict(queue.get(capture.task_id)) == frozen
+    finally:
+        queue.close()
+    return "same_appid_transport_switch_preserves_disk_identity_and_frozen_request"
 
 
 def rejected_command(queue, incoming, expected, *, mode="active"):
@@ -429,10 +494,12 @@ async def main():
             queue.close()
         passed.extend(await control_contracts(current, temporary))
         passed.append(await user_isolation_contract(current, temporary))
+        passed.append(await transport_upgrade_contract(current, temporary))
         passed.extend(await outbound_contracts(current, temporary))
     print(json.dumps({
         "astrbot": VERSION, "qq_botpy": importlib.metadata.version("qq-botpy"),
         "transport": HOST_TYPE,
+        "disk_fixture": "separate baseline tree" if os.environ.get("QQ_BASELINE_ROOT") else "candidate tree",
         "evidence_layer": "actual_host_sdk_objects_synthetic_payloads_and_mocked_login_io",
         "real_qq_login": False, "real_platform_delivery": False,
         "host_receive_clock": "controlled_at_native_event_construction",

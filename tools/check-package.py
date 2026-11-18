@@ -62,7 +62,8 @@ def main():
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
-        "core/source.py", "core/access.py", "core/qq_source.py", "core/weixin_source.py", "core/telegram_source.py", "core/lark_source.py",
+        "core/source.py", "core/access.py", "core/onebot_source.py", "core/qq_source.py",
+        "core/weixin_source.py", "core/telegram_source.py", "core/lark_source.py",
         "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
@@ -72,9 +73,9 @@ def main():
         "deploy/model_transport.py", "tools/check-model-protocols.py",
         "deploy/managed_service.py", "deploy/model_probe.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
-        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md", "docs/FEISHU.md",
-        "docs/WEIXIN.md",
-        "docs/TELEGRAM.md",
+        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
+        "docs/WEIXIN.md", "docs/WINDOWS.md",
+        "docs/TELEGRAM.md", "docs/FEISHU.md",
         "examples/config.qq-official.example.json",
     ):
         assert (root / name).is_file(), name

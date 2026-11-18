@@ -85,7 +85,7 @@
         <legend class="sr-only">插件设置</legend>
         <section class="surface" id="connection-settings">
           <h2 id="connection-heading">连接与访问</h2>
-          <fieldset class="connection-options"><legend class="sr-only">连接方式</legend>
+          <fieldset id="connection-options" class="connection-options"><legend class="sr-only">连接方式</legend>
             <label class="choice"><input type="radio" name="connection-mode" value="managed" checked>安装配套服务</label>
             <label class="choice"><input type="radio" name="connection-mode" value="existing">连接已有服务</label>
           </fieldset>
@@ -171,7 +171,43 @@
     <p id="backup-feedback" class="operation-status" role="status" hidden></p>
     <div class="dialog-actions"><button type="button" data-close="backup-dialog">关闭</button></div>
   </dialog>
-  <dialog id="upgrade-dialog" aria-labelledby="upgrade-heading"><div class="dialog-header"><h2 id="upgrade-heading">升级 Hindsight</h2><button type="button" data-close="upgrade-dialog" aria-label="关闭">×</button></div><section id="service-upgrade"><ol class="upgrade-steps"><li><h3>暂停插件读写</h3><p>暂停期间的新聊天不会保存，普通聊天继续。</p><button id="upgrade-begin" type="button">暂停插件读写</button></li><li><h3>备份并执行升级</h3><p>备份插件配置、业务库和最新控制库。</p><button type="button" data-guide="backup-dialog">查看备份步骤</button><label class="check-label" for="upgrade-backup-confirmed"><input id="upgrade-backup-confirmed" type="checkbox">已备份插件数据，并暂停其他写入</label><button id="upgrade-prepare" type="button">生成升级命令</button><div id="upgrade-installation" class="command-output" hidden><p>在原服务器、原安装目录执行。失败时保持暂停并恢复备份。</p><textarea id="upgrade-command" aria-label="升级命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><button id="copy-upgrade" type="button">复制升级命令</button></div></li><li><h3>核对并结束升级</h3><p>确认版本和旧记忆后恢复写入。</p><div class="actions"><button id="upgrade-verify" type="button">核对升级结果</button><button id="upgrade-resume" type="button" hidden>解除升级暂停</button></div></li></ol><div id="upgrade-abandon" class="actions" hidden><button id="upgrade-cancel" type="button">暂不升级</button></div><p id="upgrade-result" class="operation-status" role="status" hidden></p></section></dialog>
+  <dialog id="upgrade-dialog" aria-labelledby="upgrade-heading">
+    <div class="dialog-header">
+      <h2 id="upgrade-heading">升级 Hindsight</h2>
+      <button type="button" data-close="upgrade-dialog" aria-label="关闭">×</button>
+    </div>
+    <section id="service-upgrade">
+      <ol class="upgrade-steps">
+        <li id="upgrade-begin-step">
+          <h3>暂停插件读写</h3>
+          <p>暂停期间的新聊天不会保存，普通聊天继续。</p>
+          <button id="upgrade-begin" type="button">暂停插件读写</button>
+        </li>
+        <li id="upgrade-prepare-step">
+          <h3>备份并执行升级</h3>
+          <p>备份插件配置、业务库和最新控制库。</p>
+          <button type="button" data-guide="backup-dialog">查看备份步骤</button>
+          <label class="check-label" for="upgrade-backup-confirmed"><input id="upgrade-backup-confirmed" type="checkbox">已备份插件数据，并暂停其他写入</label>
+          <button id="upgrade-prepare" type="button">生成升级命令</button>
+          <div id="upgrade-installation" class="command-output" hidden>
+            <p>在原服务器、原安装目录执行。失败时保持暂停并恢复备份。</p>
+            <textarea id="upgrade-command" aria-label="升级命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea>
+            <button id="copy-upgrade" type="button">复制升级命令</button>
+          </div>
+        </li>
+        <li>
+          <h3>核对并结束升级</h3>
+          <p>确认版本和旧记忆后恢复写入。</p>
+          <div class="actions">
+            <button id="upgrade-verify" type="button">核对升级结果</button>
+            <button id="upgrade-resume" type="button" hidden>解除升级暂停</button>
+          </div>
+        </li>
+      </ol>
+      <div id="upgrade-abandon" class="actions" hidden><button id="upgrade-cancel" type="button">暂不升级</button></div>
+    </section>
+    <p id="upgrade-result" class="operation-status" role="status" hidden></p>
+  </dialog>
   <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label for="maintenance-scope">记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>删除待发送和失败的记录，无法撤销。</p><label class="check-label" for="discard-pending"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
   <script type="module" src="./app.js"></script>
 </body>

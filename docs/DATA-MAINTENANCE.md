@@ -37,6 +37,8 @@ python /AstrBot/data/plugins/astrbot_plugin_hindsight_bridge/scripts/backup.py \
 
 Docker Compose 部署可以在 AstrBot 的 Compose 目录中，给上述命令加上 `docker compose exec -T astrbot` 前缀；`astrbot` 替换成实际服务名。
 
+Windows 的插件备份命令及 pg0 停机备份见 [Windows 原生部署](WINDOWS.md#备份与恢复)。
+
 将 `YYYYMMDD` 替换为备份日期，每次更换 `--output` 的目录名，目标必须是尚不存在的新目录。使用自定义控制目录时，也要替换 `--control-dir`。业务快照和控制副本的输出位置都须位于两个插件数据目录之外。
 
 `--backend-version` 填写实际 Hindsight 版本，可通过服务的 `/v1/version` 核对；省略时清单记录为未知（`null`），不会根据插件默认安装版本猜测。

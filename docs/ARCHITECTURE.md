@@ -20,9 +20,9 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 账号配置只接受 `allowed_accounts` 中明确填写的平台实例与用户组合，空列表关闭所有账号的记忆访问。插件启停由 AstrBot 生命周期管理。
 
-来源头与自动采集共用原始载荷校验。OneBot 原始 `self_id` 证明接收账号，事件携带的客户端须属于当前宿主实例；只读登录检查在异步准备和上传边界执行。未知平台仍拒绝访问。QQ 官方两种传输共用逻辑平台类型 `qq_official`，宿主类型分开核对；身份包含部署、实例、AppID 和原始 OpenID，不同实例始终隔离。
+来源头与自动采集共用原始载荷校验。`core/onebot_source.py` 核对 AstrBot 原生事件、适配器、客户端和原始 `self_id`。只读登录检查在异步准备和上传边界执行。反向 WebSocket 有多个连接且未指定目标时，SDK 无法选定登录账号，记忆访问暂停。QQ 官方两种传输共用逻辑平台类型 `qq_official`，分别核对原生事件类型。身份包含部署、实例、AppID 和原始 OpenID，不同实例始终隔离。
 
-`core/qq_source.py` 只读取 AstrBot 原生 adapter/client 的认证身份。WS 核对 SDK robot，Webhook 核对已认证 helper/user 及 client/API/HTTP 对应；登录快照冻结对象引用和认证 ID。消息携带的 client 和原始 API 必须属于该登录，重载或登录变化后拒绝旧产生方事件。插件不保存 AppSecret、不实现签名服务器或 QQ 客户端。
+`core/qq_source.py` 从 AstrBot 原生适配器读取登录身份。WS 核对 SDK 的机器人身份，Webhook 核对登录用户及 API、HTTP 客户端的归属。事件客户端和原始消息 API 必须匹配登录快照。相同登录恢复连接后沿用原绑定。宿主更换客户端后可以绑定新客户端，旧客户端事件仍会被拒绝。同一客户端上的登录变化会暂停采集，直至宿主更换客户端。登录、验签和消息收发由 AstrBot 负责。
 
 `core/weixin_source.py` 使用原生 `weixin_oc` 登录账号和原始 `to_user_id` 核对接收者，避免把可变 adapter 的新账号附到旧排队事件上。原始用户、uint64 消息 ID、毫秒时间、方向、状态和纯文字条目与宿主组件分别核对。相同账号重新登录可以恢复原范围；账号变化撤销旧绑定，新身份必须重新确认。平台 Token 与发送上下文只由 AstrBot 管理。
 

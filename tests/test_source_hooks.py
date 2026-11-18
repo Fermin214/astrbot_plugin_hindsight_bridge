@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from test_runtime_diagnostics import bridge_class, Configuration, Plain
+from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
@@ -27,7 +28,14 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.clock = patch.object(time, "time", side_effect=lambda: next(ticks) / 1000)
         self.clock.start()
         self.bot = SimpleNamespace(get_login_info=AsyncMock(return_value={"user_id": 1001}))
-        self.adapter = SimpleNamespace(get_client=lambda: self.bot)
+        self.adapter = SimpleNamespace(
+            get_client=lambda: self.bot, meta=lambda: SimpleNamespace(id="qq", name="aiocqhttp"),
+        )
+        adapter_types = patch.object(
+            onebot_source, "native_types", return_value=(SimpleNamespace, SimpleNamespace, SimpleNamespace, dict),
+        )
+        adapter_types.start()
+        self.addCleanup(adapter_types.stop)
         self.context = SimpleNamespace(
             get_config=lambda *args: {
                 "platform": [{"id": "qq", "type": "aiocqhttp"}], "wake_prefix": ["/"],

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import asyncio
+from contextlib import closing
 import json
 from pathlib import Path
 import shutil
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core.client import Operation
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
@@ -143,7 +145,7 @@ class AuthorizationTests(unittest.TestCase):
             self.queue.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         backup = self.root / "snapshot.sqlite3"
         import sqlite3
-        with sqlite3.connect(backup) as target:
+        with closing(sqlite3.connect(backup)) as target:
             self.queue.db.backup(target)
         self.queue.sync_permissions([])
         self.queue.close()
@@ -158,7 +160,7 @@ class AuthorizationTests(unittest.TestCase):
         capture = self.queue.capture(self.incoming, "conversation")
         frozen = dict(self.queue.get(capture.task_id))
         backup = self.root / "before-failure.sqlite3"
-        with sqlite3.connect(backup) as target:
+        with closing(sqlite3.connect(backup)) as target:
             self.queue.db.backup(target)
         self.queue.update(capture.task_id, "tracking", accepted=1)
         self.queue.update(capture.task_id, "failed", error="remote_failed")
@@ -495,13 +497,18 @@ class SourceContracts(unittest.TestCase):
     def test_old_event_producer_is_not_assigned_current_client(self):
         event = self.event("hello")
         incoming = native_header(event, self.Plain)
-        adapter = SimpleNamespace(get_client=lambda: event.bot)
-        self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
-        adapter.get_client = lambda: object()
-        self.assertIsNone(source_identity(event, incoming, adapter))
-        # Even if a host reuses the client, the original recipient remains old.
-        adapter.get_client = lambda: event.bot
-        self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+        adapter = SimpleNamespace(
+            get_client=lambda: event.bot,
+            meta=lambda: SimpleNamespace(id=event.get_platform_id(), name="aiocqhttp"),
+        )
+        with patch.object(
+            onebot_source, "native_types", return_value=(SimpleNamespace, SimpleNamespace, type(event.bot), dict),
+        ):
+            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+            adapter.get_client = lambda: object()
+            self.assertIsNone(source_identity(event, incoming, adapter))
+            adapter.get_client = lambda: event.bot
+            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
 
     def test_unreleased_platforms_and_opaque_ids_do_not_inherit_onebot_rules(self):
         self.assertTrue(platform_details("aiocqhttp")["supported"])

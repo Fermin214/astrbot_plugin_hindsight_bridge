@@ -5,9 +5,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
+import os
 import secrets
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
@@ -36,6 +38,13 @@ from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, Pane
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity, source_identity
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
+
+
+def directory_link(path, target):
+    if os.name == "nt":
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(path), str(target)], check=True, capture_output=True)
+    else:
+        path.symlink_to(target, target_is_directory=True)
 
 
 class Star:
@@ -358,8 +367,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((root / "journal").exists())
         outside = self.directory / "other-plugin"
         outside.mkdir(mode=0o755)
-        (root / "escape").symlink_to(outside, target_is_directory=True)
-        (root / "inside").symlink_to(root, target_is_directory=True)
+        directory_link(root / "escape", outside)
+        directory_link(root / "inside", root)
         self.config["control_state_dir"] = str(root / "inside" / "journal")
         self.assertEqual(self.plugin.control_directory(), root / "journal")
         for path, code in (
@@ -375,7 +384,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.plugin.client)
             self.assertIsNone(self.plugin.outbox)
             self.assertEqual(list(outside.iterdir()), [])
-            self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+            if os.name != "nt":
+                self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
 
     async def test_control_root_replaced_during_tokenizer_load_is_rejected_at_open(self):
         await self.plugin._close_resources()
@@ -384,7 +394,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         outside.mkdir(mode=0o755)
         async def replace_root(name):
             root.rename(root.with_name("original-control"))
-            root.symlink_to(outside, target_is_directory=True)
+            directory_link(root, outside)
         namespace = self.plugin.initialize.__func__.__globals__
         with patch.dict(namespace, load_encoding=replace_root):
             await self.plugin.initialize()
@@ -392,7 +402,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.plugin.outbox)
         self.assertIsNone(self.plugin.client)
         self.assertEqual(list(outside.iterdir()), [])
-        self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+        if os.name != "nt":
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
 
     async def test_default_control_allocation_is_independent_of_business_directory_alias(self):
         root = self.plugin.control_directory()
@@ -405,21 +416,28 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
     async def test_control_file_links_cannot_write_outside_the_allocated_root(self):
         await self.plugin._close_resources()
         root = self.plugin.control_directory()
-        external = self.directory / "external-file"
+        outside = self.directory / "external-directory"
+        outside.mkdir()
+        external = outside / "external-file"
         external.write_text("outside")
         external.chmod(0o644)
         namespace = self.plugin.initialize.__func__.__globals__
         for name in ("control.lock", "control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm"):
             directory = root / name.replace(".", "-")
             directory.mkdir()
-            (directory / name).symlink_to(external)
+            if os.name == "nt":
+                directory_link(directory / name, outside)
+            else:
+                (directory / name).symlink_to(external)
             self.config["control_state_dir"] = str(directory)
             with patch.dict(namespace, load_encoding=AsyncMock()):
                 await self.plugin.initialize()
             self.assertIn("control_directory_outside_plugin", self.plugin.status)
             self.assertIsNone(self.plugin.outbox)
             self.assertEqual(external.read_text(), "outside")
-            self.assertEqual(external.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(list(outside.iterdir()), [external])
+            if os.name != "nt":
+                self.assertEqual(external.stat().st_mode & 0o777, 0o644)
 
     async def test_background_probe_retries_then_cancels_without_leaking_resources(self):
         await self.plugin.client.close()

@@ -13,7 +13,7 @@
 | Telegram 接入 | 原生 Bot（`telegram`），配置与实体限制见 [Telegram 接入](TELEGRAM.md) |
 | 飞书接入 | 原生 `lark`，支持长连接和 Webhook，配置与消息范围见 [飞书接入](FEISHU.md) |
 | 对话类型 | OneBot、微信 ClawBot、Telegram Bot、飞书私聊纯文字；官方 QQ 机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
-| 部署方式 | 默认同一台 Linux 服务器；AstrBot 原生运行或使用 Docker 自定义 bridge、默认 bridge、host 网络，Hindsight 运行于 Linux Docker |
+| 部署方式 | Linux Docker Engine 支持配套安装。Windows 11 x64 使用已有服务入口连接本机或远程 Hindsight，部署与恢复见 [Windows 原生部署](WINDOWS.md) |
 | 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
 
 ### QQ 官方入口
@@ -33,13 +33,15 @@
 
 切换连接方式时，保持原平台实例、AppID 和使用者 OpenID。更换实例或机器人账号后，记忆按新账号分别保存，需在用户与记忆中确认机器人身份。
 
+OneBot 建议为每个机器人建立独立的平台实例。多个机器人连到同一个反向 WebSocket 入口时，宿主无法唯一确认登录账号，Bridge 会暂停该实例的记忆访问。QQ 官方入口复用同一客户端换登录时，重载 AstrBot 平台实例可恢复身份核对。
+
 列表与详情提供内容预览，完整内容可通过 JSON 或官方 Control Plane 导出。QQ 文件发送受平台权限和文件大小限制。连接与发送问题的处理见 [安装指南](INSTALL.md#官方机器人没有回复)。
 
 ## 安装与管理
 
 插件详情中的「记忆管理」分为「用户与记忆」与「插件设置」：配置连接、添加使用者、调整记忆模式、查看保存进度和处理错误。查看、更正、删除及导入导出记忆，使用独立的 Hindsight 官方面板。
 
-配套安装需要 Docker Engine 和 Compose v2，会安装记忆服务和官方管理面板。已有 Hindsight 可直接填写 API 地址与连接密钥。官方面板通过域名反向代理或 SSH 隧道访问，地址和登录密钥与 API 连接分开配置，见 [部署说明](../deploy/README.md)。
+配套安装需要 Linux Docker Engine 和 Compose v2，会安装记忆服务和官方管理面板。已有 Hindsight 可直接填写 API 地址与连接密钥。WSL2 与 Docker Desktop 使用已有服务入口。官方面板的地址和登录密钥与 API 连接分开配置，远程访问示例见 [部署说明](../deploy/README.md)。
 
 ### 模型供应商复用
 

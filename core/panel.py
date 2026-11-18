@@ -24,7 +24,9 @@ from .diagnostics import (
     recall_timeout,
 )
 from .identity import Incoming, Scope, sha256
-from .installer import HINDSIGHT_VERSION, SUPPORTED_VERSIONS, installation, uninstallation
+from .installer import (
+    HINDSIGHT_VERSION, SUPPORTED_VERSIONS, installation, local_installation_supported, uninstallation,
+)
 from .outbox import QueueError
 from .permissions import pairs
 from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
@@ -211,10 +213,15 @@ class MemoryPanel:
         )
 
     def require_managed(self):
+        self.ensure_local_installation()
         state = self.state()
         if not self.managed_connection(state):
             raise PanelError("此操作仅适用于插件安装的配套服务；已有服务仅提供连接与记忆功能。")
         return state
+
+    def ensure_local_installation(self):
+        if not local_installation_supported():
+            raise PanelError("配套部署命令需要 Linux Docker Engine。请启动 Hindsight 后使用「连接已有服务」。")
 
     def upgrade_state(self, state=None):
         state = dict(self.state() if state is None else state)
@@ -260,13 +267,18 @@ class MemoryPanel:
         if "config_revision" in payload and payload["config_revision"] != self.config_revision():
             raise PanelError("配置已被更新，请刷新页面后重新保存。")
 
+    def upgrade_progress(self, state):
+        queue = self.plugin.outbox
+        if not queue or not self.managed_connection(state):
+            return False, False
+        check, pauses = state.get("upgrade_check") or {}, state.get("upgrade_pauses") or {}
+        return (
+            check.get("connection_id") == queue.connection_id and not check.get("verified"),
+            pauses.get("connection_id") == queue.connection_id,
+        )
+
     def ensure_no_upgrade(self):
-        state, queue = self.upgrade_state(), self.plugin.outbox
-        check, pauses = state.get("upgrade_check"), state.get("upgrade_pauses")
-        if queue and self.managed_connection(state) and (
-            check and check.get("connection_id") == queue.connection_id and not check.get("verified")
-            or pauses and pauses.get("connection_id") == queue.connection_id
-        ):
+        if any(self.upgrade_progress(self.upgrade_state())):
             raise PanelError("服务升级尚未结束。请先核对升级结果并解除升级造成的暂停，或选择暂不升级，再修改连接、模型、账号或删除数据。")
 
     @staticmethod
@@ -322,13 +334,17 @@ class MemoryPanel:
     async def service_status(self, *, force=True):
         plugin, state = self.plugin, self.upgrade_state()
         client = plugin.client
-        managed = self.managed_connection(state) and (
+        local_installation = local_installation_supported()
+        pending, paused = self.upgrade_progress(state)
+        managed = (local_installation or pending or paused) and self.managed_connection(state) and (
             not client or self.connection_url(state["api_url"]) == client.url
         )
         ignored = state.get("ignored_upgrades", {})
         result = {
             "version": None, "target": HINDSIGHT_VERSION if managed else None,
             "managed": managed, "upgrade_available": False,
+            "pending": managed and pending, "upgrade_paused": managed and paused,
+            "resume_available": managed and paused and bool((state.get("upgrade_check") or {}).get("verified")),
             "ignored": bool(managed and isinstance(ignored, dict)
                             and ignored.get(self.connection_revision()) == HINDSIGHT_VERSION),
         }
@@ -338,7 +354,7 @@ class MemoryPanel:
             return result
         identity = (
             client.url, sha256(client.api_key), self.config_revision(),
-            bool(state.get("upgrade_check")), bool(state.get("upgrade_pauses")),
+            local_installation, pending, paused,
         )
         if not force and self.version_cache and self.version_cache[0] == identity and self.version_cache[1] > time.monotonic():
             return self.version_cache[2]
@@ -350,21 +366,11 @@ class MemoryPanel:
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                 raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
             result.update(version=version, supported=version in SUPPORTED_VERSIONS,
-                          upgrade_available=managed and version == "1.1.0")
+                          upgrade_available=local_installation and managed and version == "1.1.0")
         except (HindsightError, TimeoutError, PanelError):
             result["message"] = "暂时无法核对服务版本，请检查连接后重试。"
         if plugin.client is not client or plugin.stopping:
             return {"version": None, "target": HINDSIGHT_VERSION, "upgrade_available": False}
-        check = state.get("upgrade_check", {})
-        result["pending"] = bool(
-            managed and check and check.get("connection_id") == plugin.outbox.connection_id
-            and not check.get("verified")
-        )
-        pauses = state.get("upgrade_pauses")
-        result["upgrade_paused"] = bool(
-            managed and pauses and pauses.get("connection_id") == plugin.outbox.connection_id
-        )
-        result["resume_available"] = bool(result["upgrade_paused"] and check.get("verified"))
         self.version_cache = (identity, time.monotonic() + 30, result)
         return result
 
@@ -397,13 +403,24 @@ class MemoryPanel:
         payload = await self.body()
         if not request.username:
             raise PanelError("请使用 AstrBot 管理账号登录。")
+        action = payload.get("action")
+        recovery = action in ("verify", "resume", "cancel")
+        if not recovery:
+            self.ensure_local_installation()
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(60):
             self.check_revision(payload)
             plugin, state = self.plugin, self.upgrade_state()
             status = await self.service_status()
             if not status.get("managed") or not plugin.outbox or plugin.outbox.recovering:
                 raise PanelError("此入口只升级当前插件的配套服务；外部服务请由其管理员升级。")
-            managed_status = await self.managed_request(state)
+            try:
+                managed_status = await self.managed_request(state, recover_upgrade=recovery)
+            except PanelError:
+                if recovery and not local_installation_supported():
+                    raise PanelError(
+                        "无法核对原配套服务的管理接口。请回到原 Linux 部署环境，使用原连接完成或取消升级。"
+                    ) from None
+                raise
             if not managed_status["ready"]:
                 raise PanelError("配套服务还不能处理记忆请求，请先恢复原服务连接。")
             queue, maintenance = plugin.outbox, plugin.worker.maintenance
@@ -491,7 +508,6 @@ class MemoryPanel:
                 plugin.worker.wake.set()
                 return len(targets)
 
-            action = payload.get("action")
             if action in {"verify", "resume"}:
                 check = state.get("upgrade_check")
                 if not check or status["version"] != HINDSIGHT_VERSION:
@@ -801,7 +817,9 @@ class MemoryPanel:
                 connection_message = self.error_message("auth_timeout")
         scopes = await self.user_scopes()
         state = self.state()
-        managed = self.managed_connection(state)
+        local_installation = local_installation_supported()
+        managed = local_installation and self.managed_connection(state)
+        installation_state = state if local_installation else {}
         key_command = ""
         if managed:
             key_command = (
@@ -828,16 +846,19 @@ class MemoryPanel:
                 connection_message = ""
         return {
             "config_revision": self.config_revision(),
+            "capabilities": {
+                "managed_installation": local_installation,
+            },
             "parameters": settings.snapshot(plugin),
             "config": {
                 "configured": configured,
                 "missing_fields": missing,
-                "api_url": config.get("api_url", "") or state.get("api_url", ""),
+                "api_url": config.get("api_url", "") or installation_state.get("api_url", ""),
                 "control_plane_url": self.displayed_control_plane_url(
                     config.get("control_plane_url")
-                    or (state.get("control_plane_url", "") if not configured else "")
+                    or (installation_state.get("control_plane_url", "") if not configured else "")
                 ),
-                "has_api_key": bool(config.get("api_key") or state.get("api_key")),
+                "has_api_key": bool(config.get("api_key") or installation_state.get("api_key")),
                 "connection_revision": self.connection_revision(),
                 "allowed_accounts": config.get("allowed_accounts", []),
                 "managed": managed,
@@ -855,7 +876,7 @@ class MemoryPanel:
             "has_installation": managed,
             "installation_api_url": state.get("api_url", "") if managed else "",
             "control_plane_key_command": key_command,
-            "providers": self.providers().options() if managed or not configured else {},
+            "providers": self.providers().options() if local_installation and (managed or not configured) else {},
             "status": {
                 "label": configuration_message(config) or connection_message or plugin.status,
                 "message": connection_message,
@@ -874,18 +895,22 @@ class MemoryPanel:
         if not key:
             if self.connection_url(url) == self.connection_url(self.plugin.config.get("api_url", "")):
                 key = str(self.plugin.config.get("api_key", ""))
-            state = self.state()
-            if not key and self.connection_url(url) == self.connection_url(state.get("api_url", "")):
-                key = str(state.get("api_key", ""))
+            if not key and local_installation_supported():
+                state = self.state()
+                if self.connection_url(url) == self.connection_url(state.get("api_url", "")):
+                    key = str(state.get("api_key", ""))
         if not url or not key:
-            raise PanelError("请填写服务地址与 Key，或先完成配套服务安装。")
+            raise PanelError("请填写 Hindsight 的 API 地址与密钥。")
         return url, key
 
     async def check(self):
         payload = await self.body()
         url, key = self.credentials(payload)
         state = self.state()
-        if state.get("management_url") and self.managed_connection(state, api_url=url, api_key=key):
+        if (
+            local_installation_supported() and state.get("management_url")
+            and self.managed_connection(state, api_url=url, api_key=key)
+        ):
             status = await self.managed_request(state)
             url = state["api_url"]
             if not status["ready"]:
@@ -919,7 +944,9 @@ class MemoryPanel:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise PanelError("配套网络记录损坏，请重新执行安装命令。") from None
 
-    async def managed_request(self, state, environment=None):
+    async def managed_request(self, state, environment=None, *, recover_upgrade=False):
+        if not recover_upgrade or environment is not None or not any(self.upgrade_progress(state)):
+            self.ensure_local_installation()
         endpoints = self.network_endpoints(state)
         url, key = state.get("management_url"), state.get("management_key")
         if endpoints:
@@ -962,6 +989,7 @@ class MemoryPanel:
             raise PanelError("无法连接配套服务。请先执行安装命令；已安装则检查服务是否运行。") from None
 
     async def prepare(self):
+        self.ensure_local_installation()
         payload = await self.body()
         async with self.lock:
             self.check_revision(payload)
@@ -998,6 +1026,7 @@ class MemoryPanel:
             }
 
     def managed_target(self, payload):
+        self.ensure_local_installation()
         self.ensure_open()
         state = self.state()
         if payload.get("mode") != "managed" or payload.get("installation_id") != state.get("id"):
@@ -1015,6 +1044,7 @@ class MemoryPanel:
         return result
 
     async def managed_options(self):
+        self.ensure_local_installation()
         payload = await self.body()
         self.check_revision(payload)
         if payload.get("mode") != "managed":
@@ -1224,7 +1254,9 @@ class MemoryPanel:
         return await self.apply_models(payload)
 
     async def model_status(self):
-        return dict(self.model_job) if self.managed_connection() and self.model_job else {"status": "idle"}
+        if local_installation_supported() and self.managed_connection() and self.model_job:
+            return dict(self.model_job)
+        return {"status": "idle"}
 
     async def run_model_job(self, payload):
         try:
@@ -1284,6 +1316,7 @@ class MemoryPanel:
             return {"saved": True, "config_revision": self.config_revision(), "message": "模型配置已保存并生效。"}
 
     async def prepare_uninstall(self):
+        self.ensure_local_installation()
         payload = await self.body()
         async with self.lock:
             self.ensure_no_upgrade()
@@ -1429,8 +1462,10 @@ class MemoryPanel:
                     for name in ("allowed_accounts", "control_plane_url"))
         )
         try:
+            if mode == "managed" and ("mode" in payload or not local_change):
+                self.ensure_local_installation()
             if not local_change:
-                if mode != "existing" and state.get("management_url") and self.managed_connection(
+                if local_installation_supported() and mode != "existing" and state.get("management_url") and self.managed_connection(
                     state, api_url=client.url, api_key=key,
                 ):
                     status = await self.managed_request(state)

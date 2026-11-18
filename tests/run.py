@@ -21,9 +21,15 @@ def main():
         package = types.ModuleType(name)
         package.__path__ = [str(path)]
         sys.modules[name] = package
-    suite = unittest.defaultTestLoader.discover(
-        str(root / "tests"), pattern="test_*.py"
-    )
+    tests = root / "tests"
+    if sys.platform == "win32":
+        linux_tests = {"test_installer", "test_managed_service"}
+        print("Linux deployment checks run in the Linux job: " + ", ".join(sorted(linux_tests)), flush=True)
+        sys.path.insert(0, str(tests))
+        names = [path.stem for path in sorted(tests.glob("test_*.py")) if path.stem not in linux_tests]
+        suite = unittest.defaultTestLoader.loadTestsFromNames(names)
+    else:
+        suite = unittest.defaultTestLoader.discover(str(tests), pattern="test_*.py")
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     frontend = subprocess.run([node, str(root / "tests" / "test_memory_view.js")], check=False)
     return 0 if result.wasSuccessful() and frontend.returncode == 0 else 1

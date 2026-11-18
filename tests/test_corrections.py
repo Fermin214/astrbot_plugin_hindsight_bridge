@@ -1,5 +1,6 @@
 """Native recall results and safe handoff from the removed correction store."""
 
+from contextlib import closing
 import json
 import sqlite3
 import tempfile
@@ -40,12 +41,12 @@ class NativeMemories(unittest.TestCase):
             runtime = Path(directory) / "runtime"
             runtime.mkdir()
             path = runtime / "runtime.sqlite3"
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("CREATE TABLE corrections(text TEXT)")
                 db.execute("INSERT INTO corrections VALUES ('preserve-me')")
             with self.assertRaisesRegex(QueueError, "legacy_corrections_require_handover"):
                 Outbox(runtime, "test", "http://memory.test", credential_fingerprint="key")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 self.assertEqual(db.execute("SELECT text FROM corrections").fetchone()[0],
                                  "preserve-me")
 
@@ -53,7 +54,7 @@ class NativeMemories(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory) / "runtime"
             runtime.mkdir()
-            with sqlite3.connect(runtime / "runtime.sqlite3") as db:
+            with closing(sqlite3.connect(runtime / "runtime.sqlite3")) as db, db:
                 db.execute("CREATE TABLE corrections(text TEXT)")
             queue = Outbox(runtime, "test", "http://memory.test", credential_fingerprint="key")
             try:

@@ -177,7 +177,8 @@ function clearUninstall() {
 }
 
 function managedMode() {
-  return document.querySelector('[name="connection-mode"]:checked')?.value === "managed";
+  return data?.capabilities?.managed_installation !== false
+    && document.querySelector('[name="connection-mode"]:checked')?.value === "managed";
 }
 
 async function loadManagedSetup() {
@@ -194,7 +195,10 @@ async function loadManagedSetup() {
 }
 
 function updateConnectionMode() {
-  const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
+  const managed = managedMode();
+  const installable = data?.capabilities?.managed_installation !== false;
+  $("connection-options").hidden = !installable;
+  $("connection-options").disabled = !installable;
   $("setup-intro").hidden = !managed || (data?.config.managed === true && data?.config.configured === true);
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
@@ -215,19 +219,21 @@ function renderServiceVersion() {
   $("version-check-result").hidden = !versionCheck;
   $("version-check-result").textContent = versionCheck?.message || "";
   $("version-check-result").classList.toggle("error", versionCheck?.error === true);
-  const managed = data?.config.managed && backend.managed;
-  const upgrading = managed && (!!backend.pending || !!backend.upgrade_paused);
-  const available = managed && backend.upgrade_available === true;
-  $("upgrade-notice").hidden = !managed || (!upgrading && (!available || backend.ignored === true));
+  const upgrading = backend.managed && (!!backend.pending || !!backend.upgrade_paused);
+  const available = data?.config.managed && backend.managed && backend.upgrade_available === true;
+  const installable = data?.capabilities?.managed_installation !== false;
+  $("upgrade-notice").hidden = !upgrading && (!available || backend.ignored === true);
   $("upgrade-notice-title").textContent = upgrading
     ? backend.resume_available ? "Hindsight 已升级，读写仍暂停" : "Hindsight 升级待完成"
     : `Hindsight 可升级：${backend.version} → ${backend.target}`;
   $("ignore-upgrade").hidden = upgrading;
   $("view-upgrade").textContent = upgrading ? "查看升级进度" : "查看升级";
-  $("go-upgrade").hidden = !managed || (!available && !upgrading);
+  $("go-upgrade").hidden = !available && !upgrading;
   $("go-upgrade").textContent = upgrading ? "查看升级进度" : "升级服务";
-  $("service-upgrade").hidden = !managed || (!available && !upgrading);
-  $("reinstall").disabled = locks.has("setup") || upgrading || !!(managed && available);
+  $("service-upgrade").hidden = !available && !upgrading;
+  $("upgrade-begin-step").hidden = !installable;
+  $("upgrade-prepare-step").hidden = !installable;
+  $("reinstall").disabled = locks.has("setup") || upgrading || !!available;
   $("upgrade-begin").disabled = locks.has("setup") || !available || upgrading;
   $("upgrade-prepare").disabled = locks.has("setup") || !available || !upgrading;
   $("upgrade-abandon").hidden = backend.version !== "1.1.0" || !upgrading;
@@ -261,6 +267,10 @@ async function checkServiceVersion() {
       if (!backend.managed) message = `检查完成：Hindsight ${backend.version}${backend.supported === false ? "，插件未确认兼容此版本" : ""}。`;
       else if (backend.version === backend.target) message = `已是插件支持的配套版本 ${backend.target}。`;
       else if (backend.upgrade_available) message = `检查完成：可从 ${backend.version} 升级到插件支持的配套版本 ${backend.target}。`;
+      else if (backend.supported === true) {
+        message = `插件兼容 Hindsight ${backend.version}。`;
+        if (data.capabilities?.managed_installation === false) message += "此环境无法生成升级命令。";
+      }
       else message = `检查完成：Hindsight ${backend.version}，插件支持的配套版本为 ${backend.target}；此版本未确认兼容，不执行降级。`;
     }
     versionCheck = { identity, message, error: !!backend.message || !backend.version };
@@ -331,7 +341,9 @@ function hydrateConfig() {
   $("control-plane-url").value = config.control_plane_url || "";
   $("connection-result").hidden = true;
   $("api-key").placeholder = config.has_api_key ? "留空沿用已保存的密钥" : "填写服务 API 密钥";
-  document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
+  const installable = data.capabilities?.managed_installation !== false;
+  const mode = installable && (config.managed || !config.api_url) ? "managed" : "existing";
+  document.querySelector(`[name="connection-mode"][value="${mode}"]`).checked = true;
   managedSetup = config.managed ? { installation_id: data.installation_id, api_url: data.installation_api_url,
     providers: data.providers, has_installation: data.has_installation } : null;
   updateConnectionMode();
@@ -1343,7 +1355,8 @@ function clearCommands() {
 }
 
 function openUpgrade() {
-  if (!data?.config.managed || !data?.backend?.managed) return;
+  const backend = data?.backend;
+  if (!backend?.managed || !(data.config.managed || backend.pending || backend.upgrade_paused)) return;
   activateTab("setup");
   if (!$("upgrade-dialog").open) $("upgrade-dialog").showModal();
 }
