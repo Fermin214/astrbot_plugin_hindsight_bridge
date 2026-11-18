@@ -4,6 +4,7 @@ import ast
 import asyncio
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
@@ -137,6 +138,7 @@ class LiveHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "startup failed"):
             state.launch("astrbot", "official-test-image")
 
+    @unittest.skipUnless(hasattr(os, "fchmod"), "POSIX file modes are covered in the Linux job")
     def test_private_files_have_0600_permissions_even_when_rewritten(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

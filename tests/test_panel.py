@@ -62,6 +62,9 @@ class InMemoryPanel(module.MemoryPanel):
 
 class PanelTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        support = patch.object(module, "local_installation_supported", return_value=True)
+        self.installation_supported = support.start()
+        self.addCleanup(support.stop)
         self.profile = Config(provider_settings={"datetime_system_prompt": True, "identifier": True})
         self.profile.save_config = unittest.mock.Mock()
         self.config = Config(
@@ -529,6 +532,32 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             await self.save()
         self.assertEqual(self.config, before)
         self.assertEqual(self.auth_calls, [])
+
+    async def test_windows_uses_http_only_and_leaves_installation_state_alone(self):
+        self.installation_supported.return_value = False
+        state = {"id": "012345abcdef", "api_url": self.config["api_url"],
+                 "api_key": self.config["api_key"], "management_url": "http://memory.test:8766"}
+        self.panel.store_state(state)
+        self.panel.managed_request = AsyncMock()
+        self.panel.body = AsyncMock(return_value={"mode": "managed", "installation_id": state["id"]})
+        with patch.object(module.sys, "platform", "win32"):
+            snapshot = await self.panel.bootstrap()
+        self.assertEqual(snapshot["capabilities"], {"managed_installation": False, "windows_guide": True})
+        self.assertFalse(snapshot["config"]["managed"])
+        self.assertFalse(snapshot["has_installation"])
+        for operation in (
+            self.panel.prepare, self.panel.prepare_uninstall, self.panel.managed_options,
+            self.panel.managed_connect, self.panel.managed_status, self.panel.managed_version,
+            self.panel.save_models, self.panel.save,
+        ):
+            with self.subTest(operation=operation.__name__), self.assertRaisesRegex(module.PanelError, "Linux Docker Engine"):
+                await operation()
+        self.assertEqual(self.panel.saved_state, state)
+        self.panel.body.return_value = {"mode": "existing", "api_url": state["api_url"]}
+        self.assertTrue((await self.panel.check())["ready"])
+        self.assertEqual(self.auth_calls, [(state["api_url"], state["api_key"])])
+        self.assertEqual(self.panel.saved_state, state)
+        self.panel.managed_request.assert_not_awaited()
 
     async def test_connected_user_can_set_mode_before_first_message(self):
         @asynccontextmanager

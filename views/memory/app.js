@@ -177,7 +177,8 @@ function clearUninstall() {
 }
 
 function managedMode() {
-  return document.querySelector('[name="connection-mode"]:checked')?.value === "managed";
+  return data?.capabilities?.managed_installation !== false
+    && document.querySelector('[name="connection-mode"]:checked')?.value === "managed";
 }
 
 async function loadManagedSetup() {
@@ -194,7 +195,11 @@ async function loadManagedSetup() {
 }
 
 function updateConnectionMode() {
-  const managed = document.querySelector('[name="connection-mode"]:checked').value === "managed";
+  const managed = managedMode();
+  const installable = data?.capabilities?.managed_installation !== false;
+  $("connection-options").hidden = !installable;
+  $("connection-options").disabled = !installable;
+  $("windows-guide").hidden = data?.capabilities?.windows_guide !== true;
   $("setup-intro").hidden = !managed || (data?.config.managed === true && data?.config.configured === true);
   $("managed-settings").hidden = !managed;
   $("models-settings").hidden = !managed;
@@ -331,7 +336,9 @@ function hydrateConfig() {
   $("control-plane-url").value = config.control_plane_url || "";
   $("connection-result").hidden = true;
   $("api-key").placeholder = config.has_api_key ? "留空沿用已保存的密钥" : "填写服务 API 密钥";
-  document.querySelector(`[name="connection-mode"][value="${config.managed || !config.api_url ? "managed" : "existing"}"]`).checked = true;
+  const installable = data.capabilities?.managed_installation !== false;
+  const mode = installable && (config.managed || !config.api_url) ? "managed" : "existing";
+  document.querySelector(`[name="connection-mode"][value="${mode}"]`).checked = true;
   managedSetup = config.managed ? { installation_id: data.installation_id, api_url: data.installation_api_url,
     providers: data.providers, has_installation: data.has_installation } : null;
   updateConnectionMode();

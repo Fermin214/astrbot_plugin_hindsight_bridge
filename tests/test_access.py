@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import asyncio
+from contextlib import closing
 import json
 from pathlib import Path
 import shutil
@@ -144,7 +145,7 @@ class AuthorizationTests(unittest.TestCase):
             self.queue.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         backup = self.root / "snapshot.sqlite3"
         import sqlite3
-        with sqlite3.connect(backup) as target:
+        with closing(sqlite3.connect(backup)) as target:
             self.queue.db.backup(target)
         self.queue.sync_permissions([])
         self.queue.close()
@@ -159,7 +160,7 @@ class AuthorizationTests(unittest.TestCase):
         capture = self.queue.capture(self.incoming, "conversation")
         frozen = dict(self.queue.get(capture.task_id))
         backup = self.root / "before-failure.sqlite3"
-        with sqlite3.connect(backup) as target:
+        with closing(sqlite3.connect(backup)) as target:
             self.queue.db.backup(target)
         self.queue.update(capture.task_id, "tracking", accepted=1)
         self.queue.update(capture.task_id, "failed", error="remote_failed")

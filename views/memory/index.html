@@ -85,10 +85,11 @@
         <legend class="sr-only">插件设置</legend>
         <section class="surface" id="connection-settings">
           <h2 id="connection-heading">连接与访问</h2>
-          <fieldset class="connection-options"><legend class="sr-only">连接方式</legend>
+          <fieldset id="connection-options" class="connection-options"><legend class="sr-only">连接方式</legend>
             <label class="choice"><input type="radio" name="connection-mode" value="managed" checked>安装配套服务</label>
             <label class="choice"><input type="radio" name="connection-mode" value="existing">连接已有服务</label>
           </fieldset>
+          <p id="windows-guide" hidden><a href="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/WINDOWS.md" target="_blank" rel="noopener">Windows 原生部署指南</a></p>
           <div id="setup-intro" hidden><div id="managed-settings"><button id="prepare" type="button">生成安装命令</button></div></div>
           <section id="models-settings" class="connection-models">
             <h3>模型</h3>

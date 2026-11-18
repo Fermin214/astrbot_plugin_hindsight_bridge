@@ -5,15 +5,24 @@ import gzip
 import io
 import json
 from pathlib import Path
+import platform
 import re
 import secrets
 import shlex
+import sys
 import tarfile
 from urllib.parse import urlsplit
 
 HINDSIGHT_VERSION = "1.2.0"
 SUPPORTED_VERSIONS = ("1.1.0", HINDSIGHT_VERSION)
 POSTGRES_IMAGE = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2"
+
+
+def local_installation_supported():
+    if sys.platform != "linux":
+        return False
+    release = platform.release().lower()
+    return "microsoft" not in release and "linuxkit" not in release
 
 
 COMPOSE = """\

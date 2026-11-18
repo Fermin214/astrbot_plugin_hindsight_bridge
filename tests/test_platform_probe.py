@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -82,8 +83,9 @@ class PlatformProbeTests(unittest.TestCase):
             self.assertEqual(manifest["platform"], "weixin_oc")
             compose = json.loads((destination / "compose.yaml").read_text())
             self.assertEqual(compose["services"]["astrbot"]["ports"], ["127.0.0.1:6188:6185"])
-            self.assertEqual((destination / ".env").stat().st_mode & 0o777, 0o600)
-            self.assertEqual((destination / "data/cmd_config.json").stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual((destination / ".env").stat().st_mode & 0o777, 0o600)
+                self.assertEqual((destination / "data/cmd_config.json").stat().st_mode & 0o777, 0o600)
             probe_config = json.loads((destination / "data/plugins" / preparation.PROBE / "_conf_schema.json").read_text())
             self.assertFalse(probe_config["enabled"]["default"])
             before = (destination / ".env").read_bytes()

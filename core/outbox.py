@@ -5,6 +5,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -101,7 +102,7 @@ class Outbox:
             exclusive_lock(self.lock)
             legacy = self.directory / "outbox.sqlite3"
             if legacy.exists():
-                with sqlite3.connect(legacy.as_uri() + "?mode=ro", uri=True) as old:
+                with closing(sqlite3.connect(legacy.as_uri() + "?mode=ro", uri=True)) as old:
                     if old.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]:
                         raise QueueError("legacy_queue_requires_migration")
             self.db = sqlite3.connect(self.directory / "runtime.sqlite3", timeout=2)

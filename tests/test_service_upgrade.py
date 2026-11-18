@@ -18,6 +18,9 @@ from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, Pane
 
 class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        support = patch("plugins.astrbot_plugin_hindsight_bridge.core.panel.local_installation_supported", return_value=True)
+        support.start()
+        self.addCleanup(support.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.client = HindsightClient("http://memory.test", "valid-key")

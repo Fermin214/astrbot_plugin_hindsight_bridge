@@ -98,6 +98,30 @@ function parameterHarness() {
   return context;
 }
 
+test("Windows setup displays the existing-service form without managed controls", () => {
+  const context = harness();
+  context.document.querySelector = () => ({ value: "managed" });
+  context.data = { config: {}, has_installation: true, capabilities: {
+    managed_installation: false, windows_guide: true,
+  } };
+  context.updateConnectionMode();
+  assert.equal(context.$("connection-options").hidden, true);
+  assert.equal(context.$("connection-options").disabled, true);
+  assert.equal(context.$("windows-guide").hidden, false);
+  assert.equal(context.$("models-settings").hidden, true);
+  assert.equal(context.$("maintenance").hidden, true);
+  assert.equal(context.$("api-url").readOnly, false);
+  assert.equal(context.$("api-key-field").hidden, false);
+  assert.equal(context.$("save-settings").hidden, false);
+  assert.equal(context.$("check-connection").hidden, false);
+
+  context.data.capabilities = { managed_installation: true, windows_guide: false };
+  context.updateConnectionMode();
+  assert.equal(context.$("connection-options").hidden, false);
+  assert.equal(context.$("windows-guide").hidden, true);
+  assert.equal(context.$("maintenance").hidden, false);
+});
+
 test("memory settings polling retains drafts and exposes conflicts without changing saved values", () => {
   const context = parameterHarness();
   assert.equal(context.$("save-parameters").disabled, true);
