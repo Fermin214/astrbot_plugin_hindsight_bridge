@@ -73,9 +73,9 @@ def main():
         "deploy/model_transport.py", "tools/check-model-protocols.py",
         "deploy/managed_service.py", "deploy/model_probe.py",
         "docs/INSTALL.md", "docs/USAGE.md", "docs/SUPPORT.md",
-        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md", "docs/FEISHU.md",
-        "docs/WEIXIN.md",
-        "docs/TELEGRAM.md",
+        "docs/DATA-MAINTENANCE.md", "docs/ARCHITECTURE.md", "docs/SETUP-DESIGN.md",
+        "docs/WEIXIN.md", "docs/WINDOWS.md",
+        "docs/TELEGRAM.md", "docs/FEISHU.md",
         "examples/config.qq-official.example.json",
     ):
         assert (root / name).is_file(), name

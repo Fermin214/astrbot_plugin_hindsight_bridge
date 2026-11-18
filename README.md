@@ -10,7 +10,7 @@
 
 ## 安装
 
-支持 **Linux 服务端**、**AstrBot 4.29.1 及以上的内置执行器 `local`** 和 **Hindsight 1.1.0 / 1.2.0**。平台支持 OneBot v11（`aiocqhttp`）、QQ 官方机器人 C2C（WebSocket `qq_official` 与 Webhook `qq_official_webhook`）、微信原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）、[Telegram Bot](docs/TELEGRAM.md)（`telegram`）和[飞书](docs/FEISHU.md)（`lark`）私聊。可连接已有服务，也可使用配套安装器同机部署。完整限制见 [兼容范围](docs/SUPPORT.md)。
+使用 **AstrBot 4.29.1 及以上的内置执行器 `local`** 和 **Hindsight 1.1.0 / 1.2.0**。平台支持 OneBot v11（`aiocqhttp`）、QQ 官方机器人 C2C（WebSocket `qq_official` 与 Webhook `qq_official_webhook`）、微信原生 [ClawBot](docs/WEIXIN.md)（`weixin_oc`）、[Telegram Bot](docs/TELEGRAM.md)（`telegram`）和[飞书](docs/FEISHU.md)（`lark`）私聊。Linux Docker Engine 可使用配套安装器，Windows 可连接本机或远程 Hindsight。完整范围见 [兼容范围](docs/SUPPORT.md)。
 
 1. 在 AstrBot 打开 **插件管理 → 安装 → 从链接安装**，输入：
 
@@ -37,7 +37,7 @@
 | 服务备份与升级 | 插件提供备份步骤与升级命令，升级后核对结果 | 由已有服务自身维护 |
 | 重新部署与卸载服务 | 插件按安装记录生成专属命令 | 由已有服务自身维护 |
 
-详细步骤见 [安装指南](docs/INSTALL.md)。手工管理后端见 [Linux 部署说明](deploy/README.md)。
+详细步骤见 [安装指南](docs/INSTALL.md)、[Windows 原生部署](docs/WINDOWS.md)和 [Linux 部署说明](deploy/README.md)。
 
 ## 升级
 

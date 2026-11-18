@@ -10,7 +10,7 @@ Manage connections, add users, and adjust memory modes directly in the AstrBot p
 
 ## Installation
 
-Supports **Linux server environments**, **AstrBot 4.29.1+ with the built-in `local` executor**, and **Hindsight 1.1.0 / 1.2.0**. Platforms supported: OneBot v11 (`aiocqhttp`), QQ Official Bot C2C (WebSocket `qq_official` and Webhook `qq_official_webhook`), WeChat native [ClawBot](docs/WEIXIN.md) (`weixin_oc`), [Telegram Bot](docs/TELEGRAM.md) (`telegram`), and [Feishu](docs/FEISHU.md) (`lark`) private chats. You can connect an existing service or use the companion installer for single-host deployment. Full requirements are listed in [Compatibility](docs/SUPPORT.md).
+Requires **AstrBot 4.29.1+ with the built-in `local` executor** and **Hindsight 1.1.0 / 1.2.0**. Supported private chats include OneBot v11 (`aiocqhttp`), QQ Official Bot C2C (WebSocket `qq_official` and Webhook `qq_official_webhook`), WeChat native [ClawBot](docs/WEIXIN.md) (`weixin_oc`), [Telegram Bot](docs/TELEGRAM.md) (`telegram`), and [Feishu](docs/FEISHU.md) (`lark`). Linux Docker Engine supports the companion installer. On Windows, connect to a local or remote Hindsight service. See [Compatibility](docs/SUPPORT.md).
 
 1. In AstrBot, navigate to **Plugins → Install → Install from URL**, and enter:
 
@@ -37,7 +37,7 @@ Management differences between the two modes:
 | Service backup and upgrades | Plugin provides steps and commands | Maintained in existing service |
 | Service redeploy and uninstall | Plugin generates dedicated commands | Maintained in existing service |
 
-Detailed steps are available in the [Installation Guide](docs/INSTALL.md). Manual backend deployment is documented in [Linux Deployment](deploy/README.md).
+See the [Installation Guide](docs/INSTALL.md), [Native Windows Deployment](docs/WINDOWS.md), and [Linux Deployment](deploy/README.md) for setup steps.
 
 ## Upgrading
 
