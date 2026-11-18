@@ -394,6 +394,16 @@ class QQLoginHookTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.prepare_sources()
         self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "1001")
 
+    async def test_login_change_cannot_rebind_reused_client_after_adapter_disappears(self):
+        adapter, self.adapter = self.adapter, None
+        await self.plugin.prepare_sources()
+        self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "")
+        replace_login(adapter)
+        self.adapter = adapter
+        await self.plugin.prepare_sources()
+        self.assertTrue(self.plugin.source_accounts["qq"]["invalid_login"])
+        self.assertEqual(self.plugin.source_accounts["qq"]["bot_id"], "")
+
     async def test_same_client_login_change_stays_invalid_until_native_adapter_replacement(self):
         replace_login(self.adapter)
         self.plugin.refresh_permissions()

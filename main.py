@@ -334,12 +334,12 @@ class HindsightBridge(Star):
                 record = next((row for row in self.context.get_config().get("platform", [])
                                if str(row.get("id")) == instance), {})
                 previous_login = previous.get("login")
-                same_qq_client = (
+                unresolved_qq_login = (
                     record.get("type") in {"qq_official", "qq_official_webhook"}
                     and previous_login is not None
-                    and previous_login.client is client
+                    and (client is None or previous_login.client is client)
                 )
-                invalid = same_qq_client and (
+                invalid = unresolved_qq_login and (
                     previous.get("invalid_login", False)
                     or login is not None and not previous_login.matches(login)
                 )
@@ -347,7 +347,7 @@ class HindsightBridge(Star):
                     bot = ""
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
-                    "login": previous_login if same_qq_client and (invalid or login is None) else login,
+                    "login": previous_login if unresolved_qq_login and (invalid or login is None) else login,
                     "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
                 logical_type = platform_details(record.get("type", ""))["logical_type"]
