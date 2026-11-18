@@ -151,10 +151,10 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
 
     async def test_recall_timeout_preserves_completed_background_with_failure_status(self):
         self.select()
-        self.config["recall_timeout"] = 2
-        self.fact_gate = asyncio.Event().wait
+        self.fact_gate = AsyncMock(side_effect=TimeoutError)
         event, req = self.turn()
         await self.plugin.add_memory(event, req)
+        self.fact_gate.assert_awaited_once()
         self.assertIn("Native background marker.", req.extra_user_content_parts[0].text)
         self.assertIn("recall_timeout", req.extra_user_content_parts[0].text)
         self.assertEqual(self.plugin.recall_status(self.scope())["outcome"], "error")
