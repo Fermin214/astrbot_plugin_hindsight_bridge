@@ -311,7 +311,7 @@ class Acceptance:
         self.record("native_transient_consolidation_supersession_blocks_pending_replacement_then_allows_maintenance_resume")
 
     async def host_checks(self):
-        run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", "--output", str(self.output))
+        run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", "--working-tree", "--output", str(self.output))
         for version in ("4.29.1", "4.29.4"):
             name = "hb-compat-" + self.state["id"] + "-" + version.replace(".", "")
             self.hosts.append(name)
