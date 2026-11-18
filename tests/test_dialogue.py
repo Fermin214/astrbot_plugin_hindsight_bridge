@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from queue_fixture import confirm_sources
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
@@ -157,6 +158,7 @@ class DialogueDurability(unittest.TestCase):
             "http://memory.test",
             credential_fingerprint="key",
         )
+        confirm_sources(self.queue, ("onebot", "bot", "alice"))
 
     def tearDown(self):
         self.queue.close()

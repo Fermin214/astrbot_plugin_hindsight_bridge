@@ -3,14 +3,16 @@
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 
 import aiohttp
 from playwright.async_api import async_playwright
 
-from live_e2e import Acceptance, ALICE, BOB, NAME, OneBot, ROOT, database, until
+from live_e2e import Acceptance, ALICE, BOB, NAME, OneBot, ROOT, database, jsonl, until
 
 
 class Feedback(Acceptance):
@@ -150,6 +152,25 @@ class Feedback(Acceptance):
             scope = await self.scope()
             return await self.http("GET", self.prefix + "/scopes/" + scope["scope_id"] + "/background")
 
+        async def check_row(value, page_id, *, exceeded=False):
+            native = next(item for item in value["pages"] if item["page_id"] == page_id)
+            check = next(item for item in value["checks"] if item["page_id"] == page_id)
+            assert value["selection"]["page_id"] == page_id
+            row = frame.locator(".knowledge-page").filter(
+                has=frame.get_by_text("1. " + native["path"], exact=True)
+            )
+            metrics = f'{check["tokens"]} / {check["limits"]["tokens"]} token'
+            if exceeded:
+                metrics += "（超限）"
+            await row.locator(".page-metrics").filter(
+                has_text=re.compile("^" + re.escape(metrics) + "$")
+            ).wait_for(timeout=15000)
+            index = row.get_by_text("有新记忆待刷新", exact=True)
+            if native.get("index_stale") is True:
+                await index.wait_for()
+            else:
+                assert await index.count() == 0
+
         async def chat(used, code=""):
             before = (await self.scope())["background"].get("status", {}).get("checked_at", 0)
             count = len(self.requests())
@@ -185,8 +206,7 @@ class Feedback(Acceptance):
         await page.reload()
         await self.dismiss_host_notice(page)
         await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-        await frame.locator("#background-check").filter(has_text="知识页太长").wait_for(timeout=15000)
-        await frame.locator("#background-index").filter(has_text="目录标记").wait_for()
+        await check_row(checked, long, exceeded=True)
         assert "HB-FEEDBACK-LONG complete paragraph." not in await chat(False, "知识页太长")
         self.report["measurements"]["long_page_check"] = checked["check"]
         self.passed("selection_size_warning_and_index_state_survive_native_dashboard_reload")
@@ -208,7 +228,7 @@ class Feedback(Acceptance):
         assert (await self.bootstrap())["parameters"]["values"] == saved_parameters
         assert (await self.scope())["background"]["page_id"] == long
         await frame.locator("#background-recheck").click()
-        await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        await check_row(await selected_check(), long)
         assert ("HB-FEEDBACK-LONG complete paragraph. " * 120).rstrip() in await chat(True)
         self.passed("native_panel_expands_three_budgets_and_injects_entire_long_page_after_reload_without_material_backflow")
         for settings in ({"context_max_chars": 256}, {"context_max_chars": 24000, "recall_max_tokens": 256},
@@ -243,7 +263,7 @@ class Feedback(Acceptance):
         await page.reload()
         await self.dismiss_host_notice(page)
         await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
-        await frame.locator("#background-check").filter(has_text="长度检查通过").wait_for(timeout=15000)
+        await check_row(await selected_check(), short)
         from parameter_panel import verify_advanced
 
         await verify_advanced(self, frame)
@@ -331,6 +351,13 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("assistant_capture"):
+                    from reading_e2e import verify_assistant_capture
+
+                    await verify_assistant_capture(self)
+                    self.report.update(complete=True, acceptance_scope="native primary assistant retention in automatic and tool reading modes")
+                    self.save()
+                    return
                 if self.settings.get("reflect"):
                     from reflection_e2e import verify
 
@@ -438,8 +465,57 @@ class Feedback(Acceptance):
                     self.passed("identity_reconfirmation_invalidates_reference_and_explicit_reselection_clears_notice")
 
                 snapshot = ROOT / "pre-forget.sqlite3"
-                with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
-                    source.backup(destination)
+                control = ROOT / "control-volume/control.sqlite3"
+                latest_control = ROOT / "recovery-backup/control.sqlite3"
+
+                async def backup(name):
+                    output = ROOT / "recovery-backup" / name
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable, "/candidate-source/scripts/backup.py",
+                        "--data-dir", str(self.runtime.parent), "--control-dir", str(control.parent),
+                        "--output", str(output), "--latest-control", str(latest_control),
+                        "--backend-version", self.settings["hindsight_version"],
+                    )
+                    assert await process.wait() == 0
+                    return output / "runtime.sqlite3"
+
+                if self.settings.get("recovery_only"):
+                    await self.action(identifier, "mode", mode="active")
+                    await asyncio.sleep(1.1)
+                    await backup("before-delivery")
+                    before_revision = database(latest_control, "SELECT value FROM settings WHERE key='revision'")
+                    before_requests = {row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests")}
+                    await self.bot.chat(ALICE, "A synthetic completed delivery between backups.")
+
+                    async def delivered():
+                        return {
+                            row["operation_id"] for row in database(
+                                control, "SELECT operation_id FROM requests WHERE bank=? AND dispatched=1 AND accepted=1", (bank,),
+                            )
+                        } - before_requests
+
+                    delivered_requests = await until(delivered, timeout=60, label="accepted delivery after the first backup")
+                    await backup("after-delivery")
+                    assert database(latest_control, "SELECT value FROM settings WHERE key='revision'") == before_revision
+                    assert delivered_requests <= {
+                        row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests WHERE accepted=1")
+                    }
+                    self.passed("consecutive_backups_include_native_delivery_without_control_revision_change")
+                    await self.control("stop_hindsight")
+                    try:
+                        await self.bot.chat(ALICE, "A synthetic pending delivery in the old business snapshot.")
+                        snapshot = await backup("before-forget")
+                        old_pending = database(snapshot,
+                            "SELECT operation_id FROM outbox WHERE bank=? AND state NOT IN ('done','discarded')",
+                            (bank,),
+                        )
+                        assert old_pending, "backup must include undelivered work"
+                    finally:
+                        await self.control("start_hindsight")
+                        await self.backend_ready()
+                else:
+                    with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
+                        source.backup(destination)
                 prepared = await self.action(identifier, "forget_prepare")
                 await self.action(identifier, "forget_confirm", confirmation=prepared["confirmation"])
                 async def erased():
@@ -447,11 +523,19 @@ class Feedback(Acceptance):
                     return value if value["bank"] != bank and not value["summary"].get("cleanup") else None
                 latest = await until(erased, timeout=90)
                 assert latest["background"]["invalidated"] and not latest["background"]["page_id"]
+                if self.settings.get("recovery_only"):
+                    await backup("after-forget")
+                trace_boundary = len(jsonl("retain-trace"))
+
                 def restore_business():
                     self.runtime.unlink()
                     self.runtime.with_name("runtime.sqlite3-wal").unlink(missing_ok=True)
                     self.runtime.with_name("runtime.sqlite3-shm").unlink(missing_ok=True)
                     shutil.copyfile(snapshot, self.runtime)
+                    if self.settings.get("recovery_only"):
+                        control.with_name("control.sqlite3-wal").unlink(missing_ok=True)
+                        control.with_name("control.sqlite3-shm").unlink(missing_ok=True)
+                        shutil.copyfile(latest_control, control)
                 await self.restart(restore_business)
                 restored = await self.scope()
                 assert restored["bank"] == latest["bank"] and restored["generation"] == latest["generation"]
@@ -465,6 +549,10 @@ class Feedback(Acceptance):
                         assert response.status == 404, (absent_bank, response.status)
                 self.report["measurements"]["bank_config_after_restore"] = {"retired": 404, "new": 404}
                 assert all(row["state"] == "discarded" for row in database(self.runtime, "SELECT state FROM outbox WHERE bank=?", (bank,)))
+                if self.settings.get("recovery_only"):
+                    dispatched = {row["body"]["operation_id"] for row in jsonl("retain-trace")[trace_boundary:]}
+                    assert not dispatched.intersection(row["operation_id"] for row in old_pending)
+                    self.passed("restoring_old_business_and_new_control_does_not_resend_pending_delivery")
                 await page.reload()
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)

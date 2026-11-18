@@ -272,33 +272,6 @@ class Control:
             self.bump()
         return self.account(connection, source.id)
 
-    def attach_verified_account(self, connection, source: Scope, owner_id: str):
-        """Attach a new, externally verified account; historical Bank merges are separate."""
-        owner = self.owner(connection, owner_id)
-        if not owner or source.deployment_id != self.setting("deployment_id"):
-            raise QueueError("identity_mapping_target_missing")
-        if source.memory_space_id != owner["memory_space_id"]:
-            raise QueueError("identity_mapping_space_mismatch")
-        previous = self.account(connection, source.id)
-        if previous:
-            if previous["owner_id"] != owner_id:
-                raise QueueError("existing_account_requires_explicit_migration")
-            return previous
-        with self.transaction():
-            self.db.execute(
-                "INSERT INTO accounts VALUES (?,?,?,?,?,?)",
-                (
-                    connection,
-                    source.id,
-                    source.identity,
-                    source.platform_instance_id,
-                    source.user_id,
-                    owner_id,
-                ),
-            )
-            self.bump()
-        return self.account(connection, source.id)
-
     def set_mode(self, connection, owner_id, mode, *, now=None):
         if mode not in {"active", "readonly", "paused"}:
             raise QueueError("invalid_memory_mode")

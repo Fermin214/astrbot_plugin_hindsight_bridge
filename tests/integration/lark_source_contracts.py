@@ -71,7 +71,7 @@ async def main(output):
     from astrbot.core.message.components import Plain
     from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
     from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-        native_header, native_login, prepare_bot_identity, source_identity,
+        native_header, native_login, prepare_bot_identity,
     )
 
     assert VERSION == os.environ.get("ASTRBOT_TEST_VERSION", "4.29.4"), VERSION
@@ -85,7 +85,7 @@ async def main(output):
         assert incoming and incoming.text == "  synthetic text  "
         assert incoming.timestamp == int(event.message_obj.raw_message.create_time) / 1000
         assert incoming.user_id == "ou_fixtureuser" and incoming.message_id == "om_fixture"
-        assert source_identity(event, incoming, fixture.host, binding=binding).producer is fixture.host.lark_api
+        assert binding["login"].api is fixture.host.lark_api
         passed.append(mode + "_native_sdk_text_conversion_original_time_and_api_producer")
         spec = importlib.util.spec_from_file_location("lark_probe", ROOT / "tests/integration/platform_probe/probe.py")
         probe = importlib.util.module_from_spec(spec)

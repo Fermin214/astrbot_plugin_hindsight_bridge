@@ -217,7 +217,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fingerprint", repeated)
         self.assertNotEqual(initial_revision, self.panel.config_revision())
         revision = self.panel.config_revision()
-        self.panel.persist_connection_job(job, message="完成")
+        self.panel.managed_connections.persist(job, message="完成")
         self.assertEqual(revision, self.panel.config_revision())
         self.profile.save_config.assert_not_called()
 
@@ -243,6 +243,37 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config["service_id"], planned_identity)
         self.assertEqual(self.apply_count, 1)
         self.assertEqual(self.catalog.resolve_checked.await_count, 1)
+
+    async def test_ready_legacy_relay_configuration_connects_without_applying_models_again(self):
+        payload = self.configure_managed_connect()
+        legacy_url = "http://memory-models:8765/v1"
+        field = "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"
+        environment = {
+            **self.model_environment, field: "http://127.0.0.1:8765/v1",
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "__ASTRBOT_MEMORY_TRANSPORT_KEY__",
+            "ASTRBOT_MEMORY_MODEL_CONFIG": json.dumps({"embedding": {}}),
+        }
+        self.catalog.resolve_checked.return_value = environment
+        self.remote_fingerprint = hmac.new(b"managed-key", json.dumps(
+            {**environment, field: legacy_url}, sort_keys=True, separators=(",", ":"),
+        ).encode(), hashlib.sha256).hexdigest()
+        _, job = await self.connect_managed(payload)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(job["fingerprint"], self.remote_fingerprint)
+        self.assertEqual(self.apply_count, 0)
+
+    async def test_legacy_management_component_guides_upgrades_by_backend_version(self):
+        for version, message in (("1.1.0", "升级 Hindsight 1.1.0"), ("1.2.0", "重新部署配套服务文件")):
+            with self.subTest(version=version):
+                self.setUp()
+                payload = self.configure_managed_connect()
+                self.panel.managed_request = AsyncMock(return_value={"ready": True})
+                self.panel.managed_backend_version = AsyncMock(return_value=version)
+                _, job = await self.connect_managed(payload)
+                self.assertEqual(job["status"], "failed")
+                self.assertIn(message, job["message"])
+                self.assertEqual(self.config["api_url"], "http://old-service:8888")
+                self.catalog.resolve_checked.assert_not_awaited()
 
     async def test_reload_after_model_request_recovers_persistent_job_without_reapplying_models(self):
         payload = self.configure_managed_connect()
@@ -745,6 +776,39 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.panel.managed_request.await_args_list[-1].args[1], {"HINDSIGHT_API_LLM_MODEL": "selected"})
         self.assertEqual(self.panel.state()["embedding_provider_id"], "embed")
         self.profile.save_config.assert_not_called()
+
+    async def test_legacy_background_model_submission_replays_status_until_ready(self):
+        self.config["api_url"] = ""
+        self.panel.saved_state = {"id": "012345abcdef", "api_url": "http://managed-service:8888"}
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def apply(state, environment=None):
+            if environment is not None:
+                started.set()
+                await release.wait()
+            return {"ready": True}
+
+        self.panel.managed_request = AsyncMock(side_effect=apply)
+        catalog = self.panel.providers()
+        catalog.resolve_checked.return_value = {"HINDSIGHT_API_LLM_MODEL": "selected"}
+        self.panel.providers = lambda: catalog
+        payload = {"background": True, "request_id": "legacy-models", "chat_provider_id": "chat",
+                   "embedding_provider_id": "embed", "config_revision": self.panel.config_revision()}
+        self.panel.body = AsyncMock(return_value=payload)
+        self.assertEqual((await self.panel.save_models())["status"], "running")
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            self.assertEqual(await self.panel.save_models(), await self.panel.model_status())
+            self.panel.body.return_value = {**payload, "embedding_provider_id": "different"}
+            with self.assertRaisesRegex(module.PanelError, "正在处理"):
+                await self.panel.save_models()
+        finally:
+            release.set()
+            await self.panel.model_task
+        self.panel.body.return_value = payload
+        self.assertEqual((await self.panel.save_models())["status"], "succeeded")
+        self.assertTrue((await self.panel.model_status())["saved"])
+        self.assertEqual(self.panel.managed_request.await_count, 2)
 
     async def test_uninstall_requires_explicit_data_deletion_and_owned_installation(self):
         state = self.panel.state(create=True)

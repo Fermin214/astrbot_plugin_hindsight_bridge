@@ -8,7 +8,7 @@
 
 记忆内容的浏览、搜索、更正、删除、Bank 管理和原生导入导出由独立打开的 Hindsight 原生 Control Plane 提供。插件不实现内容列表、详情、更正表单或下载页面。QQ view/show/export 只提供本人范围内的官方只读 API 转发。
 
-支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C、微信 ClawBot（`weixin_oc`）和 Telegram Bot（`telegram`）私聊纯文字，默认同机部署。模型配置使用协议适配、配置管理器和原子回退。
+Linux 宿主提供配套安装和已有服务表单，Windows 原生宿主提供已有服务表单。宿主版本、执行器与消息平台见 [兼容范围](SUPPORT.md)。
 
 配套新安装固定使用 1.2.0 Slim。服务进程等待 75 秒，容器退出宽限为 90 秒，覆盖上游启动脚本的 60 秒退出等待。配套服务通过保留安装身份、凭据、模型设置卷和数据库的专用升级命令升级；插件更新本身不操作服务容器。配套升级和备份步骤见 [备份与恢复](DATA-MAINTENANCE.md#升级-hindsight-服务)。
 

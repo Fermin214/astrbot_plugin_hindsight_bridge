@@ -20,7 +20,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
 from .core.background import ReadGuard, compose_backgrounds, context_limits, reference
-from .core.agent_tools import MemoryTools
+from .core.agent_tools import MemoryTools, belongs_to_event, matches_request, request_marker
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
 from .core.diagnostics import (
@@ -40,7 +40,7 @@ from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.reflection import Reflection
-from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity, source_identity
+from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity
 from .core.worker import Worker
 
 
@@ -52,7 +52,7 @@ class HindsightBridge(Star):
         self.connection_task = None
         self.incoming = weakref.WeakKeyDictionary()
         self.handled = weakref.WeakSet()
-        self.turns = weakref.WeakKeyDictionary()
+        self.pending_assistant_captures = weakref.WeakKeyDictionary()
         self.history_tasks = set()
         self.status = "未配置"
         self.warning_log = WarningLog(logger)
@@ -224,7 +224,7 @@ class HindsightBridge(Star):
                 self.monitor_connection(), name="hindsight-connection"
             )
             self.status = "已配置"
-        except Exception as exc:  # noqa: BLE001 -- plugin initialization must preserve chat
+        except Exception as exc:
             self.status = "初始化失败：" + (
                 self.diagnostic(str(exc))
                 if isinstance(exc, (QueueError, TokenizerError, ConfigurationError))
@@ -262,7 +262,7 @@ class HindsightBridge(Star):
         except QueueError as exc:
             self.warning(str(exc))
             accounts = frozenset()
-        if accounts != self.permissions:
+        if self.outbox is not None and accounts != self.outbox.permission_pairs:
             self.outbox.sync_permissions(accounts)
             self.permissions = accounts
             self.permission_revision += 1
@@ -362,42 +362,43 @@ class HindsightBridge(Star):
             self.refresh_permissions()
 
     def allowed(self, event):
+        return self.authorized_source(event) is not None
+
+    def authorized_source(self, event):
+        if self.stopping or self.outbox is None:
+            return None
         try:
             accounts = pairs(self.config.get("allowed_accounts", []))
         except ValueError:
-            return False
+            return None
         incoming = self.source_header(event)
-        return (
-            not self.stopping
-            and incoming is not None
-            and (event.get_platform_id(), event.get_sender_id()) in accounts
-            and self.outbox is not None
-            and self.outbox.accepts(incoming)
+        if (
+            incoming is not None
+            and (incoming.platform_instance_id, incoming.user_id) in accounts
             and (
                 getattr(self.context, "get_platform_inst", None) is None
                 or self.source_accounts.get(incoming.platform_instance_id, {}).get("bot_id") == incoming.bot_id
             )
-        )
+            and self.outbox.accepts(incoming)
+        ):
+            return incoming
+        return None
 
     def source_header(self, event):
         getter = getattr(self.context, "get_platform_inst", None)
         adapter = getter(event.get_platform_id()) if getter else None
-        binding = self.source_accounts.get(event.get_platform_id())
-        incoming = native_header(
-            event, Plain, self.context.get_config().get("wake_prefix", []),
-            adapter=adapter, binding=binding,
-        )
-        if incoming is None:
-            return None
         if getter and adapter is None:
             return None
-        return incoming if source_identity(event, incoming, adapter, binding=binding) else None
+        return native_header(
+            event, Plain, self.context.get_config().get("wake_prefix", []),
+            adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()),
+        )
 
     def snapshot(self, event):
-        if not self.allowed(event):
+        incoming = self.authorized_source(event)
+        if incoming is None:
             return None
         prefixes = ("/", *self.config.get("command_prefixes", []))
-        incoming = self.source_header(event)
         return incoming if not any(
             incoming.text.lstrip().startswith(prefix) for prefix in prefixes if prefix
         ) else None
@@ -604,7 +605,7 @@ class HindsightBridge(Star):
         except TimeoutError:
             self.warning("history_timeout")
             return None
-        except Exception as exc:  # noqa: BLE001 -- user capture remains independent
+        except Exception as exc:
             self.warning("history_" + type(exc).__name__)
             return None
         if conversation is None:
@@ -637,12 +638,16 @@ class HindsightBridge(Star):
 
     @filter.on_agent_done()
     async def remember_assistant(self, event, run_context, response):
-        if not self.read_tools.finish(event, run_context):
-            return
-        turn = self.turns.pop(event, None)
+        self.read_tools.finish(event, run_context)
+        turn = self.pending_assistant_captures.get(event)
         if (
-            turn is None
-            or self.stopping
+            turn is None or not belongs_to_event(self, event, run_context)
+            or not matches_request(turn["request_ref"](), turn["marker"], run_context)
+        ):
+            return
+        self.pending_assistant_captures.pop(event)
+        if (
+            self.stopping
             or response is None
             or response.role != "assistant"
             or len(self.history_tasks) >= 32
@@ -698,8 +703,60 @@ class HindsightBridge(Star):
         except QueueError as exc:
             if str(exc) != "scope_not_active":
                 self.warning(str(exc))
-        except Exception as exc:  # noqa: BLE001 -- history collection must preserve chat
+        except Exception as exc:
             self.warning("history_" + type(exc).__name__)
+
+    async def request_history(self, event, request):
+        try:
+            async with asyncio.timeout(2):
+                conversation = (
+                    request.conversation.cid if request.conversation
+                    else await self.context.conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+                )
+                if not conversation:
+                    return "", []
+                conversation = str(conversation)
+                return conversation, await self.conversation_history(event, conversation)
+        except TimeoutError:
+            raise HindsightError("history_timeout") from None
+
+    def freeze_user_capture(self, incoming, scope, conversation, rows):
+        self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
+        return self.outbox.capture(incoming, conversation, history_before=history_boundary(rows))
+
+    def track_assistant_capture(self, event, request, incoming, scope, conversation, capture):
+        marker = request_marker()
+        self.pending_assistant_captures[event] = {
+            "request_ref": weakref.ref(request),
+            "marker": marker,
+            "incoming": incoming,
+            "conversation": conversation,
+            "revision": scope["revision"],
+            "permission_revision": self.permission_revision,
+            "bank": scope["bank"],
+            "task_id": capture.task_id,
+            "started": time.monotonic(),
+        }
+        return marker
+
+    async def read_request_references(self, event, guard, incoming, scope, capture, *, on_demand, prefix):
+        history = [
+            ("用户" if message.role == "user" else "助手", message.text)
+            for message in capture.history
+        ] if capture else ()
+        if guard.selection["enabled"]:
+            memory, code, has_facts, status = await self.recall_background(
+                event, guard, incoming.text, history, timestamp=incoming.iso_timestamp,
+                include_facts=not on_demand, prefix=prefix,
+            )
+            outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
+            return memory, outcome, code, status
+        if on_demand:
+            return self.read_tools.notice(scope), "on_demand", "", None
+        memory = await self.recall_text(
+            scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp, prefix=prefix,
+        )
+        return memory, "success" if memory else "empty", "", None
 
     @filter.on_llm_request()
     async def add_memory(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -707,11 +764,7 @@ class HindsightBridge(Star):
         if self.outbox is None or self.client is None or event in self.handled:
             return
         incoming = self.incoming.pop(event, None)
-        if (
-            incoming is None
-            or not self.allowed(event)
-            or self.snapshot(event) != incoming
-        ):
+        if incoming is None or self.snapshot(event) != incoming:
             return
         self.handled.add(event)
         if not local_runner(self.context.get_config(event.unified_msg_origin)):
@@ -740,22 +793,7 @@ class HindsightBridge(Star):
             background_key = (self.outbox.connection_id, scope["owner_id"])
             self.background_sequences[background_key] = sequence
             outcome = "error"
-            try:
-                async with asyncio.timeout(2):
-                    conversation = (
-                        str(req.conversation.cid)
-                        if req.conversation
-                        else await self.context.conversation_manager.get_curr_conversation_id(
-                            event.unified_msg_origin
-                        )
-                    )
-                    rows = (
-                        await self.conversation_history(event, str(conversation))
-                        if conversation
-                        else []
-                    )
-            except TimeoutError:
-                raise HindsightError("history_timeout") from None
+            conversation, rows = await self.request_history(event, req)
             if not conversation:
                 code = "conversation_not_available"
                 self.warning(code)
@@ -768,56 +806,26 @@ class HindsightBridge(Star):
                 or self.permission_revision != permission_revision
             ):
                 return
-            # Commit original source, frozen request and operation ID before any recall I/O.
             if scope["mode"] == "active":
-                self.record_history(
-                    self.outbox.history_anchor(scope["scope_id"], str(conversation)),
-                    rows,
-                )
-                capture = self.outbox.capture(
-                    incoming, str(conversation), history_before=history_boundary(rows)
-                )
+                capture = self.freeze_user_capture(incoming, scope, conversation, rows)
                 if not capture.created:
                     outcome = None
                     return
                 if rows is not None:
-                    self.turns[event] = {
-                        "incoming": incoming,
-                        "conversation": str(conversation),
-                        "revision": scope["revision"],
-                        "permission_revision": permission_revision,
-                        "bank": scope["bank"],
-                        "task_id": capture.task_id,
-                        "started": time.monotonic(),
-                    }
+                    request_prefix = self.track_assistant_capture(event, req, incoming, scope, conversation, capture)
             read_guard = ReadGuard.freeze(self, scope)
-            options = await self.read_tools.prepare(event, req, incoming, scope, original_tools)
-            request_prefix = self.read_tools.request_prefix(event)
-            on_demand = options["mode"] == "tools"
-            history = [
-                    ("用户" if m.role == "user" else "助手", m.text)
-                    for m in capture.history
-                ] if capture else ()
-            if read_guard.selection["enabled"]:
-                memory, code, has_facts, background_status = await self.recall_background(
-                    event, read_guard, incoming.text, history, timestamp=incoming.iso_timestamp,
-                    include_facts=not on_demand,
-                    prefix=request_prefix,
-                )
-                outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
-                if code:
-                    if HindsightError(code).authentication:
-                        self.outbox.pause_connection(code)
-                    self.warning(code)
-            elif on_demand:
-                memory = self.read_tools.notice(scope)
-                outcome = "on_demand"
-            else:
-                memory = await self.recall_text(
-                    scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp,
-                    prefix=request_prefix,
-                )
-                outcome = "success" if memory else "empty"
+            options = await self.read_tools.prepare(
+                event, req, incoming, scope, original_tools, marker=request_prefix
+            )
+            request_prefix = request_prefix or self.read_tools.request_prefix(event)
+            memory, outcome, code, background_status = await self.read_request_references(
+                event, read_guard, incoming, scope, capture, on_demand=options["mode"] == "tools",
+                prefix=request_prefix,
+            )
+            if code:
+                if HindsightError(code).authentication:
+                    self.outbox.pause_connection(code)
+                self.warning(code)
             content = memory or "Hindsight 检索完成，本轮未匹配到相关记忆。"
             self.status = "运行中"
         except asyncio.CancelledError:
@@ -831,7 +839,7 @@ class HindsightBridge(Star):
         except QueueError as exc:
             code = str(exc)
             self.warning(code)
-        except Exception as exc:  # noqa: BLE001 -- local storage failures must preserve chat
+        except Exception as exc:
             code = "local_" + type(exc).__name__
             self.warning(code)
         finally:
@@ -840,10 +848,9 @@ class HindsightBridge(Star):
                     await self.prepare_sources()
                     self.refresh_permissions()
                     if (
-                        self.allowed(event)
-                        and self.outbox.can_recall(scope)
+                        self.outbox.can_recall(scope)
                         and self.permission_revision == permission_revision
-                        and (read_guard is None or read_guard.valid(self, event))
+                        and (self.allowed(event) if read_guard is None else read_guard.valid(self, event))
                     ):
                         self.record_recall(scope, outcome, started, code)
                         if not content:
@@ -859,13 +866,13 @@ class HindsightBridge(Star):
                                 **(background_status or {"code": code, "used": False}),
                                 "checked_at": time.time(),
                             }
-            except Exception as exc:  # noqa: BLE001 -- diagnostics must preserve chat
+            except Exception as exc:
                 self.warning("local_" + type(exc).__name__)
             if capture and capture.created and self.outbox is not None:
                 try:
                     self.outbox.release(capture.task_id)
                     self.worker.wake.set()
-                except Exception as exc:  # noqa: BLE001 -- the request remains durable
+                except Exception as exc:
                     self.warning("queue_release_" + type(exc).__name__)
             self.hooks -= 1
             if not self.hooks:
@@ -876,17 +883,18 @@ class HindsightBridge(Star):
         """个人记忆查看、导出、模式、任务控制与完整遗忘。"""
 
     def command_scope(self, event):
-        if self.outbox is None or not self.allowed(event):
+        incoming = self.authorized_source(event)
+        if incoming is None:
             return None
         if not local_runner(self.context.get_config(event.unified_msg_origin)):
             return None
         self.refresh_permissions()
-        return self.outbox.scope(self.source_header(event)) if self.allowed(event) else None
+        return self.outbox.scope(incoming)
 
     def prepare_command(self, event, scope, name, arguments=()):
         self.refresh_permissions()
-        incoming = self.source_header(event)
-        if not self.allowed(event) or incoming is None:
+        incoming = self.authorized_source(event)
+        if incoming is None:
             raise QueueError("authorization_changed")
         return self.outbox.access.command(
             incoming, incoming.scope(self.outbox.deployment_id), scope, name, arguments,
@@ -1106,7 +1114,7 @@ class HindsightBridge(Star):
                 )
             except (HindsightError, QueueError, TimeoutError) as exc:
                 yield event.plain_result(self.diagnostic(self.error_code(exc)))
-            except Exception as exc:  # noqa: BLE001 -- file delivery must preserve chat
+            except Exception as exc:
                 self.warning("export_" + type(exc).__name__)
                 yield event.plain_result(
                     "文件发送失败，请检查平台的私聊文件上传能力后重试。"
@@ -1465,5 +1473,5 @@ class HindsightBridge(Star):
         self.incoming.clear()
         self.source_accounts.clear()
         self.handled.clear()
-        self.turns.clear()
+        self.pending_assistant_captures.clear()
         await self._close_resources()

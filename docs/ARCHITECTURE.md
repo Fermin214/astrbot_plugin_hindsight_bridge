@@ -6,7 +6,7 @@
 
 AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。Hindsight 负责记忆提取（Retain）、记忆召回（Recall）、整合（Consolidation）、知识页生成与内容管理。插件负责消息来源校验、用户隔离、材料构造、持久队列、临时注入、连接及暂停与恢复协调。
 
-支持 Linux、AstrBot 4.29.1 及以上版本的内置执行器 `local`、Hindsight 1.1.0 / 1.2.0，以及 OneBot v11（`aiocqhttp`）、QQ 官方 WS/Webhook 的 C2C、微信 ClawBot（`weixin_oc`）、Telegram Bot（`telegram`）和飞书（`lark`）私聊纯文字，默认同机部署。完整兼容范围见 [兼容范围](SUPPORT.md)。
+Linux 可安装配套服务或连接已有服务，Windows 原生宿主连接已有服务。宿主版本、执行器与消息平台见 [兼容范围](SUPPORT.md)。
 
 插件只调用 Hindsight 的公开 HTTP API，不把 Hindsight 安装进 AstrBot 的 Python 环境，也不额外调用摘要模型；自动 reflect 关闭。
 
@@ -36,9 +36,9 @@ AstrBot 负责接收消息、管理会话、调用聊天模型与发送回复。
 
 ## 用户消息与助手正文
 
-用户原文须通过标准接收事件、原始载荷与模型请求的关联核对。接受 OneBot v11 私聊纯文本及已验证的 QQ 官方 C2C 纯文本；history 中的 user 文本不能替代接收入站校验。官方 C2C 核对原始 author.user_openid/id/content/timestamp、纯文字消息类型及已验证的合成 At/Plain 组件，拒绝引用、附件、未知扩展和不一致的正文转换。原始时间须带时区，用户材料标为 `qq_official.timestamp`，不回填宿主时间。AstrBot 追加的时间、身份与群名提示按独立 `system_reminder` 内容块识别；首块仍须与入站原文完全一致，其他附加内容或轮次不匹配时拒绝关联。原始正文和持久历史都不改写。
+用户原文须通过标准接收事件、原始载荷与模型请求的关联核对。适用的私聊平台见 [兼容范围](SUPPORT.md)。各平台入口核对原生事件、官方客户端、发送者、消息 ID、时间与正文。AstrBot 追加的时间、身份与群名提示按独立 `system_reminder` 内容块识别。首块仍须与入站原文完全一致，其他附加内容或轮次不匹配时拒绝关联。
 
-助手正文读取自标准 `conversation_manager` 的持久化 `history`，并关联同一来源账号、代次和会话中已核对的用户事件。每条最终正文保存后独立入队，无需下一条用户消息触发。
+助手正文读取自标准 `conversation_manager` 的持久化 `history`，并关联同一来源账号、代次和会话中已核对的用户事件。主请求的临时标记与用户原文对应，由主 Agent 的完成事件触发补录。自动召回与按需工具使用相同的归属校验，每条最终正文保存后独立入队。
 
 `history_baselines` 保存前置历史长度与前缀摘要，`task_id` 关联用户窗口任务。只有前置读取成功、后续历史增长、原前缀不变且新增部分含对应用户轮次和最终助手正文时，才建立助手记录。前置读取失败时用户原文仍可独立采集；历史压缩、编辑或截断改变边界时拒绝关联，不按相同文本猜配旧历史。
 

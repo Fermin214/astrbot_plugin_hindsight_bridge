@@ -102,9 +102,7 @@ async def hindsight(args):
     spec.loader.exec_module(transport)
     server = transport.TransportServer(("127.0.0.1", 0), descriptors, "delivery-transport")
     base = "http://127.0.0.1:" + str(server.server_port)
-    for name, value in environment.items():
-        os.environ[name] = value.replace("http://memory-models:8765", base).replace(
-            "__ASTRBOT_MEMORY_TRANSPORT_KEY__", "delivery-transport")
+    os.environ.update(transport.transport_environment(environment, descriptors, base, "delivery-transport"))
     clear_config_cache()
     with running(server):
         embeddings = create_embeddings_from_env()

@@ -27,7 +27,8 @@ from plugins.astrbot_plugin_hindsight_bridge.core.materials import (
     token_count,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_snapshot
+from plugins.astrbot_plugin_hindsight_bridge.core.source import local_runner, native_header
+from queue_fixture import confirm_sources
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
@@ -146,6 +147,7 @@ class DurableCore(unittest.IsolatedAsyncioTestCase):
             zone="Asia/Hong_Kong",
             **kwargs,
         )
+        confirm_sources(self.queue, *(("instance-1", "bot-1", user) for user in ("alice", "bob", "carol")))
 
     async def asyncTearDown(self):
         await self.client.close()
@@ -575,7 +577,7 @@ class SourceAndQuery(unittest.TestCase):
             get_message_str=lambda: text.strip(),
             message_obj=SimpleNamespace(message_id="123", raw_message=raw),
         )
-        self.assertEqual(native_snapshot(event, Plain).text, text)
+        self.assertEqual(native_header(event, Plain).text, text)
         for key, value in (
             ("post_type", "notice"),
             ("message_type", "group"),
@@ -586,9 +588,9 @@ class SourceAndQuery(unittest.TestCase):
             ("message", [{"type": "reply", "data": {"id": "5"}}]),
         ):
             with patch.dict(raw, {key: value}):
-                self.assertIsNone(native_snapshot(event, Plain))
+                self.assertIsNone(native_header(event, Plain))
         event.message_obj.raw_message = None
-        self.assertIsNone(native_snapshot(event, Plain))
+        self.assertIsNone(native_header(event, Plain))
         self.assertFalse(local_runner({"agent_runner": {"runner_type": "dify"}}))
         self.assertTrue(local_runner({"agent_runner": {"runner_type": "local"}}))
 

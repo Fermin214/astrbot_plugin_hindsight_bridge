@@ -384,9 +384,14 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         second = replace(
             self.incoming(), platform_instance_id="instance-2", user_id="other-account"
         )
-        self.queue.control.attach_verified_account(
-            "test-service", second.scope(self.queue.deployment_id), alice["owner_id"]
-        )
+        source = second.scope(self.queue.deployment_id)
+        with self.queue.control.transaction():
+            self.queue.control.db.execute(
+                "INSERT INTO accounts VALUES (?,?,?,?,?,?)",
+                ("test-service", source.id, source.identity, source.platform_instance_id,
+                 source.user_id, alice["owner_id"]),
+            )
+            self.queue.control.bump()
         self.queue.sync_permissions([("instance-1", "alice")])
         linked = self.queue.scope(second)
         self.assertEqual(linked["bank"], task.bank)
@@ -415,11 +420,6 @@ class Controls(unittest.IsolatedAsyncioTestCase):
             self.queue.scope(second)["principal_id"], alice["principal_id"]
         )
         self.assertEqual(self.queue.scope(second)["bank"], task.bank)
-        with self.assertRaisesRegex(QueueError, "explicit_migration"):
-            bob = self.queue.scope(self.incoming(user="bob"))
-            self.queue.control.attach_verified_account(
-                "test-service", second.scope(self.queue.deployment_id), bob["owner_id"]
-            )
 
 
 class PermissionMigration(unittest.TestCase):

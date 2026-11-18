@@ -465,22 +465,6 @@ function scopeName(scope) {
   return `${scope.user_id} · ${platform?.name || scope.platform_instance_id}${scope.bot_id ? ` · 机器人 ${scope.bot_id}` : ""}`;
 }
 
-function countDescription(counts) {
-  if (counts == null) return "暂时无法获取保存进度";
-  if (typeof counts === "number") return `待处理记录：${counts}`;
-  const labels = {
-    pending: "等待保存", running: "正在保存", processing: "正在保存", queued: "等待保存",
-    failed: "失败", error: "错误", retry: "待重试", retrying: "重试中",
-    completed: "已保存", done: "已保存", succeeded: "已保存", total: "总计",
-    retained: "已保存", cancelled: "已取消", dead: "失败",
-    ready: "等待发送", submitting: "正在发送", unknown: "正在确认保存结果", tracking: "Hindsight 正在整理",
-    deferred: "暂停发送，继续确认保存结果",
-    reconcile_required: "需要检查保存结果", discarded: "已放弃保存", collecting: "正在记录", held: "等待机器人回复",
-    cancel_requested: "正在取消",
-  };
-  return Object.entries(counts).map(([key, value]) => `${labels[key] || key}：${text(value)}`).join("，") || "暂无等待保存的记录";
-}
-
 function renderStatus() {
   const status = data.status || {};
   const connected = status.connected;
@@ -807,7 +791,7 @@ function renderBackground() {
     backgroundDraft = { snapshot, id: scopeId, bank: scope?.bank, page_id: saved.page_id || "", enabled: saved.enabled === true,
       revision: saved.revision, scope_revision: saved.scope_revision, config_revision: data?.config_revision,
       selected: backgroundPages(saved).map((page) => ({ ...page })), dirty: false,
-      pages: [], check: null, checks: [], loaded: false, loading: false, attempted: false };
+      pages: [], checks: [], loaded: false, loading: false, attempted: false };
     $("background-feedback").hidden = true;
   }
   const unavailable = !scope || scope.pending || scope.historical || data?.status?.recovering || saved.error;
@@ -885,7 +869,6 @@ async function loadBackground({ manual = false } = {}) {
     if (!Array.isArray(response.pages) || !response.selection) throw new Error("知识页列表无法读取，请刷新页面重试。");
     if (response.selection.revision !== draft.revision || response.scope_revision !== draft.scope_revision || response.config_revision !== draft.config_revision) throw new Error("记忆范围或知识页选择已变化，请重新获取用户状态。");
     draft.pages = response.pages;
-    draft.check = response.check || null;
     draft.checks = response.checks || [];
     draft.loaded = true;
     renderBackground();
@@ -934,7 +917,6 @@ async function saveBackground() {
     await refreshBootstrap();
     renderBackground();
     if (backgroundDraft?.id === draft.id && response.selection?.revision === backgroundDraft.revision) {
-      backgroundDraft.check = response.check || null;
       backgroundDraft.checks = response.checks || [];
       renderBackground();
     }

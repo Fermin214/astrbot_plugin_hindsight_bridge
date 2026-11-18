@@ -85,6 +85,10 @@ def bridge_tool_reply(body):
         kind, params = ("reflect" if len(current) == 3 else "recall"), {"query": "HB-REFLECT-QUESTION Cedar-120 constraints " + str(len(current))}
     elif "HB-REFLECT-" in query and not current:
         kind, params = "reflect", {"query": "HB-REFLECT-QUESTION Cedar-120 constraints"}
+    elif "HB-CAPTURE-PRIMARY-" in query:
+        return {"role": "assistant", "content": "HB-CAPTURE-PRIMARY-REPLY"}, "stop"
+    elif "HB-CAPTURE-SECONDARY" in query:
+        return {"role": "assistant", "content": "HB-CAPTURE-SECONDARY-REPLY"}, "stop"
     if not kind:
         return {"role": "assistant", "content": "HB-REFLECT-FINAL" if "HB-REFLECT-" in query else "HB-TOOLS-ANSWER"}, "stop"
     if not any(tool.get("function", {}).get("name") == "hindsight_bridge_" + kind for tool in body.get("tools", [])):
@@ -178,7 +182,9 @@ class Handler(BaseHTTPRequestHandler):
                 content = '{"creates":[],"updates":[],"deletes":[]}'
             elif (
                 getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512
-                and ("HB-TOOLS-" in str(body.get("messages", [])) or "<hb-read-request:" in str(body.get("messages", [])))
+                and any(marker in str(body.get("messages", [])) for marker in (
+                    "HB-TOOLS-", "HB-REFLECT-", "HB-CAPTURE-", "<hb-read-request:",
+                ))
             ):
                 message, finish = bridge_tool_reply(body)
             elif body.get("tools") and not (getattr(self.server, "local_chat", False) and body.get("max_tokens") == 512):

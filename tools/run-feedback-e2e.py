@@ -22,8 +22,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
+    parser.add_argument("--revision", help="verify the distribution files at this commit")
     parser.add_argument("--tool-schema-mode", choices=("full", "skills_like"), default="full")
-    parser.add_argument("--scope", choices=("full", "feedback", "view", "recovery", "single-page", "multi-page",
+    parser.add_argument("--scope", choices=("full", "feedback", "view", "recovery", "single-page", "multi-page", "assistant-capture",
                                           "multi-page-recovery", "read-tools", "reflect", "parameters"), default="full")
     args = parser.parse_args()
     args.magpie_url = "http://127.0.0.1:3425/v1"
@@ -38,6 +39,7 @@ def main():
         state.settings["view_only"] = args.scope == "view"
         state.settings["recovery_only"] = args.scope == "recovery"
         state.settings["single_page"] = args.scope == "single-page"
+        state.settings["assistant_capture"] = args.scope == "assistant-capture"
         state.settings["multi_page"] = args.scope in {"multi-page", "multi-page-recovery"}
         state.settings["multi_page_recovery_only"] = args.scope == "multi-page-recovery"
         state.settings["parameters_only"] = args.scope == "parameters"
@@ -62,7 +64,8 @@ def main():
         try:
             with live.serving(model), live.serving(state.gateway), live.serving(state.transport):
                 state.start()
-                live.run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution",
+                source = ["--revision", args.revision] if args.revision else ["--working-tree"]
+                live.run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", *source,
                          "--output", str(state.output))
                 with (state.output / "baseline-install.zip").open("wb") as archive:
                     live.run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",

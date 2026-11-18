@@ -1,7 +1,5 @@
 """Clock fallback, historical DST, and immutable requests across host changes."""
 
-import ast
-import asyncio
 import copy
 import json
 import os
@@ -11,36 +9,13 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.clock import host_timezone
-from plugins.astrbot_plugin_hindsight_bridge.core.background import context_limits
-from plugins.astrbot_plugin_hindsight_bridge.core.diagnostics import (
-    ConfigurationError, configuration_message, connection_fields, missing_connection,
-    recall_timeout,
-)
-from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
+from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import Message
-from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
-from plugins.astrbot_plugin_hindsight_bridge.core.permissions import configuration_accounts, pairs
-
-
-def lifecycle_methods(namespace):
-    """Load real lifecycle methods without AstrBot hooks or a web server."""
-    source = Path(__file__).resolve().parents[1] / "main.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    bridge = next(
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "HindsightBridge"
-    )
-    methods = [
-        node for node in bridge.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"initialize", "refresh_permissions"}
-    ]
-    exec(compile(ast.Module(body=methods, type_ignores=[]), str(source), "exec"), namespace)
-    return namespace
+from test_runtime_diagnostics import Configuration, bridge_class
 
 
 class ClockResolution(unittest.TestCase):
@@ -84,36 +59,19 @@ class ClockResolution(unittest.TestCase):
 class HostClockLifecycle(unittest.IsolatedAsyncioTestCase):
     async def initialize_bridge(self, root, host):
         root = root.resolve()
-        namespace = lifecycle_methods({
-            "asyncio": asyncio, "Path": Path, "sha256": sha256, "pairs": pairs,
-            "configuration_accounts": configuration_accounts,
-            "ConfigurationError": ConfigurationError, "configuration_message": configuration_message,
-            "connection_fields": connection_fields, "missing_connection": missing_connection,
-            "recall_timeout": recall_timeout, "context_limits": context_limits,
-            "host_timezone": host_timezone, "Outbox": Outbox, "QueueError": QueueError,
-            "load_encoding": AsyncMock(), "TokenizerError": ValueError, "logger": Mock(),
-            "HindsightClient": Mock(side_effect=lambda url, key, **kw: SimpleNamespace(url=url)),
-            "StarTools": SimpleNamespace(get_data_dir=lambda name: root / "runtime"),
-            "Worker": Mock(return_value=SimpleNamespace(run=AsyncMock())),
-        })
-        plugin = SimpleNamespace(
-            config={
+        bridge = bridge_class(root, Mock())
+        plugin = bridge(
+            SimpleNamespace(get_config=Mock(return_value=host)),
+            Configuration({
                 "api_url": "http://memory.test", "api_key": "key",
                 "service_id": "clock-test",
                 "allowed_accounts": [{"__template_key": "account", "platform_instance_id": "onebot", "user_id": "alice"}],
-            },
-            context=SimpleNamespace(get_config=Mock(return_value=host)),
-            outbox=None, permissions=None, permission_revision=0,
-            panel=SimpleNamespace(closed=False), stopping=False, confirmations={},
-            read_tools=SimpleNamespace(invalidate=lambda: None),
-            source_accounts={}, prepare_sources=AsyncMock(),
-            control_directory=lambda: root / "control", control_root=lambda: root / "control", warning=Mock(),
-            _close_resources=AsyncMock(), recall_outcomes={}, background_outcomes={}, monitor_connection=AsyncMock(),
-            background_sequences={},
+            }),
         )
-        for name in ("initialize", "refresh_permissions"):
-            setattr(plugin, name, MethodType(namespace[name], plugin))
-        await plugin.initialize()
+        plugin.monitor_connection = AsyncMock()
+        client = Mock(side_effect=lambda url, key, **kwargs: SimpleNamespace(url=url))
+        with patch.dict(bridge.initialize.__globals__, HindsightClient=client, load_encoding=AsyncMock()):
+            await plugin.initialize()
         self.assertEqual(plugin.status, "已配置")
         await plugin.task
         await plugin.connection_task

@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from queue_fixture import confirm_sources
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -62,6 +63,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             credential_fingerprint=sha256("valid-key"),
             control_directory=self.root / "control",
         )
+        confirm_sources(self.queue, ("onebot", "bot", "alice"), ("onebot", "bot", "bob"))
         self.worker = Worker(
             self.queue, self.client, logging.getLogger("maintenance"), poll_interval=0.01
         )
@@ -304,7 +306,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.queue.control.bank_state("test", bank), "new")
         self.assertNotIn(bank, self.service.banks)
         self.assertIsNone(self.queue.control.maintenance("test", bank))
-        self.source = replace(self.source, timestamp=math.ceil(time.time()))
+        self.source = replace(self.source, timestamp=math.ceil(time.time()), received_at=time.time())
         captured = self.enqueue("after-maintenance")
         await self.step()
         self.assertEqual(self.queue.get(captured.task_id)["state"], "tracking")

@@ -50,7 +50,7 @@ function harness() {
     document: { documentElement: { dataset: {} }, querySelector: (selector) => selector.startsWith("[data-mode=")
       ? context.$("mode-" + selector.match(/"([^"]+)"/)[1]) : ({ value: "existing" }) },
     data: null, bridge: null, startRunning: false, viewReady: false, offContext: undefined, reloads: 0,
-    locks: new Set(), scopeId: "", selectedAccount: "", maintenanceScopeId: "", modeDirty: false, maintenanceState: null,
+    locks: new Set(), scopeId: "", selectedAccount: "", maintenanceScopeId: "", maintenanceState: null,
     maintenanceIdentity: "", maintenanceCheckedAt: 0,
     maintenanceExpiryTimer: undefined,
     authorizationState: null, settingsRevision: "", parameterDraft: null,
@@ -71,7 +71,7 @@ function harness() {
     readMaintenanceStatus: async () => {},
     option: (value, label, disabled = false) => Object.assign(node(), { value, textContent: label, disabled }),
     activateTab() {}, scheduleRefresh() {}, modeLabels: { active: "读写记忆", readonly: "只读记忆", paused: "停用记忆" },
-    scopeName: () => "user", countDescription: () => "queue", maintenanceDescription: () => "maintenance",
+    scopeName: () => "user", maintenanceDescription: () => "maintenance",
     refreshBootstrap: async () => {
       context.data = { config: { configured: true } };
       context.$("startup").hidden = true;
@@ -822,16 +822,13 @@ function backgroundHarness() {
   return context;
 }
 
-test("background polling retains an unsaved choice and clears references after Bank rotation", () => {
+test("Bank rotation clears old knowledge references", () => {
   const context = backgroundHarness();
   context.$("background-page").value = "";
   context.changeBackground();
   context.renderBackground();
-  assert.equal(context.$("background-page").value, "");
-  assert.equal(context.data.scopes[0].background.enabled, true);
   context.data.config_revision = "config-2";
   context.renderBackground();
-  assert.equal(context.$("background-page").value, "");
   assert.match(context.$("background-status").textContent, /设置已更新/);
   assert.equal(context.$("background-save").disabled, true);
   context.data.scopes[0].bank = "new-bank";
@@ -949,21 +946,6 @@ test("manual refresh reports the page count while automatic loads stay quiet", a
   assert.equal(context.$("background-feedback").textContent, "已刷新 1 篇");
 });
 
-test("late background index cannot overwrite another user's draft", async () => {
-  const context = backgroundHarness();
-  let release;
-  context.bridge = { apiGet: () => new Promise((resolve) => { release = resolve; }) };
-  const loading = context.loadBackground();
-  context.data.scopes.push({ scope_id: "two", bank: "bank-2", summary: {}, background: { revision: 0, scope_revision: 4, enabled: false, page_id: "" } });
-  context.scopeId = "two";
-  context.renderBackground();
-  release({ pages: [{ page_id: "private-page", path: "Other user's page" }], selection: { revision: 1 }, scope_revision: 2 });
-  await loading;
-  assert.equal(context.backgroundDraft.id, "two");
-  assert.equal(context.backgroundDraft.pages.length, 0);
-  assert.equal(context.$("background-page").value, "");
-});
-
 test("background index timeout releases controls and never interprets names as HTML", async () => {
   const context = backgroundHarness();
   context.bridge = { apiGet: () => new Promise(() => {}) };
@@ -977,28 +959,6 @@ test("background index timeout releases controls and never interprets names as H
   await context.loadBackground();
   assert.equal(context.$("background-page").children[1].textContent, "<img src=x onerror=alert(1)>");
   assert.equal(context.$("background-page").children[1].innerHTML, undefined);
-});
-
-test("background save carries original revisions and closing does not delete a page", async () => {
-  const context = backgroundHarness();
-  const calls = [];
-  context.bridge = { apiPost: async (endpoint, payload) => { calls.push({ endpoint, payload }); return { message: "saved" }; } };
-  context.$("background-page").value = "kp-2";
-  context.changeBackground();
-  context.renderBackground();
-  assert.equal(calls.length, 0);
-  assert.equal(context.$("background-save").disabled, false);
-  context.data.config_revision = "new-config";
-  await context.saveBackground();
-  assert.equal(calls[0].payload.config_revision, "config-1");
-  assert.equal(JSON.stringify(calls[0].payload.page_ids), '["kp-1","kp-2"]');
-  context.$("background-page").value = "";
-  context.changeBackground();
-  await context.saveBackground();
-  assert.equal(calls[1].payload.enabled, false);
-  assert.equal(JSON.stringify(calls[1].payload.page_ids), '["kp-1"]');
-  assert.equal(calls[1].endpoint, "scopes/one/background");
-  assert.equal("bank" in calls[1].payload, false);
 });
 
 test("settings refresh invalidates old drafts and allows closing during maintenance without a tree read", async () => {

@@ -120,13 +120,13 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id))
         self.assertIn("tool_context_unavailable", await self.tools.execute(context, "reflect", {"query": "again"}))
         self.plugin.client.reflect.assert_awaited_once()
-        self.assertEqual(self.tools.turns[event].calls, 1)
+        self.assertEqual(self.tools.tool_turns[event].calls, 1)
 
     async def test_disabled_reflect_does_not_require_its_tool_for_existing_read_mode(self):
         self.tools.owned.pop(REFLECT_NAME)
         event, context, scope = await self.ready(mode="tools", enabled=False)
         self.assertEqual({tool.name for tool in self.request.func_tool.tools}, NAMES)
-        self.assertTrue(self.tools.valid(self.tools.turns[event], event))
+        self.assertTrue(self.tools.valid(self.tools.tool_turns[event], event))
         self.assertFalse(read_options(self.plugin.outbox, scope)["enabled"])
 
     async def test_user_deadline_keeps_native_request_tracked_until_response(self):

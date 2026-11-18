@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       host: ${{ steps.scope.outputs.host }}
       models: ${{ steps.scope.outputs.models }}
@@ -26,7 +26,7 @@ jobs:
       - name: Select checks for changed files
         id: scope
         env:
-          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           FULL_CHECK: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
@@ -48,13 +48,14 @@ jobs:
           python = any(
               name == "main.py" or name.startswith(("core/", "deploy/", "examples/"))
               or (name.startswith("tests/test_") and name.endswith(".py"))
-              or name in {"requirements.txt", "requirements-dev.txt", "_conf_schema.json", "tests/run.py",
+              or name in {"requirements.txt", "requirements-dev.txt", "_conf_schema.json", "tests/run.py", "tests/queue_fixture.py",
                           "tools/check-package.py", "tools/build-test-package.py"}
               for name in code
           )
           frontend = any(
-              (name.startswith("views/") and name.endswith((".js", ".html")))
-              or name == "tests/test_memory_view.js" for name in code
+              (name.startswith("views/") and name.endswith((".js", ".html", ".css")))
+              or name in {"tests/test_memory_view.js", "tests/integration/background_view.py"}
+              for name in code
           )
           host = any(
               name == "main.py" or name.startswith(("core/", ".astrbot-plugin/"))
@@ -88,6 +89,15 @@ jobs:
         run: python tests/run.py
       - if: steps.scope.outputs.frontend == 'true' && steps.scope.outputs.python != 'true'
         run: node tests/test_memory_view.js
+      - name: Knowledge page saves and polling in Chromium
+        if: steps.scope.outputs.frontend == 'true'
+        timeout-minutes: 8
+        env:
+          BRIDGE_BROWSER_OUTPUT: ${{ runner.temp }}/hindsight-browser
+        run: |
+          python -m pip install playwright==1.56.0
+          python -m playwright install --with-deps chromium
+          python tests/integration/background_view.py
       - run: python tools/check-package.py
 
   windows:
@@ -151,7 +161,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python tools/build-test-package.py --output "${{ runner.temp }}/hindsight-delivery"
+      - run: python tools/build-test-package.py --distribution --output "${{ runner.temp }}/hindsight-delivery"
       - name: Official AstrBot archive installation, requests, history and upgrade
         shell: bash
         run: |

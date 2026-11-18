@@ -34,7 +34,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_login, prepare_bot_identity, source_identity,
+    native_header, native_login, prepare_bot_identity,
 )
 
 spec = importlib.util.spec_from_file_location("field_probe", Path(__file__).parent / "platform_probe/probe.py")
@@ -90,7 +90,7 @@ async def main(output):
         assert incoming.message_id == "9007199254740993123"
         assert incoming.bot_id == "synthetic-bot@im.bot"
         assert incoming.timestamp == event.message_obj.raw_message["create_time_ms"] / 1000
-        assert source_identity(event, incoming, fixture.host, binding=fixture.binding).producer is fixture.host.client
+        assert fixture.binding["login"].client is fixture.host.client
         passed.append("raw_recipient_large_message_id_millisecond_timestamp_and_native_producer")
         record = probe.project(event, fixture.host, b"synthetic-fingerprint-key")
         serialized = json.dumps(record)

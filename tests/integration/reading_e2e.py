@@ -31,6 +31,52 @@ def results(requests):
     return values
 
 
+async def install_probe(acceptance):
+    name = "astrbot_plugin_bridge_reading_guard_probe"
+    with zipfile.ZipFile(ROOT / "reading-guard-probe.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name + "/main.py", Path(__file__).with_name("reading_probe.py").read_bytes())
+        archive.writestr(name + "/metadata.yaml", "name: " + name + "\ndesc: Native reading boundary probe\nversion: 1.0.0\nauthor: fixture\n")
+    await acceptance.install("reading-guard-probe.zip")
+    return name
+
+
+async def verify_assistant_capture(acceptance):
+    scope = await acceptance.scope()
+    assert scope["reading"]["mode"] == "automatic" and not scope["reflect"]["enabled"]
+    name = await install_probe(acceptance)
+    try:
+        await acceptance.action(scope["scope_id"], "mode", mode="active")
+        await asyncio.sleep(1.1)
+        for mode in ("automatic", "tools"):
+            if mode == "tools":
+                route = acceptance.prefix + "/scopes/" + scope["scope_id"] + "/reading"
+                options = await acceptance.http("GET", route)
+                saved = await acceptance.http("POST", route, payload={
+                    "mode": mode, "revision": options["selection"]["revision"],
+                    "scope_revision": options["scope_revision"], "config_revision": options["config_revision"],
+                })
+                assert saved["selection"]["mode"] == mode
+            start = len(jsonl("retain-trace"))
+            prompt = "HB-CAPTURE-PRIMARY-" + mode
+            answer = await acceptance.bot.chat(ALICE, prompt)
+            assert "HB-CAPTURE-PRIMARY-REPLY" in answer, answer
+            probe = json.loads((ROOT / "reading-guard-probe.json").read_text())
+            assert probe[prompt] == "HB-CAPTURE-SECONDARY-REPLY"
+            await acceptance.drained()
+            captured = [item for trace in jsonl("retain-trace")[start:] for item in trace["body"]["items"]]
+            expected = {"user": prompt, "assistant": "HB-CAPTURE-PRIMARY-REPLY"}
+            assert len(captured) == 2, (mode, captured)
+            assert {item["metadata"]["role"] for item in captured} == set(expected)
+            for item in captured:
+                assert expected[item["metadata"]["role"]] in item["content"], item
+                assert "HB-CAPTURE-SECONDARY" not in item["content"] and "<hb-read-request:" not in item["content"], item
+            replies = database(acceptance.runtime, "SELECT text FROM replies WHERE text LIKE 'HB-CAPTURE-%'")
+            assert [row["text"] for row in replies] == ["HB-CAPTURE-PRIMARY-REPLY"] * (1 if mode == "automatic" else 2)
+            acceptance.passed("secondary_agent_preserves_primary_assistant_capture_" + mode)
+    finally:
+        await acceptance.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + name)
+
+
 async def verify(acceptance, page, frame, bank):
     acceptance.report["tool_schema_mode"] = acceptance.settings.get("tool_schema_mode", "full")
     scope = await acceptance.scope()
@@ -127,11 +173,7 @@ async def verify(acceptance, page, frame, bank):
     assert not any(tool["function"]["name"].startswith(PREFIX) for tool in quota[-1].get("tools", []))
     acceptance.passed("all_native_tools_share_the_original_inbound_call_quota")
 
-    probe_name = "astrbot_plugin_bridge_reading_guard_probe"
-    with zipfile.ZipFile(ROOT / "reading-guard-probe.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(probe_name + "/main.py", Path(__file__).with_name("reading_probe.py").read_bytes())
-        archive.writestr(probe_name + "/metadata.yaml", "name: " + probe_name + "\ndesc: Native reading boundary probe\nversion: 1.0.0\nauthor: fixture\n")
-    await acceptance.install("reading-guard-probe.zip")
+    probe_name = await install_probe(acceptance)
     try:
         await acceptance.action(identifier, "mode", mode="active")
         await asyncio.sleep(1.1)

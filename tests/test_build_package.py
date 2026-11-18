@@ -37,19 +37,24 @@ class CandidatePackaging(unittest.TestCase):
             manifest = json.loads((output / "package-inventory.json").read_text())
             self.assertEqual(manifest["package_kind"], "distribution")
             self.assertEqual(manifest["release_status"], "unreleased_candidate")
+            expected_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+            self.assertEqual(manifest["commit"], expected_commit)
             install = output / "candidate-install.zip"
             digest = hashlib.sha256(install.read_bytes()).hexdigest()
             self.assertEqual(digest, manifest["archives"]["candidate-install.zip"])
             self.assertEqual(digest, manifest["archives"]["candidate-upgrade.zip"])
             with zipfile.ZipFile(install) as archive:
-                names = {name.removeprefix("astrbot_plugin_hindsight_bridge/") for name in archive.namelist()}
+                names = {entry.filename.removeprefix("astrbot_plugin_hindsight_bridge/")
+                         for entry in archive.infolist() if not entry.is_dir()}
                 self.assertEqual(names, set(manifest["files"]))
                 self.assertTrue({"main.py", "core/background.py", "core/settings.py", "views/memory/app.js", "deploy/compose.yaml"} <= names)
                 self.assertFalse(any(name.split("/")[0] in {"tests", "tools", ".local", ".github"} for name in names))
                 self.assertNotIn("requirements-dev.txt", names)
                 for name in names:
-                    self.assertEqual(hashlib.sha256(archive.read("astrbot_plugin_hindsight_bridge/" + name)).hexdigest(),
-                                     manifest["files"][name])
+                    content = archive.read("astrbot_plugin_hindsight_bridge/" + name)
+                    self.assertEqual(hashlib.sha256(content).hexdigest(), manifest["files"][name])
+                    if name == "main.py":
+                        self.assertEqual(content, subprocess.check_output(["git", "show", "HEAD:" + name], cwd=ROOT))
             subprocess.run(command, check=True, capture_output=True)
             self.assertEqual(hashlib.sha256(install.read_bytes()).hexdigest(), digest)
 

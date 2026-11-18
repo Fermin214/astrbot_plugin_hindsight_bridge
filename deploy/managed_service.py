@@ -14,11 +14,10 @@ import threading
 import time
 from urllib.request import ProxyHandler, Request, build_opener
 
-from model_transport import TransportServer
+from model_transport import TransportServer, transport_environment
 
 
 MAX_BODY = 256 * 1024
-# The upstream supervisor allows 60s to drain workers; Compose outlasts this wait.
 STOP_TIMEOUT = 75
 OPENER = build_opener(ProxyHandler({}))
 
@@ -101,12 +100,16 @@ class Runtime:
         values = dict(candidate["environment"])
         descriptors = json.loads(values.pop("ASTRBOT_MEMORY_MODEL_CONFIG", "{}"))
         values.pop("ASTRBOT_MEMORY_EMBEDDING_IDENTITY", None)
-        values = {
-            key: value.replace("__ASTRBOT_MEMORY_TRANSPORT_KEY__", self.token)
-            .replace("http://memory-models:8765", "http://127.0.0.1:8765")
-            for key, value in values.items()
-        }
+        values = transport_environment(values, descriptors, token=self.token)
         return {**os.environ, **values}, descriptors
+
+    def save(self, candidate):
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = self.directory / "models.json.new"
+        temporary.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(self.directory / "models.json")
+        self.active = candidate
 
     def start_transport(self, descriptors):
         if descriptors:
@@ -156,11 +159,13 @@ class Runtime:
         if not self.lock.acquire(blocking=False):
             raise ConfigurationError("模型配置正在应用，请稍后刷新。")
         try:
-            if self.active and self.active["environment"] == candidate["environment"] and self.status()["ready"]:
-                return self.status()
             expected = self.active["embedding_fingerprint"] if self.active else self.initial_fingerprint
             if expected and expected != candidate["embedding_fingerprint"]:
                 raise ConfigurationError("嵌入模型或维数变化需要迁移已有向量数据。")
+            if self.active and self.environment(self.active) == self.environment(candidate) and self.status()["ready"]:
+                if self.active != candidate:
+                    self.save(candidate)
+                return self.status()
             previous = self.active
             self.applying_fingerprint = self.fingerprint(candidate["environment"])
             self.stop()
@@ -179,12 +184,7 @@ class Runtime:
                     self.transport = self.transport_thread = None
                 self.start(candidate)
                 self.wait_ready()
-                self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                temporary = self.directory / "models.json.new"
-                temporary.write_text(json.dumps(candidate, ensure_ascii=False), encoding="utf-8")
-                temporary.chmod(0o600)
-                temporary.replace(self.directory / "models.json")
-                self.active = candidate
+                self.save(candidate)
                 self.last_error = ""
             except Exception:
                 self.stop()
