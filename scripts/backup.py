@@ -52,12 +52,15 @@ def preserves_rows(db, table, fixed, *, minimum="", no_additions=False, required
 
 
 def preserves_settings(previous, incoming, same_revision):
-    if same_revision:
-        return previous == incoming
+    migration_prefix = "authorization_migration:"
     for key, value in previous.items():
         if key not in incoming:
             return False
-        if key.startswith(("background:", "reading:", "reflect:")) and value != incoming[key]:
+        if value == incoming[key]:
+            continue
+        if same_revision or key.startswith(migration_prefix):
+            return False
+        if key.startswith(("background:", "reading:", "reflect:")):
             try:
                 old_revision = json.loads(value)["revision"]
                 new_revision = json.loads(incoming[key])["revision"]
@@ -65,7 +68,10 @@ def preserves_settings(previous, incoming, same_revision):
                 return False
             if type(old_revision) is not int or type(new_revision) is not int or new_revision <= old_revision:
                 return False
-    return True
+    return not same_revision or all(
+        key.startswith(migration_prefix) and key != migration_prefix and incoming[key] == "1"
+        for key in incoming.keys() - previous.keys()
+    )
 
 
 def control_conflict(previous, incoming, incoming_settings, same_revision):

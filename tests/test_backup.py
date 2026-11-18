@@ -113,6 +113,52 @@ class BackupTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "latest_control_evidence_conflict \\(requests\\)"):
                         BACKUP.backup(clone_data, clone_control, root / f"snapshot-{label}", latest)
 
+    def test_new_connection_migration_marker_can_advance_an_existing_same_revision_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, control = root / "data", root / "control"
+            latest = root / "backup" / "control.sqlite3"
+            newer = root / "newer" / "control.sqlite3"
+            for service, destination in (("first", latest), ("second", newer)):
+                with closing(Outbox(data, service, "http://memory.test", credential_fingerprint="fixture",
+                                    control_directory=control)) as queue:
+                    queue.sync_permissions([])
+                    self.assertEqual(queue.control.setting("revision"), "0")
+                manifest = BACKUP.backup(data, control, root / service, destination)
+                self.assertEqual(manifest["last_seen_control_revision"], 0)
+
+            with closing(BACKUP.connect(latest)) as db:
+                old_settings = BACKUP.settings(db)
+            with closing(BACKUP.connect(newer)) as db:
+                new_settings = BACKUP.settings(db)
+            self.assertEqual(old_settings["authorization_migration:first"], "1")
+            self.assertEqual(new_settings, {**old_settings, "authorization_migration:second": "1"})
+            output = root / "resumed"
+            BACKUP.backup(root / "second", newer.parent, output, latest)
+            self.assertTrue((output / "runtime.sqlite3").is_file())
+            with closing(BACKUP.connect(latest)) as db:
+                self.assertEqual(BACKUP.settings(db), new_settings)
+
+            for name, change, revision, error in (
+                ("removed", "DELETE FROM settings WHERE key='authorization_migration:first'", 0, "revision"),
+                ("rewritten", "UPDATE settings SET value='0' WHERE key='authorization_migration:first'", 1, "evidence"),
+                ("invalid", "INSERT INTO settings VALUES ('authorization_migration:third','0')", 0, "revision"),
+            ):
+                with self.subTest(name=name):
+                    fork = root / name
+                    fork.mkdir()
+                    with closing(BACKUP.connect(newer)) as source:
+                        BACKUP.snapshot(source, fork / "control.sqlite3")
+                    with closing(sqlite3.connect(fork / "control.sqlite3")) as db, db:
+                        db.execute(change)
+                        db.execute("UPDATE settings SET value=? WHERE key='revision'", (str(revision),))
+                    rejected = root / f"backup-{name}"
+                    with self.assertRaisesRegex(ValueError, rf"latest_control_{error}_conflict \(settings\)"):
+                        BACKUP.backup(root / "second", fork, rejected, latest)
+                    self.assertFalse(rejected.exists())
+                    with closing(BACKUP.connect(latest)) as db:
+                        self.assertEqual(BACKUP.settings(db), new_settings)
+
     def test_higher_revision_clone_without_erasure_does_not_replace_latest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
