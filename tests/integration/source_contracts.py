@@ -24,7 +24,7 @@ for name, path in (("plugins", root.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_snapshot, source_identity,
+    native_header, native_snapshot, prepare_bot_identity, source_identity,
 )
 
 
@@ -51,7 +51,18 @@ async def main():
     old = await event(host, "hello")
     incoming = native_snapshot(old, Plain)
     assert incoming and incoming.bot_id == "1001"
+    assert native_header(old, Plain, adapter=host) == incoming
     assert source_identity(old, incoming, host)
+    raw = old.message_obj.raw_message
+    old.message_obj.raw_message = dict(raw)
+    assert native_header(old, Plain, adapter=host) is None
+    old.message_obj.raw_message = raw
+    context = types.SimpleNamespace(
+        get_platform_inst=lambda instance: host,
+        get_config=lambda: {"platform": [host.config]},
+    )
+    with patch.dict(host.get_client()._wsr_api_clients, {"1001": object(), "1002": object()}):
+        assert await prepare_bot_identity(context, "fixture") == ""
     command_event = await event(host, "/hindsight pause", mid=2)
     command_event.message_str = "hindsight pause"
     command_event.is_at_or_wake_command = True
@@ -159,6 +170,7 @@ async def main():
         "real_qq_login": False,
         "passed": [
             "actual_onebot_adapter_conversion_and_event_client",
+            "native_raw_event_required_and_ambiguous_api_login_rejected",
             "host_public_created_at_and_pre_authorization_event_rejection",
             "actual_host_queued_commands_cannot_override_panel_pause_or_forget",
             "actual_host_queued_text_cannot_enter_resumed_new_generation",

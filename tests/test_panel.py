@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
@@ -543,7 +544,14 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.using_resources = resources
             self.plugin.refresh_permissions = lambda: queue.sync_permissions(pairs(self.config["allowed_accounts"]))
             bot = SimpleNamespace(get_login_info=AsyncMock(return_value={"user_id": 20001}))
-            adapter = SimpleNamespace(get_client=lambda: bot)
+            adapter = SimpleNamespace(
+                get_client=lambda: bot, meta=lambda: SimpleNamespace(id="qq", name="aiocqhttp"),
+            )
+            adapter_types = patch.object(
+                onebot_source, "native_types", return_value=(SimpleNamespace, SimpleNamespace, SimpleNamespace, dict),
+            )
+            adapter_types.start()
+            self.addCleanup(adapter_types.stop)
             self.plugin.context.get_platform_inst = lambda platform: adapter
             async def prepare():
                 self.plugin.source_accounts["qq"] = {"bot_id": "20001"}

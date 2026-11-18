@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core.client import Operation
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
@@ -495,13 +496,18 @@ class SourceContracts(unittest.TestCase):
     def test_old_event_producer_is_not_assigned_current_client(self):
         event = self.event("hello")
         incoming = native_header(event, self.Plain)
-        adapter = SimpleNamespace(get_client=lambda: event.bot)
-        self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
-        adapter.get_client = lambda: object()
-        self.assertIsNone(source_identity(event, incoming, adapter))
-        # Even if a host reuses the client, the original recipient remains old.
-        adapter.get_client = lambda: event.bot
-        self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+        adapter = SimpleNamespace(
+            get_client=lambda: event.bot,
+            meta=lambda: SimpleNamespace(id=event.get_platform_id(), name="aiocqhttp"),
+        )
+        with patch.object(
+            onebot_source, "native_types", return_value=(SimpleNamespace, SimpleNamespace, type(event.bot), dict),
+        ):
+            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
+            adapter.get_client = lambda: object()
+            self.assertIsNone(source_identity(event, incoming, adapter))
+            adapter.get_client = lambda: event.bot
+            self.assertEqual(source_identity(event, incoming, adapter).bot_id, "10")
 
     def test_unreleased_platforms_and_opaque_ids_do_not_inherit_onebot_rules(self):
         self.assertTrue(platform_details("aiocqhttp")["supported"])

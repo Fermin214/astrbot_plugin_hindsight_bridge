@@ -284,7 +284,11 @@ class HindsightBridge(Star):
                         self.confirmations.clear()
                         self.permission_revision += 1
                 if login is not None and not login.matches(observed):
-                    evidence["invalid_login"] = evidence.get("host_type") not in {"weixin_oc", "telegram"}
+                    if (
+                        observed is not None and observed.client is login.client
+                        and evidence.get("host_type") in {"qq_official", "qq_official_webhook"}
+                    ):
+                        evidence["invalid_login"] = True
                     evidence["bot_id"] = ""
                 if (
                     adapter is None or adapter is not evidence["adapter"]
@@ -329,17 +333,21 @@ class HindsightBridge(Star):
                 login = native_login(adapter)
                 record = next((row for row in self.context.get_config().get("platform", [])
                                if str(row.get("id")) == instance), {})
-                same_adapter = previous.get("adapter") is adapter
-                invalid = record.get("type") not in {"weixin_oc", "telegram"} and same_adapter and (
+                previous_login = previous.get("login")
+                same_qq_client = (
+                    record.get("type") in {"qq_official", "qq_official_webhook"}
+                    and previous_login is not None
+                    and previous_login.client is client
+                )
+                invalid = same_qq_client and (
                     previous.get("invalid_login", False)
-                    or previous.get("login") is not None
-                    and not previous["login"].matches(login)
+                    or login is not None and not previous_login.matches(login)
                 )
                 if invalid:
                     bot = ""
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
-                    "login": previous.get("login") if invalid else login,
+                    "login": previous_login if same_qq_client and (invalid or login is None) else login,
                     "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
                 logical_type = platform_details(record.get("type", ""))["logical_type"]
