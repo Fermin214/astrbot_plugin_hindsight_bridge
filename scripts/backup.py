@@ -4,10 +4,14 @@ import argparse
 import json
 import os
 import sqlite3
-import uuid
+import sys
+from tempfile import TemporaryDirectory, mkdtemp
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from core.locking import exclusive_lock
 
 
 def connect(path):
@@ -16,6 +20,69 @@ def connect(path):
 
 def settings(db):
     return dict(db.execute("SELECT key,value FROM settings"))
+
+
+def identity(values):
+    return values["deployment_id"], values["control_id"]
+
+
+def snapshot(source, path):
+    path.touch(mode=0o600, exist_ok=False)
+    with closing(sqlite3.connect(path)) as target:
+        source.backup(target)
+
+
+def archive_control(source, latest):
+    directory = Path(mkdtemp(prefix=latest.name + ".archive-", dir=latest.parent))
+    archived = directory / "control.sqlite3"
+    try:
+        source.replace(archived)
+    except OSError:
+        directory.rmdir()
+        raise
+    return archived
+
+
+def publish_control(journal, latest, manifest):
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = latest.with_name(latest.name + ".lock")
+    with lock_path.open("a+b") as lock, TemporaryDirectory(dir=latest.parent) as directory:
+        try:
+            exclusive_lock(lock)
+        except OSError as exc:
+            raise ValueError(f"latest_control_lock_failed: {lock_path}: {exc}") from exc
+        incoming = Path(directory) / "incoming.sqlite3"
+        snapshot(journal, incoming)
+        with closing(connect(incoming)) as candidate:
+            incoming_settings = settings(candidate)
+        if identity(incoming_settings) != identity(manifest):
+            raise ValueError("backup_identity_mismatch")
+        incoming_revision = int(incoming_settings["revision"])
+        if incoming_revision < manifest["last_seen_control_revision"]:
+            raise ValueError("backup_control_older_than_runtime")
+        if latest.exists():
+            previous = Path(directory) / "previous.sqlite3"
+            with closing(connect(latest)) as saved:
+                snapshot(saved, previous)
+            with closing(connect(previous)) as saved, closing(connect(incoming)) as candidate:
+                saved_settings = settings(saved)
+                if identity(saved_settings) != identity(incoming_settings):
+                    raise ValueError(f"latest_control_identity_mismatch: {latest}")
+                saved_revision = int(saved_settings["revision"])
+                if incoming_revision < saved_revision:
+                    raise ValueError(f"latest_control_revision_regression: {latest}")
+                if incoming_revision == saved_revision:
+                    same_content = (
+                        saved.execute("PRAGMA user_version").fetchone()
+                        == candidate.execute("PRAGMA user_version").fetchone()
+                        and sorted(saved.iterdump()) == sorted(candidate.iterdump())
+                    )
+                    if same_content:
+                        return
+                    archived = archive_control(incoming, latest)
+                    raise ValueError(f"latest_control_revision_conflict: {latest}; {archived}")
+            archive_control(previous, latest)
+        incoming.replace(latest)
 
 
 def backup(data_dir, control_dir, output, latest_control=None, backend_version=None):
@@ -35,16 +102,15 @@ def backup(data_dir, control_dir, output, latest_control=None, backend_version=N
             or latest_control.is_relative_to(control_dir)
         ):
             raise ValueError("latest_control_copy_must_be_separate")
-    with closing(connect(runtime)) as business, closing(connect(control)) as journal:
-        local, authority = settings(business), settings(journal)
-        if local.get("deployment_id") != authority.get("deployment_id") or local.get(
-            "control_id"
-        ) != authority.get("control_id"):
-            raise ValueError("backup_identity_mismatch")
-        output.mkdir(parents=True, exist_ok=False)
-        with closing(sqlite3.connect(output / "runtime.sqlite3")) as target:
-            business.backup(target)
-        with closing(connect(output / "runtime.sqlite3")) as captured:
+    if output.exists():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=output.parent) as directory:
+        staged = Path(directory) / "business"
+        staged.mkdir(mode=0o700)
+        with closing(connect(runtime)) as business:
+            snapshot(business, staged / "runtime.sqlite3")
+        with closing(connect(staged / "runtime.sqlite3")) as captured:
             recorded = settings(captured)
             version = captured.execute("PRAGMA user_version").fetchone()[0]
         manifest = {
@@ -56,24 +122,17 @@ def backup(data_dir, control_dir, output, latest_control=None, backend_version=N
             "last_seen_control_revision": int(recorded["control_revision"]),
             "created_at": datetime.now(UTC).isoformat(),
         }
-        (output / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        if latest_control:
-            latest_control.parent.mkdir(parents=True, exist_ok=True)
-            temporary = latest_control.with_name(uuid.uuid4().hex + ".sqlite3")
-            try:
-                with closing(sqlite3.connect(temporary)) as target:
-                    journal.backup(target)
-                if os.name != "nt":
-                    os.chmod(temporary, 0o600)
-                temporary.replace(latest_control)
-            finally:
-                temporary.unlink(missing_ok=True)
-        if os.name != "nt":
-            os.chmod(output, 0o700)
-            for name in ("runtime.sqlite3", "manifest.json"):
-                os.chmod(output / name, 0o600)
+        manifest_path = staged / "manifest.json"
+        manifest_path.touch(mode=0o600)
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        with closing(connect(control)) as journal:
+            if latest_control:
+                publish_control(journal, latest_control, manifest)
+            elif identity(settings(journal)) != identity(manifest):
+                raise ValueError("backup_identity_mismatch")
+        if output.exists():
+            raise FileExistsError(output)
+        staged.rename(output)
     return manifest
 
 

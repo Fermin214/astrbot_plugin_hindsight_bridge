@@ -3,14 +3,16 @@
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 
 import aiohttp
 from playwright.async_api import async_playwright
 
-from live_e2e import Acceptance, ALICE, BOB, NAME, OneBot, ROOT, database, until
+from live_e2e import Acceptance, ALICE, BOB, NAME, OneBot, ROOT, database, jsonl, until
 
 
 class Feedback(Acceptance):
@@ -438,8 +440,38 @@ class Feedback(Acceptance):
                     self.passed("identity_reconfirmation_invalidates_reference_and_explicit_reselection_clears_notice")
 
                 snapshot = ROOT / "pre-forget.sqlite3"
-                with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
-                    source.backup(destination)
+                control = ROOT / "control-volume/control.sqlite3"
+                latest_control = ROOT / "recovery-backup/control.sqlite3"
+
+                async def backup(name):
+                    output = ROOT / "recovery-backup" / name
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable, "/candidate-source/scripts/backup.py",
+                        "--data-dir", str(self.runtime.parent), "--control-dir", str(control.parent),
+                        "--output", str(output), "--latest-control", str(latest_control),
+                        "--backend-version", self.settings["hindsight_version"],
+                    )
+                    assert await process.wait() == 0
+                    return output / "runtime.sqlite3"
+
+                if self.settings.get("recovery_only"):
+                    await self.action(identifier, "mode", mode="active")
+                    await asyncio.sleep(1.1)
+                    await self.control("stop_hindsight")
+                    try:
+                        await self.bot.chat(ALICE, "A synthetic pending delivery in the old business snapshot.")
+                        snapshot = await backup("before-forget")
+                        old_pending = database(snapshot,
+                            "SELECT operation_id FROM outbox WHERE bank=? AND state NOT IN ('done','discarded')",
+                            (bank,),
+                        )
+                        assert old_pending, "backup must include undelivered work"
+                    finally:
+                        await self.control("start_hindsight")
+                        await self.backend_ready()
+                else:
+                    with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
+                        source.backup(destination)
                 prepared = await self.action(identifier, "forget_prepare")
                 await self.action(identifier, "forget_confirm", confirmation=prepared["confirmation"])
                 async def erased():
@@ -447,11 +479,19 @@ class Feedback(Acceptance):
                     return value if value["bank"] != bank and not value["summary"].get("cleanup") else None
                 latest = await until(erased, timeout=90)
                 assert latest["background"]["invalidated"] and not latest["background"]["page_id"]
+                if self.settings.get("recovery_only"):
+                    await backup("after-forget")
+                trace_boundary = len(jsonl("retain-trace"))
+
                 def restore_business():
                     self.runtime.unlink()
                     self.runtime.with_name("runtime.sqlite3-wal").unlink(missing_ok=True)
                     self.runtime.with_name("runtime.sqlite3-shm").unlink(missing_ok=True)
                     shutil.copyfile(snapshot, self.runtime)
+                    if self.settings.get("recovery_only"):
+                        control.with_name("control.sqlite3-wal").unlink(missing_ok=True)
+                        control.with_name("control.sqlite3-shm").unlink(missing_ok=True)
+                        shutil.copyfile(latest_control, control)
                 await self.restart(restore_business)
                 restored = await self.scope()
                 assert restored["bank"] == latest["bank"] and restored["generation"] == latest["generation"]
@@ -465,6 +505,10 @@ class Feedback(Acceptance):
                         assert response.status == 404, (absent_bank, response.status)
                 self.report["measurements"]["bank_config_after_restore"] = {"retired": 404, "new": 404}
                 assert all(row["state"] == "discarded" for row in database(self.runtime, "SELECT state FROM outbox WHERE bank=?", (bank,)))
+                if self.settings.get("recovery_only"):
+                    dispatched = {row["body"]["operation_id"] for row in jsonl("retain-trace")[trace_boundary:]}
+                    assert not dispatched.intersection(row["operation_id"] for row in old_pending)
+                    self.passed("restoring_old_business_and_new_control_does_not_resend_pending_delivery")
                 await page.reload()
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
