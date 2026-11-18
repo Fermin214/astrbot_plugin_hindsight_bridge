@@ -40,7 +40,7 @@ async def install_probe(acceptance):
     return name
 
 
-async def verify_assistant_capture(acceptance, frame):
+async def verify_assistant_capture(acceptance):
     scope = await acceptance.scope()
     assert scope["reading"]["mode"] == "automatic" and not scope["reflect"]["enabled"]
     name = await install_probe(acceptance)
@@ -49,13 +49,13 @@ async def verify_assistant_capture(acceptance, frame):
         await asyncio.sleep(1.1)
         for mode in ("automatic", "tools"):
             if mode == "tools":
-                await frame.locator("#reading-mode").select_option("tools")
-                await frame.locator("#reading-save").click()
-
-                async def tools_saved():
-                    return (await acceptance.scope())["reading"]["mode"] == "tools"
-
-                await until(tools_saved, timeout=15)
+                route = acceptance.prefix + "/scopes/" + scope["scope_id"] + "/reading"
+                options = await acceptance.http("GET", route)
+                saved = await acceptance.http("POST", route, payload={
+                    "mode": mode, "revision": options["selection"]["revision"],
+                    "scope_revision": options["scope_revision"], "config_revision": options["config_revision"],
+                })
+                assert saved["selection"]["mode"] == mode
             start = len(jsonl("retain-trace"))
             prompt = "HB-CAPTURE-PRIMARY-" + mode
             answer = await acceptance.bot.chat(ALICE, prompt)
