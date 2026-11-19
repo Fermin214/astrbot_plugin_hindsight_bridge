@@ -697,7 +697,9 @@ function clearReferenceDraft() {
 function renderReferences() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const available = Number.isInteger(scope?.reference_revision) && !scope.historical && !scope.pending;
-  const key = available ? JSON.stringify([scopeId, scope.owner_id, scope.bank, scope.generation, scope.revision]) : undefined;
+  const key = available ? JSON.stringify([
+    data.config.connection_revision, scopeId, scope.owner_id, scope.bank, scope.generation, scope.revision,
+  ]) : undefined;
   const changed = available && referenceDraft && (referenceDraft.revision !== scope.reference_revision
     || referenceDraft.configRevision !== data.config_revision);
   if (referenceDraft?.key !== key || (changed && !referenceDraft.dirty)) {
