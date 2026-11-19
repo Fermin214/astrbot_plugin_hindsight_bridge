@@ -15,6 +15,7 @@ from .access import Access
 from .identity import Incoming, Scope, canonical, sha256
 from .locking import exclusive_lock
 from .materials import Message, request_digest, retain_payload
+from .reference import ReferenceHistory
 
 SCHEMA_VERSION = 6
 ACTIVE_STATES = ("ready", "submitting", "unknown", "deferred", "tracking", "cancel_requested")
@@ -63,9 +64,11 @@ class Outbox:
         control_directory: Path | None = None,
         control_root: Path | None = None,
         agent_id: str = "default",
+        warning=None,
     ):
         self.db = self.lock = self.control = None
         self.directory = Path(directory)
+        self.references = ReferenceHistory(self, warning)
         self.connection_id, self.zone = service_id.strip(), zone
         self.agent_id = agent_id.strip()
         self.permission_pairs = None
@@ -276,6 +279,7 @@ class Outbox:
 
     def apply_control(self):
         """Replay the authoritative owner generation before opening message I/O."""
+        self.references.reconcile()
         with self.db:
             for row in self.db.execute("SELECT * FROM scopes").fetchall():
                 account = self.control.account(row["connection_id"], row["scope_id"])
@@ -471,6 +475,7 @@ class Outbox:
                         (self.connection_id, row["scope_id"]),
                     )
         self.permission_pairs = accounts
+        self.references.reconcile()
 
     def activate(self, incoming, expected_revision, *, now=None):
         identity = incoming.scope(self.deployment_id)
@@ -1230,6 +1235,7 @@ class Outbox:
         return erasure
 
     def close(self):
+        self.references.close()
         if self.db is not None:
             self.db.close()
             self.db = None

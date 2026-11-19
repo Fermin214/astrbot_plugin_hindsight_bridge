@@ -60,7 +60,7 @@ def preserves_settings(previous, incoming, same_revision):
             continue
         if same_revision or key.startswith(migration_prefix):
             return False
-        if key.startswith(("background:", "reading:", "reflect:")):
+        if key.startswith(("background:", "reading:", "reflect:", "reference:")):
             try:
                 old_revision = json.loads(value)["revision"]
                 new_revision = json.loads(incoming[key])["revision"]

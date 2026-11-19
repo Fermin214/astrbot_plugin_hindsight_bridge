@@ -30,7 +30,8 @@ from .outbox import QueueError
 from .permissions import pairs
 from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
 from . import settings
-from .materials import TokenizerError
+from .materials import TokenizerError, token_count
+from .reference import PROMPT_TOKEN_LIMIT, reference_options, save_reference_options
 
 NAME = "astrbot_plugin_hindsight_bridge"
 
@@ -67,6 +68,10 @@ class MemoryPanel:
             ("scopes/<scope_id>/action", ["GET", "POST"], self.action),
             ("scopes/<scope_id>/background", ["GET", "POST"], self.background),
             ("scopes/<scope_id>/reading", ["GET", "POST"], self.reading),
+            ("scopes/<scope_id>/references", ["GET", "POST"], self.references),
+            ("scopes/<scope_id>/references/count", "POST", self.prompt_count),
+            ("scopes/<scope_id>/usage", "GET", self.usage),
+            ("scopes/<scope_id>/usage/<turn_id>", "GET", self.usage),
             ("scopes/<scope_id>/reflect", ["GET", "POST"], self.reflect),
         ]
         if hasattr(plugin.context, "register_web_api"):
@@ -118,6 +123,11 @@ class MemoryPanel:
 
     def error_message(self, code):
         messages = {
+            "reference_turn_missing": "这轮使用记录已清除，请重新打开使用记录。",
+            "reference_changed": "记忆参考设置已变化，请重新载入后保存。",
+            "reference_settings_invalid": "记忆参考设置损坏，请检查插件控制库。",
+            "reference_prompt_too_long": f"记忆提示超过 {PROMPT_TOKEN_LIMIT} token，请缩短后保存。",
+            "reference_history_unavailable": "无法读取或保存使用记录，请检查插件数据目录权限与剩余空间。",
             "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试保存」。",
             "remote_cancelled": "这条记录的保存已取消。",
             "cancellation_registered": "正在取消这条记录的保存。",
@@ -651,6 +661,11 @@ class MemoryPanel:
                 "summary": summary,
             })
             if queue and not scope.get("pending"):
+                if not scope.get("historical") and queue.can_recall(scope, manual=True):
+                    try:
+                        result[-1]["reference_revision"] = reference_options(queue, scope)["revision"]
+                    except QueueError as exc:
+                        result[-1]["reference_error"] = self.error_message(str(exc))
                 if getattr(plugin, "read_tools", None):
                     try:
                         result[-1]["reading"] = {
@@ -1443,6 +1458,58 @@ class MemoryPanel:
         if not owner or owner["bank"] != scope["bank"] or owner["revision"] != scope["revision"]:
             raise PanelError("记忆范围已变化，请刷新后重试。")
         return scope
+
+    async def reference_scope(self, scope_id):
+        from astrbot.api.web import request
+
+        if not request.username:
+            raise PanelError("请使用 AstrBot 管理账号登录。")
+        plugin = self.plugin
+        await plugin.prepare_sources()
+        scope = self.scope(scope_id)
+        source = Scope(*json.loads(scope["identity_json"]))
+        bot = await self.bot_id(source.platform_instance_id)
+        scope = self.scope(scope_id)
+        queue = plugin.outbox
+        if bot != source.bot_id or not queue.access.permitted(source) or not queue.can_recall(scope, manual=True):
+            raise PanelError("请连接并确认这个用户的机器人，解除记忆库暂停后重试。")
+        return queue, scope
+
+    async def references(self, scope_id):
+        from astrbot.api.web import request
+
+        posting = request.method == "POST"
+        payload = await self.body() if posting else {}
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            queue, scope = await self.reference_scope(scope_id)
+            config_revision = self.config_revision()
+            tokenizer = self.plugin.client.tokenizer
+            if posting:
+                if (set(payload) != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
+                                     "history_limit", "scope_revision", "config_revision"}
+                    or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]
+                    or payload.pop("config_revision") != config_revision):
+                    raise QueueError("reference_changed")
+                selection = save_reference_options(queue, scope, **payload, tokenizer=tokenizer)
+            else:
+                selection = reference_options(queue, scope)
+            return {"selection": selection, "scope_revision": scope["revision"], "config_revision": config_revision,
+                    "prompt_tokens": token_count(selection["prompt"], tokenizer), "prompt_limit": PROMPT_TOKEN_LIMIT}
+
+    async def prompt_count(self, scope_id):
+        payload = await self.body()
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            await self.reference_scope(scope_id)
+            if set(payload) != {"prompt"} or not isinstance(payload["prompt"], str):
+                raise PanelError("请填写有效的记忆提示。")
+            return {"prompt_tokens": token_count(payload["prompt"], self.plugin.client.tokenizer)}
+
+    async def usage(self, scope_id, turn_id=None):
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            queue, scope = await self.reference_scope(scope_id)
+            if turn_id is None:
+                return {"turns": queue.references.list(scope)}
+            return {"turn": queue.references.detail(scope, turn_id)}
 
     async def reading(self, scope_id):
         from astrbot.api.web import request

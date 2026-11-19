@@ -54,6 +54,8 @@ CI 面向项目回归与社区兼容，按新增提交涉及的文件选择检�
 
 `--scope read-tools` 验证有序知识页版本升级后的按需工具：原生 Agent 搜索、整行续读、版本变化、事实 Recall、来源和最近历史、同消息额度、按用户隔离、停用、实际保存材料、宿主会话与 Docker 日志、重载及完整遗忘。使用合成工具模型和 OneBot 平台端，不改变已有部署。
 
+运行 `python tools/run-parameters-e2e.py --mode existing --scope references --output /tmp/新的测试目录` 验证聊天参考。此场景对照真实 AstrBot 请求、工具输出和面板复制的快照，覆盖提示与筛选、保留轮数、写失败、重启及降级期间的遗忘。
+
 Linux 与 Windows 的分发验收使用 `python tools/build-test-package.py --distribution --revision <提交> --output <目录>`。清单包含提交和每个分发文件的摘要。同包重装验证安装与重载。历史版本升级验证数据迁移，并记录历史包来源。
 
 `python tools/run-parameters-e2e.py --mode existing --astrbot-version 4.29.4 --hindsight-version 1.2.0 --output /tmp/新的测试目录` 验证面板参数到实际聊天的完整流程；`--mode managed` 使用独立配套安装。只涉及高级参数、队列或排除规则时，添加 `--scope advanced`，复用其他场景的已有证据。按变更选择接入方式、范围和版本，不以固定矩阵重复执行。

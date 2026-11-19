@@ -21,6 +21,9 @@ let maintenanceReadRevision = 0;
 let backgroundReadRevision = 0;
 let backgroundDraft = null;
 let readingDraft = null;
+let referenceDraft = null;
+let promptCountTimer;
+let usageReadRevision = 0;
 let reflectDraft = null;
 let bootstrapReadRevision = 0;
 let versionCheckRevision = 0;
@@ -673,7 +676,191 @@ function renderScope() {
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
   renderBackground();
   renderReading();
+  renderReferences();
   renderReflect();
+}
+
+function renderReferences() {
+  const scope = data?.scopes.find((item) => item.scope_id === scopeId);
+  const available = Number.isInteger(scope?.reference_revision) && !scope.historical && !scope.pending;
+  const key = available ? JSON.stringify([scopeId, scope.bank, scope.generation, scope.revision, data.config_revision]) : "";
+  if (referenceDraft?.key !== key && (referenceDraft || available)) {
+    clearTimeout(promptCountTimer);
+    if ($("usage-dialog").open) $("usage-dialog").close();
+    $("reference-fields").disabled = true;
+    $("reference-form").reset();
+    $("reference-tokens").textContent = "";
+    $("reference-feedback").hidden = true;
+    referenceDraft = available ? { key, id: scopeId, revision: scope.reference_revision } : null;
+  }
+  const draft = referenceDraft;
+  const conflict = draft && draft.revision !== scope.reference_revision;
+  if (conflict && !draft.dirty) {
+    draft.selection = null;
+    draft.attempted = false;
+    draft.revision = scope.reference_revision;
+    if ($("usage-dialog").open) $("usage-dialog").close();
+  }
+  const blocked = !draft?.selection || locks.has("memory");
+  $("reference-fields").disabled = blocked;
+  $("reference-save").disabled = blocked || !draft.dirty || conflict;
+  $("reference-reload").hidden = !(draft?.failed || (conflict && draft.dirty));
+  $("usage-open").disabled = !available || locks.has("memory");
+  if (scope?.reference_error || (conflict && draft.dirty)) {
+    notify(scope.reference_error || "设置已变化，请重新载入后修改。", true, "reference-feedback");
+  }
+  const keep = $("reference-history").value;
+  const pruning = keep !== "" && Number(keep) >= 0 && Number(keep) < draft?.selection?.history_limit;
+  $("reference-pruning").textContent = pruning
+    ? (Number(keep) === 0 ? "保存后关闭记录，并清除已有记录。" : "保存后删除超出的最旧记录。") : "";
+  $("reference-pruning").hidden = !pruning;
+  if (viewReady && draft && !draft.attempted) void loadReferences(draft);
+}
+
+async function loadReferences(draft) {
+  draft.attempted = true;
+  const revision = draft.revision;
+  try {
+    const response = await bridge.apiGet(endpoint("references", draft.id));
+    if (referenceDraft !== draft || revision !== draft.revision) return;
+    const scope = data.scopes.find((item) => item.scope_id === draft.id);
+    const saved = response.selection;
+    if (response.scope_revision !== scope?.revision || response.config_revision !== data.config_revision
+      || saved?.revision !== revision) throw new Error("设置已变化，请重新载入。");
+    draft.selection = saved;
+    draft.promptLimit = response.prompt_limit;
+    $("reference-prompt").value = saved.prompt;
+    $("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
+    for (const type of ["world", "experience", "observation"]) $("reference-" + type).checked = saved.types.includes(type);
+    $("reference-exclude").checked = saved.exclude_assistant;
+    $("reference-limit").value = saved.detail_limit;
+    $("reference-history").value = saved.history_limit;
+  } catch (error) {
+    if (referenceDraft !== draft || revision !== draft.revision) return;
+    draft.failed = true;
+    notify(errorMessage(error), true, "reference-feedback");
+  }
+  renderReferences();
+}
+
+function countPrompt(draft) {
+  clearTimeout(promptCountTimer);
+  const prompt = $("reference-prompt").value;
+  $("reference-tokens").textContent = `… / ${draft.promptLimit} token`;
+  promptCountTimer = setTimeout(async () => {
+    let count = "—";
+    try {
+      const response = await bridge.apiPost(endpoint("references/count", draft.id), { prompt });
+      count = response.prompt_tokens;
+    } catch {}
+    if (referenceDraft === draft && $("reference-prompt").value === prompt) {
+      $("reference-tokens").textContent = `${count} / ${draft.promptLimit} token`;
+    }
+  }, 250);
+}
+
+async function saveReferences() {
+  const draft = referenceDraft;
+  if (!draft?.selection || $("reference-save").disabled) return;
+  const scope = data.scopes.find((item) => item.scope_id === draft.id);
+  const payload = { prompt: $("reference-prompt").value, exclude_assistant: $("reference-exclude").checked,
+    types: ["world", "experience", "observation"].filter((type) => $("reference-" + type).checked),
+    detail_limit: Number($("reference-limit").value), history_limit: Number($("reference-history").value),
+    revision: draft.revision, scope_revision: scope.revision, config_revision: data.config_revision };
+  await perform($("reference-save"), "memory", async () => {
+    const response = await bridge.apiPost(endpoint("references", draft.id), payload);
+    if (referenceDraft !== draft) return;
+    draft.dirty = false;
+    draft.revision = response.selection.revision;
+    draft.selection = response.selection;
+    scope.reference_revision = draft.revision;
+    $("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
+    notify("已保存", false, "reference-feedback");
+    await refreshBootstrap();
+  }, "reference-feedback");
+}
+
+function clearUsageDetail() {
+  $("usage-deliveries").replaceChildren();
+  $("usage-json").value = "";
+  $("usage-json").hidden = true;
+  $("usage-copy-json").hidden = true;
+  $("usage-feedback").textContent = "";
+}
+
+async function openUsage() {
+  const draft = referenceDraft;
+  if (!draft) return;
+  const revision = ++usageReadRevision;
+  clearUsageDetail();
+  $("usage-picker").hidden = true;
+  $("usage-turn").replaceChildren();
+  $("usage-dialog").showModal();
+  notify("正在读取使用记录…", false, "usage-feedback");
+  try {
+    const { turns } = await bridge.apiGet(endpoint("usage", draft.id));
+    if (revision !== usageReadRevision || referenceDraft !== draft || !$("usage-dialog").open) return;
+    if (!turns.length) { notify("暂无使用记录。", false, "usage-feedback"); return; }
+    $("usage-turn").replaceChildren(...turns.map((turn) => option(turn.id,
+      `${new Date(turn.created_at * 1000).toLocaleString()} · ${turn.conversation_id} · ${turn.message_id}`)));
+    $("usage-picker").hidden = false;
+    await loadUsageTurn();
+  } catch (error) {
+    if (revision === usageReadRevision && $("usage-dialog").open) notify(errorMessage(error), true, "usage-feedback");
+  }
+}
+
+async function loadUsageTurn() {
+  const draft = referenceDraft;
+  const turnId = $("usage-turn").value;
+  const revision = ++usageReadRevision;
+  clearUsageDetail();
+  if (!turnId || !draft) return;
+  try {
+    const { turn } = await bridge.apiGet(endpoint(`usage/${encodeURIComponent(turnId)}`, draft.id));
+    if (revision !== usageReadRevision || referenceDraft !== draft || !$("usage-dialog").open) return;
+    $("usage-json").value = JSON.stringify(turn, null, 2);
+    $("usage-copy-json").hidden = false;
+    $("usage-deliveries").replaceChildren(...turn.deliveries.map((delivery, index) => usageDelivery(delivery, index, turn)));
+  } catch (error) {
+    if (revision === usageReadRevision && $("usage-dialog").open) notify(errorMessage(error), true, "usage-feedback");
+  }
+}
+
+function usageDelivery(delivery, index, turn) {
+  const kinds = { request: "聊天请求", recall: "细节检索", read_page: "读取知识页", search_pages: "搜索知识页",
+    page_sources: "知识页来源", page_history: "知识页版本", reflect: "Reflect" };
+  const statuses = { delivered: "已交付", no_match: "无匹配", filtered: "已筛除", duplicate: "条目重复",
+    limit: "达到条数或长度上限", error: "读取失败", budget: "额度已用完", not_called: "工具未调用" };
+  const sourceKinds = { user: "用户发言", assistant: "助手发言", mixed: "混合来源", unknown: "来源未知" };
+  const types = { world: "世界事实", experience: "经历", observation: "观察" };
+  const section = el("section", "usage-delivery");
+  const title = kinds[delivery.kind] || delivery.kind;
+  section.append(el("h3", "", `${index + 1}. ${title}`));
+  const usedTools = delivery.kind === "request" && delivery.status === "not_called" && turn.deliveries.length > 1;
+  if (!usedTools) section.append(el("p", "", [statuses[delivery.status] || delivery.status, delivery.code].filter(Boolean).join(" · ")));
+  for (const item of delivery.items || []) {
+    const labels = [item.id, types[item.type] || item.type, sourceKinds[item.source_kind] || "来源未知",
+      item.document_id, item.occurred_start, item.occurred_end, item.mentioned_at].filter(Boolean);
+    section.append(el("p", "usage-meta", labels.join(" · ")));
+  }
+  for (const page of delivery.pages || []) {
+    section.append(el("p", "usage-meta", [page.page_id, page.mental_model_id, page.version, page.last_refreshed_at].filter(Boolean).join(" · ")));
+  }
+  if (delivery.text) {
+    const field = el("textarea", "usage-text");
+    field.id = `usage-text-${index}`;
+    field.readOnly = true;
+    field.rows = 5;
+    field.value = delivery.text;
+    field.setAttribute("aria-label", `${title}原文`);
+    const button = el("button", "", "复制原文");
+    button.type = "button";
+    button.addEventListener("click", () => void copyValue(field.id, "原文已复制。", "usage-feedback")
+      .catch((error) => notify(errorMessage(error), true, "usage-feedback")));
+    section.append(field, button);
+  }
+  return section;
 }
 
 function renderReading() {
@@ -1498,6 +1685,30 @@ $("reading-mode").addEventListener("change", () => {
   renderReading();
 });
 $("reading-save").addEventListener("click", () => void saveReading());
+$("reference-form").addEventListener("submit", (event) => { event.preventDefault(); void saveReferences(); });
+$("reference-form").addEventListener("input", (event) => {
+  if (!referenceDraft?.selection) return;
+  referenceDraft.dirty = true;
+  $("reference-feedback").hidden = true;
+  if (event.target.id === "reference-prompt") countPrompt(referenceDraft);
+  renderReferences();
+});
+$("reference-reload").addEventListener("click", () => {
+  referenceDraft = null;
+  void refreshBootstrap().catch((error) => notify(errorMessage(error), true, "reference-feedback"));
+});
+$("usage-open").addEventListener("click", () => void openUsage());
+$("usage-turn").addEventListener("change", () => void loadUsageTurn());
+$("usage-dialog").addEventListener("close", () => {
+  usageReadRevision++;
+  clearUsageDetail();
+  $("usage-turn").replaceChildren();
+});
+$("usage-copy-json").addEventListener("click", () => {
+  $("usage-json").hidden = false;
+  void copyValue("usage-json", "JSON 已复制。", "usage-feedback").then(() => { $("usage-json").hidden = true; })
+    .catch((error) => notify(errorMessage(error), true, "usage-feedback"));
+});
 for (const id of ["reflect-enabled", "reflect-timeout"]) $(id).addEventListener("input", () => {
   if (reflectDraft) reflectDraft.dirty = true;
   renderReflect();

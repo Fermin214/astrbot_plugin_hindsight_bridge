@@ -7,7 +7,8 @@ import math
 from .control import QueueError
 from .diagnostics import ConfigurationError
 from .identity import Scope, canonical, sha256
-from .materials import memory_block, token_count
+from .materials import DEFAULT_MEMORY_PROMPT, memory_item, render_memories, token_count
+from .reference import reference_options
 
 MAX_BACKGROUND_PAGES = 8
 
@@ -174,6 +175,7 @@ class ReadGuard:
     selection: dict
     manual: bool = False
     reading_setting: str | None = None
+    settings: dict | None = None
 
     @classmethod
     def freeze(cls, plugin, scope, *, manual=False):
@@ -183,6 +185,7 @@ class ReadGuard:
             plugin.outbox.control.setting("reading:" + sha256(canonical([
                 plugin.outbox.connection_id, scope["owner_id"],
             ]))),
+            None if manual else reference_options(plugin.outbox, scope),
         )
 
     @staticmethod
@@ -210,6 +213,7 @@ class ReadGuard:
                 and owner["bank"] == self.scope["bank"] and owner["revision"] == self.scope["revision"]
             ))
             and reference(self.queue, self.scope) == self.selection
+            and (self.manual or reference_options(self.queue, self.scope) == self.settings)
             and self.queue.control.setting("reading:" + sha256(canonical([
                 self.queue.connection_id, self.scope["owner_id"],
             ]))) == self.reading_setting
@@ -234,18 +238,42 @@ class ReferenceBudget:
             ("共享字符上限", len(value) > self.chars),
         ) if over]
 
-    def recall_block(self, results, background, suffix):
-        selected, facts = [], ""
-        for item in results[:12]:
-            block = memory_block([*selected, item], limit=self.chars)
+    def recall_block(self, results, background, suffix, *, prompt=DEFAULT_MEMORY_PROMPT, max_items=12, delivered=None):
+        selected, seen, facts = [], set(), ""
+        for row in results:
+            if len(selected) >= max_items:
+                break
+            if not isinstance(row, dict) or not isinstance(row.get("text"), str) or row.get("id") in seen:
+                continue
+            item = memory_item(row)
+            block = render_memories([*selected, item], prompt)
             candidate = "\n\n".join(filter(None, (background, block))) + suffix
-            if block and block != facts and self.fits(candidate):
+            if self.fits(candidate):
                 selected.append(item)
+                if row.get("id"):
+                    seen.add(row["id"])
                 facts = block
+        if delivered is not None:
+            delivered.update(items=selected, prompt=prompt if facts and prompt == DEFAULT_MEMORY_PROMPT else "")
         return facts
 
 
-def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None, on_demand=False, prefix=""):
+def detail_status(results, recall_code, on_demand, delivered):
+    if on_demand:
+        return "细节记忆由按需工具读取，本轮未自动检索。"
+    if recall_code:
+        return "本轮细节检索失败（" + recall_code + "）。"
+    if not results:
+        status = (delivered or {}).get("status")
+        if status == "filtered":
+            return "细节记忆已按设置筛除。"
+        if status == "limit":
+            return "细节记忆条数上限为 0。"
+        return "本轮细节检索未匹配到相关记忆。"
+    return ""
+
+
+def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", page_code="", diagnostics=None, on_demand=False, prefix="", prompt=DEFAULT_MEMORY_PROMPT, max_items=12, delivered=None):
     diagnostics = {} if diagnostics is None else diagnostics
     budget = ReferenceBudget(tokens, chars, tokenizer, prefix)
 
@@ -269,12 +297,9 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
     status = []
     if page_code:
         status.append("未使用知识页：" + page_code)
-    if on_demand:
-        status.append("细节记忆由按需工具读取，本轮未自动检索。")
-    elif recall_code:
-        status.append("本轮细节检索失败（" + recall_code + "）。")
-    elif not results:
-        status.append("本轮细节检索未匹配到相关记忆。")
+    message = detail_status(results, recall_code, on_demand, delivered)
+    if message:
+        status.append(message)
     suffix = "\n" + " ".join(status) if status else ""
     if not budget.fits(background + suffix):
         if background:
@@ -282,9 +307,9 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
             return compose_background(
                 None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
                 page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
-                on_demand=on_demand, prefix=prefix,
+                on_demand=on_demand, prefix=prefix, prompt=prompt, max_items=max_items, delivered=delivered,
             )
-    block = budget.recall_block(results, background, suffix)
+    block = budget.recall_block(results, background, suffix, prompt=prompt, max_items=max_items, delivered=delivered)
     if results and not block and not recall_code:
         suffix += "\n本轮细节检索结果超出参考预算（recall_content_unavailable）。"
     result = "\n\n".join(filter(None, (background, block))) + suffix
@@ -293,27 +318,39 @@ def compose_background(page, results, *, tokens, chars, tokenizer, page_tokens=4
         return compose_background(
             None, results, tokens=tokens, chars=chars, tokenizer=tokenizer,
             page_tokens=page_tokens, recall_code=recall_code, page_code="background_too_large", diagnostics=diagnostics,
-            on_demand=on_demand, prefix=prefix,
+            on_demand=on_demand, prefix=prefix, prompt=prompt, max_items=max_items, delivered=delivered,
         )
     if budget.fits(result):
         return result.strip(), page_code, bool(block), bool(background)
+    if delivered is not None:
+        delivered.update(items=[], prompt="")
     fallback = "Hindsight 本轮记忆参考不可用。"
     return (fallback if budget.fits(fallback) else ""), page_code or "background_too_large", False, False
 
 
-def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", on_demand=False, prefix=""):
+def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens=400, recall_code="", on_demand=False, prefix="", prompt=DEFAULT_MEMORY_PROMPT, max_items=12, delivered=None):
     outcomes = [{
         **read["reference"], "code": read["code"], "used": False, "exceeded": [],
     } for read in reads]
+
+    def snapshot_pages():
+        if delivered is not None:
+            delivered["pages"] = [
+                {**read["reference"], "text": page_block(read["page"]),
+                 "last_refreshed_at": read["page"]["last_refreshed_at"]}
+                for read, outcome in zip(reads, outcomes) if outcome["used"]
+            ]
+
     if len(reads) == 1:
         diagnostics = {}
         block, code, facts_used, used = compose_background(
             reads[0]["page"], results, tokens=tokens, chars=chars, tokenizer=tokenizer,
             page_tokens=page_tokens, recall_code=recall_code, page_code=reads[0]["code"],
             diagnostics=diagnostics,
-            on_demand=on_demand, prefix=prefix,
+            on_demand=on_demand, prefix=prefix, prompt=prompt, max_items=max_items, delivered=delivered,
         )
         outcomes[0].update(code=code, used=used, exceeded=diagnostics.get("exceeded", []))
+        snapshot_pages()
         return block, facts_used, outcomes
 
     budget = ReferenceBudget(tokens, chars, tokenizer, prefix)
@@ -336,12 +373,9 @@ def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens
         messages = []
         if any(not item["used"] for item in outcomes):
             messages.append("部分知识页未使用，原因见插件面板。")
-        if on_demand:
-            messages.append("细节记忆由按需工具读取，本轮未自动检索。")
-        elif recall_code:
-            messages.append("本轮细节检索失败（" + recall_code + "）。")
-        elif not results:
-            messages.append("本轮细节检索未匹配到相关记忆。")
+        message = detail_status(results, recall_code, on_demand, delivered)
+        if message:
+            messages.append(message)
         elif no_facts:
             messages.append("本轮细节检索结果超出参考预算（recall_content_unavailable）。")
         return "\n" + " ".join(messages) if messages else ""
@@ -357,11 +391,14 @@ def compose_backgrounds(reads, results, *, tokens, chars, tokenizer, page_tokens
 
     while True:
         background = "\n\n".join(candidates[i] for i in selected_pages)
-        facts = budget.recall_block(results, background, suffix())
+        facts = budget.recall_block(results, background, suffix(), prompt=prompt, max_items=max_items, delivered=delivered)
         text = "\n\n".join(filter(None, (background, facts))) + suffix(no_facts=bool(results and not facts))
         if budget.fits(text):
+            snapshot_pages()
             return text.strip(), bool(facts), outcomes
         if not selected_pages:
+            if delivered is not None:
+                delivered.update(items=[], pages=[], prompt="")
             fallback = "Hindsight 本轮记忆参考不可用。"
             return fallback if budget.fits(fallback) else "", False, outcomes
         index = selected_pages.pop()

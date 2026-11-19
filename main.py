@@ -19,7 +19,7 @@ from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core.catalog import export_bytes, render_memory, render_page
-from .core.background import ReadGuard, compose_backgrounds, context_limits, reference
+from .core.background import ReadGuard, ReferenceBudget, compose_backgrounds, context_limits, reference
 from .core.agent_tools import MemoryTools, belongs_to_event, matches_request, request_marker
 from .core.client import HindsightClient, HindsightError
 from .core.clock import host_timezone
@@ -35,10 +35,11 @@ from .core.dialogue import (
     persistent_messages,
 )
 from .core.identity import Incoming, sha256
-from .core.materials import TokenizerError, load_encoding, memory_block, recall_query, token_count
+from .core.materials import DEFAULT_MEMORY_PROMPT, TokenizerError, load_encoding, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
+from .core.reading import chat_records
 from .core.reflection import Reflection
 from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity
 from .core.worker import Worker
@@ -97,6 +98,7 @@ class HindsightBridge(Star):
             "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
             "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
+            "reference_history_unavailable": "无法读取或保存使用记录，请检查插件数据目录权限与剩余空间",
             "accepted_operation_missing": "Hindsight 找不到已接收的记录，请管理员检查服务恢复时使用的备份",
             "payload_digest_conflict": "待保存内容校验失败，请管理员检查插件本地数据库",
             "scope_not_active": "请先用 /hindsight on 开启记忆",
@@ -135,6 +137,8 @@ class HindsightBridge(Star):
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
             "reading_settings_invalid": "记忆读取方式无法读取，请检查最新控制库",
             "reading_changed": "记忆读取方式、账号或模型已变化，请重新发起查询",
+            "reference_settings_invalid": "记忆参考设置无效，请检查提示、类别和数量",
+            "reference_changed": "记忆参考设置已变化，请刷新后重试",
             "tool_read_timeout": "按需读取超时，可重试或使用官方面板查看",
             "tool_budget_exhausted": "本条消息的记忆工具额度已用完，请发送新消息继续",
             "invalid_read_position": "阅读行号无效，请从知识页第一行重新读取",
@@ -208,6 +212,7 @@ class HindsightBridge(Star):
                 control_directory=control_directory,
                 control_root=self.control_root(),
                 agent_id=str(self.config.get("agent_id", "default")),
+                warning=self.warning,
             )
             self.refresh_permissions()
             await self.prepare_sources()
@@ -470,7 +475,10 @@ class HindsightBridge(Star):
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
 
-    async def recall_text(self, bank, current, history=(), *, timestamp, prefix=""):
+    async def recall_text(self, bank, current, history=(), *, timestamp, prefix="", settings=None, delivered=None):
+        if settings is not None and (not settings["types"] or not settings["detail_limit"]):
+            delivered["status"] = "filtered" if not settings["types"] else "limit"
+            return ""
         timeout = recall_timeout(self.config)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         limits = context_limits(self.config)
@@ -485,16 +493,16 @@ class HindsightBridge(Star):
                 stage = "recall"
                 results = await client.recall(
                     bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
+                    **({"types": settings["types"]} if settings is not None else {}),
                 )
-                selected, block = [], ""
-                for item in results[:12]:
-                    candidate = memory_block([*selected, item], limit=limit)
-                    if (
-                        candidate and candidate != block and len(prefix + candidate) <= limit
-                        and token_count(prefix + candidate, client.tokenizer) <= result_tokens
-                    ):
-                        selected.append(item)
-                        block = candidate
+                if settings is not None:
+                    results, excluded = chat_records(results, bank, settings)
+                    if excluded and not results:
+                        delivered["status"] = "filtered"
+                block = ReferenceBudget(result_tokens, limit, client.tokenizer, prefix).recall_block(
+                    results, "", "", prompt=settings["prompt"] if settings else DEFAULT_MEMORY_PROMPT,
+                    max_items=settings["detail_limit"] if settings else 12, delivered=delivered,
+                )
                 if results and not block:
                     raise HindsightError("recall_content_unavailable")
                 return block
@@ -504,7 +512,7 @@ class HindsightBridge(Star):
                 client.connection_result(False, code, sequence=sequence)
             raise HindsightError(code) from None
 
-    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts=True, prefix=""):
+    async def recall_background(self, event, guard, current, history, *, timestamp, include_facts, prefix, delivered):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
         limits = context_limits(self.config)
@@ -534,12 +542,19 @@ class HindsightBridge(Star):
         async def read_facts(query):
             if not include_facts:
                 return [], ""
+            if not guard.settings["types"] or not guard.settings["detail_limit"]:
+                delivered["status"] = "filtered" if not guard.settings["types"] else "limit"
+                return [], ""
             try:
                 async with asyncio.timeout_at(deadline - min(0.02, timeout / 10)):
                     rows = await guard.client.recall(
                         guard.scope["bank"], query, tokens, timestamp=timestamp,
                         timeout=max(0.001, deadline - time.monotonic()),
+                        types=guard.settings["types"],
                     )
+                    rows, excluded = chat_records(rows, guard.scope["bank"], guard.settings)
+                    if excluded and not rows:
+                        delivered["status"] = "filtered"
                     return rows, ""
             except (HindsightError, TimeoutError) as exc:
                 return [], exc.code if isinstance(exc, HindsightError) else "recall_timeout"
@@ -567,7 +582,8 @@ class HindsightBridge(Star):
                     reads, rows, tokens=tokens, chars=chars, tokenizer=guard.client.tokenizer,
                     page_tokens=limits["page_tokens"], recall_code=recall_code,
                     on_demand=not include_facts,
-                    prefix=prefix,
+                    prefix=prefix, prompt=guard.settings["prompt"],
+                    max_items=guard.settings["detail_limit"], delivered=delivered,
                 )
                 if rows and not facts_used and not recall_code:
                     recall_code = "recall_content_unavailable"
@@ -739,7 +755,7 @@ class HindsightBridge(Star):
         }
         return marker
 
-    async def read_request_references(self, event, guard, incoming, scope, capture, *, on_demand, prefix):
+    async def read_request_references(self, event, guard, incoming, scope, capture, *, on_demand, prefix, delivered):
         history = [
             ("用户" if message.role == "user" else "助手", message.text)
             for message in capture.history
@@ -747,7 +763,7 @@ class HindsightBridge(Star):
         if guard.selection["enabled"]:
             memory, code, has_facts, status = await self.recall_background(
                 event, guard, incoming.text, history, timestamp=incoming.iso_timestamp,
-                include_facts=not on_demand, prefix=prefix,
+                include_facts=not on_demand, prefix=prefix, delivered=delivered,
             )
             outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
             return memory, outcome, code, status
@@ -755,8 +771,15 @@ class HindsightBridge(Star):
             return self.read_tools.notice(scope), "on_demand", "", None
         memory = await self.recall_text(
             scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp, prefix=prefix,
+            settings=guard.settings, delivered=delivered,
         )
         return memory, "success" if memory else "empty", "", None
+
+    def record_tool_delivery(self, turn, kind, text, status):
+        if turn.snapshot_id:
+            turn.guard.queue.references.append(turn.guard.scope, turn.snapshot_id, {
+                "kind": kind, "text": text, "status": status,
+            })
 
     @filter.on_llm_request()
     async def add_memory(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -780,6 +803,8 @@ class HindsightBridge(Star):
         read_guard = None
         background_status = None
         request_prefix = ""
+        conversation = ""
+        delivered = {}
         started = time.monotonic()
         try:
             self.refresh_permissions()
@@ -820,13 +845,14 @@ class HindsightBridge(Star):
             request_prefix = request_prefix or self.read_tools.request_prefix(event)
             memory, outcome, code, background_status = await self.read_request_references(
                 event, read_guard, incoming, scope, capture, on_demand=options["mode"] == "tools",
-                prefix=request_prefix,
+                prefix=request_prefix, delivered=delivered,
             )
             if code:
                 if HindsightError(code).authentication:
                     self.outbox.pause_connection(code)
                 self.warning(code)
-            content = memory or "Hindsight 检索完成，本轮未匹配到相关记忆。"
+            content = memory or ("Hindsight 细节记忆已按设置筛除。" if delivered.get("status") in {"filtered", "limit"}
+                                 else "Hindsight 检索完成，本轮未匹配到相关记忆。")
             self.status = "运行中"
         except asyncio.CancelledError:
             outcome = None
@@ -854,8 +880,22 @@ class HindsightBridge(Star):
                     ):
                         self.record_recall(scope, outcome, started, code)
                         if not content:
+                            delivered.clear()
                             content = recall_notice(code)
-                        req.extra_user_content_parts.append(TextPart(text=request_prefix + content).mark_as_temp())
+                        if read_guard and read_guard.settings["prompt"] not in ("", DEFAULT_MEMORY_PROMPT):
+                            delivered["prompt"] = read_guard.settings["prompt"]
+                            content = delivered["prompt"] + "\n\n" + content
+                        text = request_prefix + content
+                        req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+                        if conversation and read_guard:
+                            status = {"success": "delivered", "on_demand": "not_called",
+                                      "empty": "no_match", "error": "error"}[outcome]
+                            turn_id = self.outbox.references.start(scope, conversation, incoming.message_id, {
+                                "status": status, **delivered, "kind": "request", "text": text, "code": code,
+                            })
+                            turn = self.read_tools.tool_turns.get(event)
+                            if turn:
+                                turn.snapshot_id = turn_id
                         if (
                             read_guard is not None and read_guard.selection["enabled"]
                             and self.background_sequences.get(background_key) == sequence

@@ -62,7 +62,7 @@ function harness() {
     versionCheckRevision: 0, versionCheck: null,
     managedSetup: null, managedReadRevision: 0,
     backgroundReadRevision: 0, backgroundDraft: null, readingDraft: null, reflectDraft: null,
-    renderBackground() {}, renderReading() {}, renderReflect() {}, renderScope() {},
+    renderBackground() {}, renderReading() {}, renderReferences() {}, renderReflect() {}, renderScope() {},
     clearCommands() {},
     renderServiceVersion() {},
     clearUpgrade() {},

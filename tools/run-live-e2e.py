@@ -260,6 +260,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.relay_chat_stream(response, json.loads(raw), started)
                     return
                 value = response.read(32 * 1024 * 1024 + 1)
+                if state.settings.get("references") and self.path.startswith("/memory/") and self.path.endswith("/recall"):
+                    self.server.record("recall-order", {"ids": [row["id"] for row in json.loads(value)["results"]]})
                 if self.path.startswith("/memory/") and self.path.endswith("/reflect"):
                     self.server.record("reflect-response-trace", {"path": self.path, "response": json.loads(value)})
                     if self.server.drop_reflect:

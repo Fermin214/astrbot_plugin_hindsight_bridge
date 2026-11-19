@@ -1,0 +1,293 @@
+import json
+import logging
+import os
+import sqlite3
+import time
+import uuid
+
+from .control import QueueError
+from .identity import canonical, sha256
+from .materials import DEFAULT_MEMORY_PROMPT, token_count
+
+
+PROMPT_TOKEN_LIMIT = 256
+DETAIL_LIMIT_MAX = 100
+HISTORY_LIMIT_MAX = 300
+REFERENCE_TYPES = ("world", "experience", "observation")
+
+
+def _options_key(connection, owner):
+    return "reference:" + sha256(canonical([connection, owner]))
+
+
+def _binding(control_id, connection, owner, source, bank, generation, authorization_revision):
+    return sha256(canonical([control_id, connection, owner, source, bank, generation, authorization_revision]))
+
+
+def _scope_binding(queue, scope):
+    grant = queue.access.authorization(scope["platform_instance_id"], scope["user_id"])
+    owner = queue.control.owner(queue.connection_id, scope["owner_id"])
+    if (
+        not grant or not grant["enabled"] or grant["source_id"] != scope["scope_id"]
+        or not owner or owner["bank"] != scope["bank"] or owner["generation"] != scope["generation"]
+    ):
+        return None
+    return _binding(
+        queue.control.setting("control_id"), queue.connection_id, scope["owner_id"],
+        scope["scope_id"], scope["bank"], scope["generation"], grant["revision"],
+    )
+
+
+def _stored(value):
+    try:
+        options = json.loads(value)
+        if (
+            not isinstance(options, dict) or type(options.get("revision")) is not int or options["revision"] < 1
+            or not isinstance(options.get("binding", ""), str)
+            or type(options.get("history_limit", 30)) is not int
+            or not 0 <= options.get("history_limit", 30) <= HISTORY_LIMIT_MAX
+        ):
+            raise ValueError
+        return options
+    except ValueError:
+        raise QueueError("reference_settings_invalid") from None
+
+
+def _validate(prompt, types, exclude_assistant, detail_limit, history_limit):
+    if (
+        not isinstance(prompt, str) or not isinstance(types, list) or len(types) > len(REFERENCE_TYPES)
+        or any(kind not in REFERENCE_TYPES for kind in types) or len(set(types)) != len(types)
+        or type(exclude_assistant) is not bool or type(detail_limit) is not int
+        or not 0 <= detail_limit <= DETAIL_LIMIT_MAX or type(history_limit) is not int
+        or not 0 <= history_limit <= HISTORY_LIMIT_MAX
+    ):
+        raise QueueError("reference_settings_invalid")
+
+
+def reference_options(queue, scope):
+    defaults = {
+        "revision": 0, "prompt": DEFAULT_MEMORY_PROMPT, "types": list(REFERENCE_TYPES),
+        "exclude_assistant": False, "detail_limit": 12, "history_limit": 30,
+    }
+    value = queue.control.setting(_options_key(queue.connection_id, scope["owner_id"]))
+    if not value:
+        return defaults
+    stored = _stored(value)
+    defaults["revision"] = stored["revision"]
+    if not stored.get("binding") or stored["binding"] != _scope_binding(queue, scope):
+        return defaults
+    options = {key: stored.get(key, default) for key, default in defaults.items()}
+    _validate(**{key: value for key, value in options.items() if key != "revision"})
+    return options
+
+
+def save_reference_options(queue, scope, *, revision, prompt, types, exclude_assistant,
+                           detail_limit, history_limit, tokenizer):
+    _validate(prompt, types, exclude_assistant, detail_limit, history_limit)
+    if token_count(prompt, tokenizer) > PROMPT_TOKEN_LIMIT:
+        raise QueueError("reference_prompt_too_long")
+    control = queue.control
+    with control.transaction():
+        binding = _scope_binding(queue, scope)
+        if not binding or not queue.can_recall(scope, manual=True):
+            raise QueueError("scope_not_available")
+        previous = reference_options(queue, scope)
+        if type(revision) is not int or revision != previous["revision"]:
+            raise QueueError("reference_changed")
+        options = {
+            "revision": revision + 1, "prompt": prompt, "types": types, "exclude_assistant": exclude_assistant,
+            "detail_limit": detail_limit, "history_limit": history_limit,
+        }
+        control.db.execute(
+            "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_options_key(queue.connection_id, scope["owner_id"]), canonical({**options, "binding": binding})),
+        )
+        if history_limit < previous["history_limit"]:
+            queue.references.trim(binding, history_limit)
+        control.bump()
+    return options
+
+
+class ReferenceHistory:
+    def __init__(self, queue, warning=None):
+        self.queue = queue
+        self.path = queue.directory / "references.sqlite3"
+        self.db = None
+        self.warning = warning or logging.getLogger(__name__).warning
+        self.revision = None
+
+    def close(self):
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+
+    def _open(self):
+        if self.db is None:
+            if any(self.path.with_name(self.path.name + suffix).is_symlink()
+                   for suffix in ("", "-journal", "-wal", "-shm")):
+                raise OSError("reference_path_invalid")
+            self.path.touch(mode=0o600, exist_ok=True)
+            database = sqlite3.connect(self.path, timeout=0.2)
+            try:
+                database.row_factory = sqlite3.Row
+                database.execute("PRAGMA foreign_keys=ON")
+                database.execute("PRAGMA secure_delete=ON")
+                page_size = database.execute("PRAGMA page_size").fetchone()[0]
+                database.execute(f"PRAGMA max_page_count={64 * 1024 * 1024 // page_size}")
+                database.executescript("""
+                    CREATE TABLE IF NOT EXISTS turns(
+                        id TEXT PRIMARY KEY, binding TEXT NOT NULL, created_at REAL NOT NULL,
+                        conversation_id TEXT NOT NULL, message_id TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS reference_time ON turns(binding,created_at DESC);
+                    CREATE TABLE IF NOT EXISTS deliveries(
+                        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE, payload TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS reference_turn ON deliveries(turn_id);
+                """)
+                if os.name != "nt":
+                    os.chmod(self.path, 0o600)
+            except BaseException:
+                database.close()
+                raise
+            self.db = database
+        return self.db
+
+    def reconcile(self):
+        control = self.queue.control
+        revision = control.setting("revision")
+        if revision == self.revision:
+            return True
+        control_id = control.setting("control_id")
+        bindings = {
+            _binding(control_id, *row): _options_key(row["connection_id"], row["owner_id"])
+            for row in control.db.execute(
+                "SELECT a.connection_id,a.owner_id,a.source_id,o.bank,o.generation,g.revision "
+                "FROM accounts a JOIN owners o USING(connection_id,owner_id) "
+                "JOIN authorizations g ON g.connection_id=a.connection_id AND g.source_id=a.source_id "
+                "AND g.platform_instance_id=a.platform_instance_id AND g.user_id=a.user_id "
+                "WHERE g.enabled=1 AND NOT EXISTS(SELECT 1 FROM erasures e "
+                "WHERE e.connection_id=o.connection_id AND e.old_bank=o.bank)"
+            )
+        }
+        limits = {}
+        invalid = set()
+        with control.transaction():
+            for key, value in control.db.execute(
+                "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
+            ).fetchall():
+                try:
+                    options = _stored(value)
+                except QueueError:
+                    self.warning("reference_settings_invalid")
+                    invalid.add(key)
+                    continue
+                binding = options.get("binding")
+                if binding and bindings.get(binding) != key:
+                    control.db.execute("UPDATE settings SET value=? WHERE key=?", (
+                        canonical({"revision": options["revision"] + 1}), key,
+                    ))
+                    control.bump()
+                elif binding:
+                    limits[binding] = options.get("history_limit", 30)
+        try:
+            if self.path.exists():
+                database = self._open()
+                with database:
+                    for binding, count in database.execute("SELECT binding,COUNT(*) FROM turns GROUP BY binding").fetchall():
+                        if bindings.get(binding) in invalid:
+                            continue
+                        limit = limits.get(binding, 30) if binding in bindings else 0
+                        if count > limit:
+                            self._trim(database, binding, limit)
+        except (sqlite3.Error, OSError):
+            self.warning("reference_history_unavailable")
+            return False
+        self.revision = control.setting("revision")
+        return True
+
+    def _trim(self, database, binding, limit):
+        database.execute(
+            "DELETE FROM turns WHERE id IN (SELECT id FROM turns WHERE binding=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?)", (binding, limit),
+        )
+
+    def trim(self, binding, limit):
+        if self.path.exists():
+            try:
+                with self._open() as database:
+                    self._trim(database, binding, limit)
+            except (sqlite3.Error, OSError):
+                self.warning("reference_history_unavailable")
+                raise QueueError("reference_history_unavailable") from None
+
+    def start(self, scope, conversation_id, message_id, delivery):
+        try:
+            if not self.queue.can_recall(scope) or not (binding := _scope_binding(self.queue, scope)):
+                return None
+            limit = reference_options(self.queue, scope)["history_limit"]
+            if not limit:
+                return None
+            turn_id = uuid.uuid4().hex
+            with self._open() as database:
+                self._trim(database, binding, limit - 1)
+                database.execute("INSERT INTO turns VALUES (?,?,?,?,?)", (
+                    turn_id, binding, time.time(), conversation_id, message_id,
+                ))
+                database.execute("INSERT INTO deliveries VALUES (?,?)", (turn_id, canonical(delivery)))
+            return turn_id
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            self.warning("reference_history_unavailable")
+            return None
+
+    def append(self, scope, turn_id, delivery):
+        try:
+            if not turn_id or not self.queue.can_recall(scope) or not (binding := _scope_binding(self.queue, scope)):
+                return
+            with self._open() as database:
+                database.execute(
+                    "INSERT INTO deliveries SELECT id,? FROM turns WHERE id=? AND binding=?",
+                    (canonical(delivery), turn_id, binding),
+                )
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            self.warning("reference_history_unavailable")
+
+    def _read_binding(self, scope):
+        binding = _scope_binding(self.queue, scope)
+        if not binding or not self.queue.can_recall(scope, manual=True):
+            raise QueueError("scope_not_available")
+        if not self.reconcile():
+            raise QueueError("reference_history_unavailable")
+        reference_options(self.queue, scope)
+        return binding
+
+    def list(self, scope):
+        binding = self._read_binding(scope)
+        if not self.path.exists():
+            return []
+        try:
+            return [dict(row) for row in self._open().execute(
+                "SELECT id,conversation_id,message_id,created_at FROM turns WHERE binding=? "
+                "ORDER BY created_at DESC,rowid DESC", (binding,),
+            )]
+        except (sqlite3.Error, OSError):
+            raise QueueError("reference_history_unavailable") from None
+
+    def detail(self, scope, turn_id):
+        binding = self._read_binding(scope)
+        try:
+            if self.path.exists():
+                database = self._open()
+                turn = database.execute(
+                    "SELECT id,conversation_id,message_id,created_at FROM turns WHERE id=? AND binding=?",
+                    (turn_id, binding),
+                ).fetchone()
+                if turn:
+                    return {**dict(turn), "deliveries": [
+                        json.loads(row["payload"]) for row in database.execute(
+                            "SELECT payload FROM deliveries WHERE turn_id=? ORDER BY rowid", (turn_id,),
+                        )
+                    ]}
+        except (sqlite3.Error, OSError, ValueError):
+            raise QueueError("reference_history_unavailable") from None
+        raise QueueError("reference_turn_missing")
