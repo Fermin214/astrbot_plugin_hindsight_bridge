@@ -3,6 +3,7 @@
 import asyncio
 import json
 import pickle
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -216,6 +217,13 @@ def request_digest(connection: str, bank: str, generation: int, payload: dict) -
     )
 
 
+def document_role(document):
+    match = re.fullmatch(r"([au])w1-(?:0|[1-9][0-9]*)-[0-9a-f]{64}", document) if isinstance(document, str) else None
+    if match:
+        return "assistant" if match[1] == "a" else "user"
+    return None
+
+
 def memory_item(row):
     item = {key: row[key] for key in (
         "text", "id", "type", "document_id", "chunk_id", "context", "occurred_start",
@@ -228,7 +236,7 @@ def memory_item(row):
     if attribution:
         item["metadata"] = attribution
     if item.get("source_kind") == "assistant" or (
-        "source_kind" not in item and str(row.get("document_id") or "").startswith("aw1-")
+        "source_kind" not in item and document_role(row.get("document_id")) == "assistant"
     ):
         item["来源角色"] = "assistant"
         item["发送状态"] = attribution.get("delivery", "unknown")

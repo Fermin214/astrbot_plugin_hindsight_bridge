@@ -30,7 +30,7 @@ from .outbox import QueueError
 from .permissions import pairs
 from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
 from . import settings
-from .materials import TokenizerError, token_count
+from .materials import TokenizerError, load_encoding, token_count
 from .reference import PROMPT_TOKEN_LIMIT, reference_options, save_reference_options
 
 NAME = "astrbot_plugin_hindsight_bridge"
@@ -1481,28 +1481,29 @@ class MemoryPanel:
         posting = request.method == "POST"
         payload = await self.body() if posting else {}
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            await load_encoding()
             queue, scope = await self.reference_scope(scope_id)
             config_revision = self.config_revision()
-            tokenizer = self.plugin.client.tokenizer
             if posting:
                 if (set(payload) != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
                                      "history_limit", "scope_revision", "config_revision"}
                     or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]
                     or payload.pop("config_revision") != config_revision):
                     raise QueueError("reference_changed")
-                selection = save_reference_options(queue, scope, **payload, tokenizer=tokenizer)
+                selection = save_reference_options(queue, scope, **payload)
             else:
                 selection = reference_options(queue, scope)
             return {"selection": selection, "scope_revision": scope["revision"], "config_revision": config_revision,
-                    "prompt_tokens": token_count(selection["prompt"], tokenizer), "prompt_limit": PROMPT_TOKEN_LIMIT}
+                    "prompt_tokens": token_count(selection["prompt"]), "prompt_limit": PROMPT_TOKEN_LIMIT}
 
     async def prompt_count(self, scope_id):
         payload = await self.body()
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
-            await self.reference_scope(scope_id)
             if set(payload) != {"prompt"} or not isinstance(payload["prompt"], str):
                 raise PanelError("请填写有效的记忆提示。")
-            return {"prompt_tokens": token_count(payload["prompt"], self.plugin.client.tokenizer)}
+            await load_encoding()
+            await self.reference_scope(scope_id)
+            return {"prompt_tokens": token_count(payload["prompt"])}
 
     async def usage(self, scope_id, turn_id=None):
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):

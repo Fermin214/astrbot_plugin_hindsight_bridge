@@ -145,6 +145,7 @@ class ToolTurn:
     expires: float
     tokens: int
     chars: int
+    offered_names: frozenset
     calls: int = 0
     output_tokens: int = 0
     output_bytes: int = 0
@@ -411,7 +412,7 @@ class MemoryTools:
                 request_ref=request_ref, event_ref=weakref.ref(event),
                 selected_provider=selected_provider,
                 prefix=marker or request_marker(),
-                names=names, reflect_options=reflect_options,
+                offered_names=names, names=names, reflect_options=reflect_options,
             )
             self.filter_request(event, request, original, enable=True)
             turn.toolset_ref = weakref.ref(request.func_tool)
@@ -541,9 +542,7 @@ class MemoryTools:
             status = value.get("status", "delivered")
             if kind == "recall":
                 turn.delivered_ids.update(item["id"] for item in value.get("items", []))
-        if turn.snapshot_id is not None:
-            self.plugin.record_tool_delivery(turn, kind, text, status)
-        return text
+        return text, status
 
     async def execute(self, context, kind, arguments):
         if self.closed or self.plugin.stopping:
@@ -569,10 +568,23 @@ class MemoryTools:
         if (
             turn is None or getattr(actual, "context", None) is not self.plugin.context
             or turn.context_ref is None or turn.context_ref() is not context
-            or turn.expires == 0
-            or PREFIX + kind not in turn.names
+            or PREFIX + kind not in turn.offered_names
         ):
             return canonical({"error": "tool_context_unavailable"})
+        text, status = await self._run(turn, event, context, kind, arguments)
+        if (
+            turn.snapshot_id and not self.closed and self.plugin.outbox is turn.guard.queue
+            and self.tool_turns.get(event) is turn and belongs_to_event(self.plugin, event, context)
+            and (incoming := self.plugin.snapshot(event)) is not None
+            and incoming_digest(incoming, turn.guard.queue.deployment_id) == turn.digest
+        ):
+            self.plugin.record_tool_delivery(turn, kind, text, status)
+        return text
+
+    async def _run(self, turn, event, context, kind, arguments):
+        unavailable = canonical({"error": "tool_context_unavailable"}), "error"
+        if turn.expires == 0 or PREFIX + kind not in turn.names:
+            return unavailable
         try:
             async with (
                 self.plugin.using_resources(),
@@ -580,9 +592,9 @@ class MemoryTools:
                 turn.lock,
             ):
                 if self.tool_turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
-                    return canonical({"error": "tool_context_unavailable"})
+                    return unavailable
                 if PREFIX + kind not in turn.names:
-                    return canonical({"error": "tool_context_unavailable"})
+                    return unavailable
                 if turn.context_ref() is not context or not self.valid(turn, event):
                     self.record(turn, "unavailable", "reading_changed", kind=kind)
                     return self.deliver(turn, kind, {"error": "reading_changed"})
@@ -641,11 +653,11 @@ class MemoryTools:
                         self.remove_turn_tools(turn, frozenset({REFLECT_NAME}))
         except QueueError as exc:
             if self.tool_turns.get(event) is not turn or turn.expires == 0:
-                return canonical({"error": "tool_context_unavailable"})
+                return unavailable
             return self.deliver(turn, kind, {"error": str(exc)})
         except TimeoutError:
             if self.tool_turns.get(event) is not turn or turn.expires == 0:
-                return canonical({"error": "tool_context_unavailable"})
+                return unavailable
             code = "reflect_timeout" if kind == "reflect" else "tool_read_timeout"
             self.record(turn, "error", code, kind=kind)
             return self.deliver(turn, kind, {"error": code, "message": self.plugin.diagnostic(code)})

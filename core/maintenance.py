@@ -289,6 +289,8 @@ class Maintenance:
                 async with asyncio.timeout(45):
                     if await self._bank_has_data(bank):
                         return self._retired_data_present(fid, epoch)
+                if not self.outbox.references.reconcile(force=True):
+                    raise QueueError("reference_history_unavailable")
                 return control.cleanup_state(
                     fid, "verified", delay=86400, step=7, epoch=epoch
                 )
@@ -321,14 +323,15 @@ class Maintenance:
         success = await self.check(force=not self.attempted_startup)
         self.attempted_startup = True
         if not success:
-            # A durable Reflect barrier isolates the retired Bank; other owners
-            # can recover without treating that erasure as completed.
             pending = [item for item in self.outbox.control.erasures(self.outbox.connection_id) if item["phase"] != "verified"]
             for item in pending:
                 owner = self.outbox.control.owner(self.outbox.connection_id, item["owner_id"])
                 if (
                     not owner or owner["bank"] == item["old_bank"] or owner["generation"] <= item["old_generation"]
-                    or not self.outbox.control.reflection_pending(self.outbox.connection_id, bank=item["old_bank"])
+                    or (
+                        item["last_error"] != "reference_history_unavailable"
+                        and not self.outbox.control.reflection_pending(self.outbox.connection_id, bank=item["old_bank"])
+                    )
                 ):
                     return False
         # Apply the newest control records before allowing either recall or queue submission.

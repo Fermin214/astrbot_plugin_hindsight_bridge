@@ -1,7 +1,9 @@
+import json
 import shutil
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from plugins.astrbot_plugin_hindsight_bridge.core.control import QueueError
@@ -47,38 +49,58 @@ class ReferenceIsolation(unittest.TestCase):
 
     def test_upgrade_cleans_old_options_and_snapshot_after_legacy_forget(self):
         options = reference_options(self.queue, self.alice)
-        save_reference_options(self.queue, self.alice, **{**options, "prompt": "old private prompt"},
-                               tokenizer="o200k_base")
+        save_reference_options(self.queue, self.alice, **{**options, "prompt": "old private prompt"})
         self.queue.references.start(self.alice, "chat", "old", self.payload)
         bob_id = self.queue.references.start(self.bob, "chat", "keep", self.payload)
         key, old_value = self.queue.control.db.execute(
             "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
         ).fetchone()
+        bob_options = reference_options(self.queue, self.bob)
+        save_reference_options(self.queue, self.bob, **{**bob_options, "prompt": "Bob's prompt"})
         snapshot = Path(self.tmp.name) / "old.sqlite3"
         self.queue.references.close()
         shutil.copyfile(self.queue.references.path, snapshot)
         self.queue.forget(self.alice["scope_id"])
-        self.queue.close()
-        with sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3") as control:
-            control.execute("UPDATE settings SET value=? WHERE key=?", (old_value, key))
-        shutil.copyfile(snapshot, self.directory / "references.sqlite3")
-        self.queue = self.open_queue()
-        self.queue.sync_permissions([("qq", "alice"), ("qq", "bob")])
-        self.assertNotIn("old private prompt", self.queue.control.setting(key))
-        self.assertEqual(reference_options(self.queue, self.scope("alice"))["prompt"], DEFAULT_MEMORY_PROMPT)
-        with sqlite3.connect(self.queue.references.path) as database:
-            self.assertEqual(database.execute("SELECT id FROM turns").fetchall(), [(bob_id,)])
-            self.assertEqual(database.execute("SELECT turn_id FROM deliveries").fetchall(), [(bob_id,)])
+        stored = json.loads(old_value)
+        cases = {
+            "valid": old_value,
+            "invalid history limit": json.dumps({**stored, "history_limit": "invalid"}),
+            "invalid binding": json.dumps({**stored, "binding": []}),
+            "missing binding": json.dumps({key: value for key, value in stored.items() if key != "binding"}),
+            "invalid revision": json.dumps({**stored, "revision": None}),
+            "truncated JSON": '{"prompt":"old private prompt",',
+        }
+        for case, value in cases.items():
+            with self.subTest(case=case):
+                self.queue.close()
+                with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
+                    control.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
+                shutil.copyfile(snapshot, self.directory / "references.sqlite3")
+                self.queue = self.open_queue()
+                self.queue.sync_permissions([("qq", "alice"), ("qq", "bob")])
+                tombstone = json.loads(self.queue.control.setting(key))
+                self.assertEqual(set(tombstone), {"revision"})
+                self.assertGreater(tombstone["revision"], stored["revision"])
+                self.assertEqual(reference_options(self.queue, self.scope("alice"))["prompt"], DEFAULT_MEMORY_PROMPT)
+                self.assertEqual(reference_options(self.queue, self.bob)["prompt"], "Bob's prompt")
+                with closing(sqlite3.connect(self.queue.references.path)) as database:
+                    self.assertEqual(database.execute("SELECT id FROM turns").fetchall(), [(bob_id,)])
+                    self.assertEqual(database.execute("SELECT turn_id FROM deliveries").fetchall(), [(bob_id,)])
 
     def test_corrupt_options_affect_only_their_owner_and_can_be_forgotten(self):
         options = reference_options(self.queue, self.alice)
-        save_reference_options(self.queue, self.alice, **options, tokenizer="o200k_base")
+        save_reference_options(self.queue, self.alice, **options)
         self.queue.apply_control()
         old_id = self.queue.references.start(self.alice, "chat", "private", self.payload)
         bob_id = self.queue.references.start(self.bob, "chat", "keep", self.payload)
+        key, value = self.queue.control.db.execute(
+            "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
+        ).fetchone()
         self.queue.close()
-        with sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3") as control:
-            control.execute("UPDATE settings SET value='broken' WHERE key GLOB 'reference:*'")
+        with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
+            control.execute("UPDATE settings SET value=? WHERE key=?", (
+                json.dumps({**json.loads(value), "history_limit": "broken"}), key,
+            ))
         self.queue = self.open_queue()
         self.queue.sync_permissions([("qq", "alice"), ("qq", "bob")])
         self.assertEqual(self.queue.references.detail(self.bob, bob_id)["deliveries"], [self.payload])
@@ -90,5 +112,5 @@ class ReferenceIsolation(unittest.TestCase):
             self.queue.references.list(self.alice)
         self.queue.apply_control()
         self.assertEqual(self.queue.references.list(self.scope("alice")), [])
-        with sqlite3.connect(self.queue.references.path) as database:
+        with closing(sqlite3.connect(self.queue.references.path)) as database:
             self.assertEqual(database.execute("SELECT turn_id FROM deliveries").fetchall(), [(bob_id,)])

@@ -41,15 +41,10 @@ def _scope_binding(queue, scope):
 def _stored(value):
     try:
         options = json.loads(value)
-        if (
-            not isinstance(options, dict) or type(options.get("revision")) is not int or options["revision"] < 1
-            or not isinstance(options.get("binding", ""), str)
-            or type(options.get("history_limit", 30)) is not int
-            or not 0 <= options.get("history_limit", 30) <= HISTORY_LIMIT_MAX
-        ):
+        if not isinstance(options, dict) or type(options.get("revision")) is not int or options["revision"] < 1:
             raise ValueError
         return options
-    except ValueError:
+    except (ValueError, TypeError, RecursionError):
         raise QueueError("reference_settings_invalid") from None
 
 
@@ -64,27 +59,30 @@ def _validate(prompt, types, exclude_assistant, detail_limit, history_limit):
         raise QueueError("reference_settings_invalid")
 
 
-def reference_options(queue, scope):
-    defaults = {
-        "revision": 0, "prompt": DEFAULT_MEMORY_PROMPT, "types": list(REFERENCE_TYPES),
-        "exclude_assistant": False, "detail_limit": 12, "history_limit": 30,
+def _options(stored):
+    result = {
+        "prompt": stored.get("prompt", DEFAULT_MEMORY_PROMPT), "types": stored.get("types", list(REFERENCE_TYPES)),
+        "exclude_assistant": stored.get("exclude_assistant", False), "detail_limit": stored.get("detail_limit", 12),
+        "history_limit": stored.get("history_limit", 30),
     }
+    _validate(**result)
+    return {"revision": stored["revision"], **result}
+
+
+def reference_options(queue, scope):
     value = queue.control.setting(_options_key(queue.connection_id, scope["owner_id"]))
     if not value:
-        return defaults
+        return _options({"revision": 0})
     stored = _stored(value)
-    defaults["revision"] = stored["revision"]
     if not stored.get("binding") or stored["binding"] != _scope_binding(queue, scope):
-        return defaults
-    options = {key: stored.get(key, default) for key, default in defaults.items()}
-    _validate(**{key: value for key, value in options.items() if key != "revision"})
-    return options
+        return _options({"revision": stored["revision"]})
+    return _options(stored)
 
 
 def save_reference_options(queue, scope, *, revision, prompt, types, exclude_assistant,
-                           detail_limit, history_limit, tokenizer):
+                           detail_limit, history_limit):
     _validate(prompt, types, exclude_assistant, detail_limit, history_limit)
-    if token_count(prompt, tokenizer) > PROMPT_TOKEN_LIMIT:
+    if token_count(prompt) > PROMPT_TOKEN_LIMIT:
         raise QueueError("reference_prompt_too_long")
     control = queue.control
     with control.transaction():
@@ -153,10 +151,10 @@ class ReferenceHistory:
             self.db = database
         return self.db
 
-    def reconcile(self):
+    def reconcile(self, *, force=False):
         control = self.queue.control
         revision = control.setting("revision")
-        if revision == self.revision:
+        if not force and revision == self.revision:
             return True
         control_id = control.setting("control_id")
         bindings = {
@@ -171,36 +169,41 @@ class ReferenceHistory:
             )
         }
         limits = {}
-        invalid = set()
         with control.transaction():
             for key, value in control.db.execute(
                 "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
             ).fetchall():
+                previous_revision = int(revision)
                 try:
                     options = _stored(value)
+                    previous_revision = options["revision"]
+                    if options.keys() == {"revision"}:
+                        continue
+                    binding = options.get("binding")
+                    if isinstance(binding, str) and bindings.get(binding) == key:
+                        try:
+                            limits[binding] = _options(options)["history_limit"]
+                        except QueueError:
+                            self.warning("reference_settings_invalid")
+                            limits[binding] = None
+                        continue
                 except QueueError:
                     self.warning("reference_settings_invalid")
-                    invalid.add(key)
-                    continue
-                binding = options.get("binding")
-                if binding and bindings.get(binding) != key:
-                    control.db.execute("UPDATE settings SET value=? WHERE key=?", (
-                        canonical({"revision": options["revision"] + 1}), key,
-                    ))
-                    control.bump()
-                elif binding:
-                    limits[binding] = options.get("history_limit", 30)
+                control.db.execute("UPDATE settings SET value=? WHERE key=?", (
+                    canonical({"revision": previous_revision + 1}), key,
+                ))
+                control.bump()
         try:
             if self.path.exists():
                 database = self._open()
                 with database:
                     for binding, count in database.execute("SELECT binding,COUNT(*) FROM turns GROUP BY binding").fetchall():
-                        if bindings.get(binding) in invalid:
-                            continue
                         limit = limits.get(binding, 30) if binding in bindings else 0
-                        if count > limit:
+                        if limit is not None and count > limit:
                             self._trim(database, binding, limit)
         except (sqlite3.Error, OSError):
+            self.close()
+            self.revision = None
             self.warning("reference_history_unavailable")
             return False
         self.revision = control.setting("revision")

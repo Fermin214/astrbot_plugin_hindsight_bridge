@@ -63,14 +63,18 @@ async def verify(acceptance, page, frame, bank):
     await reference_panel_e2e.verify(acceptance, page, frame, original, CUSTOM)
     assert (await settings())["prompt"] == CUSTOM
     assert await detail(original["id"]) == original
-    await settings(types=["world"], detail_limit=1, exclude_assistant=True)
-    _, delivery = await chat("Recall Cedar-120 with the saved settings.")
+    crlf_prompt = CUSTOM.replace("\n", "\r\n")
+    await settings(prompt=crlf_prompt, types=["world"], detail_limit=1, exclude_assistant=True)
+    crlf_turn, delivery = await chat("Recall Cedar-120 with the saved settings.")
     assert jsonl("recall-trace")[-1]["body"]["types"] == ["world"]
-    assert delivery["text"].count(CUSTOM) == 1 and DEFAULT not in delivery["text"]
+    assert delivery["text"].count(crlf_prompt) == 1 and DEFAULT not in delivery["text"]
     assert len(delivery["items"]) == 1 and all(
         item["source_kind"] != "assistant" and item["type"] == "world" for item in delivery["items"]
     )
-    await settings(types=[])
+    await frame.locator("#reference-exclude:checked").wait_for()
+    await reference_panel_e2e.verify_clipboard(page, frame, crlf_turn)
+    await frame.locator('[data-close="usage-dialog"]').click()
+    await settings(types=[], prompt=CUSTOM)
     calls = len(jsonl("recall-trace"))
     _, delivery = await chat("Only the page and my prompt.")
     assert len(jsonl("recall-trace")) == calls

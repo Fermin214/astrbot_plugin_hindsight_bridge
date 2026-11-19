@@ -76,24 +76,26 @@ class ReadContracts(unittest.IsolatedAsyncioTestCase):
             reading.recall_records([{**record, "bank_id": "another-bank"}], "bank")
 
     def test_filter_keeps_mixed_and_incomplete_native_attribution(self):
-        user = {"id": "user", "type": "world", "text": "request", "document_id": "uw1-0-first"}
-        assistant = {"id": "assistant", "type": "experience", "text": "promise", "document_id": "aw1-0-second"}
+        user = {"id": "user", "type": "world", "text": "request", "document_id": "uw1-0-" + "a" * 64}
+        assistant = {"id": "assistant", "type": "experience", "text": "promise", "document_id": "aw1-12-" + "b" * 64}
+        custom = {"id": "custom", "type": "world", "text": "custom document", "document_id": "aw1-12-import"}
         observations = [
             {"id": name, "type": "observation", "text": name, "source_fact_ids": ids}
             for name, ids in (
                 ("known", ["assistant"]), ("both", ["assistant", "user"]),
-                ("incomplete", ["assistant", "absent"]), ("unlinked", []),
+                ("incomplete", ["assistant", "absent"]), ("imported", ["assistant", "custom"]), ("unlinked", []),
             )
         ]
         records = reading.attributed_records(
-            [assistant, *observations], "bank", {row["id"]: row for row in (user, assistant)},
+            [assistant, custom, *observations], "bank", {row["id"]: row for row in (user, assistant)},
         )
         selected, excluded = reading.chat_records(records, "bank", {
             "types": ["world", "experience", "observation"], "exclude_assistant": True,
         })
         self.assertEqual(excluded, 2)
         self.assertEqual([(row["id"], row["source_kind"]) for row in selected], [
-            ("both", "mixed"), ("incomplete", "unknown"), ("unlinked", "unknown"),
+            ("custom", "unknown"), ("both", "mixed"), ("incomplete", "unknown"),
+            ("imported", "unknown"), ("unlinked", "unknown"),
         ])
 
 
@@ -154,10 +156,22 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(original.tools), len(NAMES) + 1)
         with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "external_data": True, "items": []})) as read:
             turn = self.tools.tool_turns[event]
+            history = self.plugin.outbox.references
+            turn.snapshot_id = history.start(turn.guard.scope, "chat", "message", {"kind": "request"})
             results = await asyncio.gather(*(self.tools.execute(context, "recall", {"query": "q"}) for _ in range(9)))
         self.assertEqual(read.await_count, 4)
         self.assertEqual(turn.calls, 4)
         self.assertTrue(any("tool_budget_exhausted" in (item or "") for item in results))
+        self.assertEqual(json.loads(results[-1]), {"error": "tool_context_unavailable"})
+        foreign = RunContext()
+        foreign.context = context.context
+        self.assertEqual(await self.tools.execute(foreign, "recall", {"query": "q"}), results[-1])
+        deliveries = history.detail(turn.guard.scope, turn.snapshot_id)["deliveries"][1:]
+        self.assertEqual([delivery["text"] for delivery in deliveries], results)
+        self.assertEqual(deliveries[-1]["status"], "error")
+        paused = self.plugin.outbox.set_mode(turn.guard.scope["scope_id"], "paused")
+        self.assertEqual(await self.tools.execute(context, "recall", {"query": "q"}), results[-1])
+        self.assertEqual(history.detail(paused, turn.snapshot_id)["deliveries"][1:], deliveries)
         self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
         self.assertEqual(self.request.func_tool.tools, [])
         self.assertEqual(turn.expires, 0)
@@ -167,8 +181,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     async def test_overlapping_reads_share_final_ids_and_skip_past_duplicates(self):
         scope = self.scope()
         options = reference_options(self.plugin.outbox, scope)
-        save_reference_options(self.plugin.outbox, scope, **{**options, "detail_limit": 3, "types": ["world"]},
-                               tokenizer=self.plugin.client.tokenizer)
+        save_reference_options(self.plugin.outbox, scope, **{**options, "detail_limit": 3, "types": ["world"]})
         event, context = await self.ready()
         turn = self.tools.tool_turns[event]
         turn.snapshot_id = "test-record"

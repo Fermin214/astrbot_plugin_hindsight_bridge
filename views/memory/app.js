@@ -533,6 +533,7 @@ async function refreshBootstrap({ hydrate = false, automatic = false, pollMainte
   $("setup-fields").disabled = locks.has("setup");
   if (previous !== scopeId) backgroundDraft = null;
   if (!locks.has("memory")) renderScope();
+  else renderReferences();
   const configured = new Set((data.config.allowed_accounts || []).map(accountKey));
   $("paused-banks-notice").hidden = !data.scopes.some((item) => !configured.has(accountKey(item))
     && (item.summary?.maintenance || item.summary?.bank_missing));
@@ -680,33 +681,39 @@ function renderScope() {
   renderReflect();
 }
 
+function clearReferenceDraft() {
+  clearTimeout(promptCountTimer);
+  resetUsage();
+  $("reference-form").reset();
+  $("reference-fields").disabled = true;
+  $("reference-save").disabled = true;
+  $("usage-open").disabled = true;
+  $("reference-tokens").textContent = "";
+  $("reference-pruning").hidden = true;
+  $("reference-feedback").hidden = true;
+  referenceDraft = null;
+}
+
 function renderReferences() {
   const scope = data?.scopes.find((item) => item.scope_id === scopeId);
   const available = Number.isInteger(scope?.reference_revision) && !scope.historical && !scope.pending;
-  const key = available ? JSON.stringify([scopeId, scope.bank, scope.generation, scope.revision, data.config_revision]) : "";
-  if (referenceDraft?.key !== key && (referenceDraft || available)) {
-    clearTimeout(promptCountTimer);
-    if ($("usage-dialog").open) $("usage-dialog").close();
-    $("reference-fields").disabled = true;
-    $("reference-form").reset();
-    $("reference-tokens").textContent = "";
-    $("reference-feedback").hidden = true;
-    referenceDraft = available ? { key, id: scopeId, revision: scope.reference_revision } : null;
+  const key = available ? JSON.stringify([scopeId, scope.owner_id, scope.bank, scope.generation, scope.revision]) : undefined;
+  const changed = available && referenceDraft && (referenceDraft.revision !== scope.reference_revision
+    || referenceDraft.configRevision !== data.config_revision);
+  if (referenceDraft?.key !== key || (changed && !referenceDraft.dirty)) {
+    clearReferenceDraft();
+    if (available) referenceDraft = { key, id: scopeId, revision: scope.reference_revision,
+      scopeRevision: scope.revision, configRevision: data.config_revision };
   }
   const draft = referenceDraft;
-  const conflict = draft && draft.revision !== scope.reference_revision;
-  if (conflict && !draft.dirty) {
-    draft.selection = null;
-    draft.attempted = false;
-    draft.revision = scope.reference_revision;
-    if ($("usage-dialog").open) $("usage-dialog").close();
-  }
+  const conflict = changed && draft?.dirty;
+  if (conflict && draft.revision !== scope.reference_revision && $("usage-dialog").open) resetUsage();
   const blocked = !draft?.selection || locks.has("memory");
   $("reference-fields").disabled = blocked;
   $("reference-save").disabled = blocked || !draft.dirty || conflict;
-  $("reference-reload").hidden = !(draft?.failed || (conflict && draft.dirty));
+  $("reference-reload").hidden = !(draft?.failed || conflict);
   $("usage-open").disabled = !available || locks.has("memory");
-  if (scope?.reference_error || (conflict && draft.dirty)) {
+  if (scope?.reference_error || conflict) {
     notify(scope.reference_error || "设置已变化，请重新载入后修改。", true, "reference-feedback");
   }
   const keep = $("reference-history").value;
@@ -760,20 +767,20 @@ function countPrompt(draft) {
 }
 
 async function saveReferences() {
+  renderReferences();
   const draft = referenceDraft;
-  if (!draft?.selection || $("reference-save").disabled) return;
-  const scope = data.scopes.find((item) => item.scope_id === draft.id);
+  if (!draft?.selection || $("reference-save").disabled || !$("reference-form").reportValidity()) return;
   const payload = { prompt: $("reference-prompt").value, exclude_assistant: $("reference-exclude").checked,
     types: ["world", "experience", "observation"].filter((type) => $("reference-" + type).checked),
-    detail_limit: Number($("reference-limit").value), history_limit: Number($("reference-history").value),
-    revision: draft.revision, scope_revision: scope.revision, config_revision: data.config_revision };
+    detail_limit: $("reference-limit").valueAsNumber, history_limit: $("reference-history").valueAsNumber,
+    revision: draft.revision, scope_revision: draft.scopeRevision, config_revision: draft.configRevision };
   await perform($("reference-save"), "memory", async () => {
     const response = await bridge.apiPost(endpoint("references", draft.id), payload);
     if (referenceDraft !== draft) return;
     draft.dirty = false;
     draft.revision = response.selection.revision;
     draft.selection = response.selection;
-    scope.reference_revision = draft.revision;
+    data.scopes.find((item) => item.scope_id === draft.id).reference_revision = draft.revision;
     $("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
     notify("已保存", false, "reference-feedback");
     await refreshBootstrap();
@@ -786,6 +793,13 @@ function clearUsageDetail() {
   $("usage-json").hidden = true;
   $("usage-copy-json").hidden = true;
   $("usage-feedback").textContent = "";
+}
+
+function resetUsage() {
+  usageReadRevision++;
+  clearUsageDetail();
+  $("usage-turn").replaceChildren();
+  if ($("usage-dialog").open) $("usage-dialog").close();
 }
 
 async function openUsage() {
@@ -856,7 +870,7 @@ function usageDelivery(delivery, index, turn) {
     field.setAttribute("aria-label", `${title}原文`);
     const button = el("button", "", "复制原文");
     button.type = "button";
-    button.addEventListener("click", () => void copyValue(field.id, "原文已复制。", "usage-feedback")
+    button.addEventListener("click", () => void copyValue(field.id, "原文已复制。", "usage-feedback", delivery.text)
       .catch((error) => notify(errorMessage(error), true, "usage-feedback")));
     section.append(field, button);
   }
@@ -1148,12 +1162,23 @@ function controlPlaneUrl(value) {
   return value;
 }
 
-async function copyValue(field, message, target = "feedback") {
-  if (!$(field).value) throw new Error("没有可复制的内容。");
+async function copyValue(field, message, target = "feedback", value = $(field).value) {
+  if (!value) throw new Error("没有可复制的内容。");
   $(field).focus();
   $(field).select();
-  try { await navigator.clipboard.writeText($(field).value); }
-  catch { if (!document.execCommand("copy")) throw new Error("内容已选中，请按 Ctrl+C 或长按复制。"); }
+  try { await navigator.clipboard.writeText(value); }
+  catch {
+    const copy = (event) => {
+      event.clipboardData.setData("text/plain", value);
+      event.preventDefault();
+    };
+    document.addEventListener("copy", copy);
+    try {
+      if (!document.execCommand("copy")) throw new Error("内容已选中，请按 Ctrl+C 或长按复制。");
+    } finally {
+      document.removeEventListener("copy", copy);
+    }
+  }
   notify(message, false, target);
 }
 
@@ -1694,16 +1719,12 @@ $("reference-form").addEventListener("input", (event) => {
   renderReferences();
 });
 $("reference-reload").addEventListener("click", () => {
-  referenceDraft = null;
+  clearReferenceDraft();
   void refreshBootstrap().catch((error) => notify(errorMessage(error), true, "reference-feedback"));
 });
 $("usage-open").addEventListener("click", () => void openUsage());
 $("usage-turn").addEventListener("change", () => void loadUsageTurn());
-$("usage-dialog").addEventListener("close", () => {
-  usageReadRevision++;
-  clearUsageDetail();
-  $("usage-turn").replaceChildren();
-});
+$("usage-dialog").addEventListener("close", () => { if (!$("usage-dialog").open) resetUsage(); });
 $("usage-copy-json").addEventListener("click", () => {
   $("usage-json").hidden = false;
   void copyValue("usage-json", "JSON 已复制。", "usage-feedback").then(() => { $("usage-json").hidden = true; })

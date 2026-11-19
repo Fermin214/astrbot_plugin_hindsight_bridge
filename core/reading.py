@@ -6,7 +6,7 @@ from urllib.parse import quote, urlencode
 
 from .client import FACT_TYPES, HindsightError, native_page_id
 from .identity import canonical, sha256
-from .materials import token_count
+from .materials import document_role, token_count
 
 
 def fits(value, *, tokens, chars, bytes_limit, tokenizer):
@@ -150,8 +150,8 @@ def recall_records(rows, bank, *, strict=True):
 
 
 def direct_roles(record):
-    document = record.get("document_id", "")
-    roles = {role for prefix, role in (("aw1-", "assistant"), ("uw1-", "user")) if document.startswith(prefix)}
+    inferred = document_role(record.get("document_id"))
+    roles = {inferred} if inferred else set()
     role = record.get("metadata", {}).get("role")
     if role in ("user", "assistant"):
         roles.add(role)

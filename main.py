@@ -818,6 +818,7 @@ class HindsightBridge(Star):
             background_key = (self.outbox.connection_id, scope["owner_id"])
             self.background_sequences[background_key] = sequence
             outcome = "error"
+            read_guard = ReadGuard.freeze(self, scope)
             conversation, rows = await self.request_history(event, req)
             if not conversation:
                 code = "conversation_not_available"
@@ -838,7 +839,6 @@ class HindsightBridge(Star):
                     return
                 if rows is not None:
                     request_prefix = self.track_assistant_capture(event, req, incoming, scope, conversation, capture)
-            read_guard = ReadGuard.freeze(self, scope)
             options = await self.read_tools.prepare(
                 event, req, incoming, scope, original_tools, marker=request_prefix
             )
@@ -887,7 +887,7 @@ class HindsightBridge(Star):
                             content = delivered["prompt"] + "\n\n" + content
                         text = request_prefix + content
                         req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
-                        if conversation and read_guard:
+                        if read_guard:
                             status = {"success": "delivered", "on_demand": "not_called",
                                       "empty": "no_match", "error": "error"}[outcome]
                             turn_id = self.outbox.references.start(scope, conversation, incoming.message_id, {
