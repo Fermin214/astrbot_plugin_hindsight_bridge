@@ -1,10 +1,12 @@
 """Check the public plugin's metadata, syntax, and distribution boundaries."""
 
+import argparse
 import ast
 from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
+import subprocess
 import unicodedata
 
 import yaml
@@ -43,7 +45,29 @@ def heading_anchors(path):
     return anchors
 
 
+def check_release_version(root, base, candidate, version):
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=root, encoding="utf-8")
+
+    changed = git("diff", "--name-only", "-z", "--no-renames", base, candidate, "--",
+                  "main.py", "metadata.yaml", "requirements.txt", "_conf_schema.json",
+                  ".astrbot-plugin/", "core/", "deploy/", "scripts/", "views/")
+    if not any(path and not path.endswith(".md") for path in changed.split("\0")):
+        return
+    previous = yaml.safe_load(git("show", f"{base}:metadata.yaml"))["version"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", previous):
+        return
+    if not git("tag", "--merged", base, "--list", f"v{previous}", previous).strip():
+        return
+    release = tuple(map(int, version.partition("-")[0].split(".")))
+    if release <= tuple(map(int, previous.split("."))):
+        raise ValueError(f"插件运行文件有变更，版本 {version} 必须高于已发布的 {previous}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release-base", help="检查进入 main 的运行文件是否已更新发布版本")
+    args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     metadata = yaml.safe_load((root / "metadata.yaml").read_text(encoding="utf-8"))
     for name in ("name", "display_name", "desc", "version", "author", "repo"):
@@ -54,6 +78,12 @@ def main():
         "https://github.com/Fermin214/astrbot_plugin_hindsight_bridge"
     )
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", metadata["version"])
+    heading = next(line for line in (root / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+                   if line.startswith("## "))
+    if heading != "## " + metadata["version"]:
+        raise ValueError(f"CHANGELOG.md 首个版本标题 {heading!r} 与 metadata.yaml 不一致")
+    if args.release_base:
+        check_release_version(root, args.release_base, "HEAD", metadata["version"])
     assert metadata["support_platforms"] == [
         "aiocqhttp", "qq_official", "qq_official_webhook", "weixin_oc", "telegram", "lark",
     ]

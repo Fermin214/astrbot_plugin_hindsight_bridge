@@ -22,6 +22,24 @@ spec.loader.exec_module(harness)
 
 
 class LiveHarnessTests(unittest.TestCase):
+    def test_zero_exit_requires_a_completed_report_for_the_selected_package(self):
+        digest = "a" * 64
+        complete = {"complete": True, "passed": ["final_delivery"], "candidate_tree_sha256": digest}
+        with tempfile.TemporaryDirectory() as directory:
+            state = object.__new__(harness.Environment)
+            state.owner, state.output, state.driver = "owned-test", Path(directory), "feedback_e2e.py"
+            state.containers, state.docker = [], Mock()
+            (state.output / "package-inventory.json").write_text(json.dumps({"tree_sha256": digest}))
+            report = state.output / "live-e2e-report.json"
+            with self.assertRaises(FileNotFoundError):
+                state.verify()
+            for changes in ({"complete": False}, {"passed": []}, {"candidate_tree_sha256": "b" * 64}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    report.write_text(json.dumps(complete | changes))
+                    state.verify()
+            report.write_text(json.dumps(complete))
+            state.verify()
+
     def test_gateway_relays_first_stream_event_before_upstream_finishes(self):
         release = threading.Event()
         finished = threading.Event()
