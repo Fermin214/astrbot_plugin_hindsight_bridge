@@ -29,7 +29,7 @@ class NativeMemories(unittest.TestCase):
     def test_assistant_provenance_does_not_claim_execution_or_delivery(self):
         block = memory_block([{
             "id": "reply", "text": "I completed the operation.",
-            "document_id": "aw1-example", "type": "experience",
+            "document_id": "aw1-0-" + "a" * 64, "type": "experience",
         }])
         payload = json.loads(block[block.index("{"):])
         record = list(payload.values())[0][0]

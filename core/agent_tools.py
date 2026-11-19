@@ -145,6 +145,7 @@ class ToolTurn:
     expires: float
     tokens: int
     chars: int
+    offered_names: frozenset
     calls: int = 0
     output_tokens: int = 0
     output_bytes: int = 0
@@ -157,6 +158,8 @@ class ToolTurn:
     names: frozenset = NAMES
     reflect_options: dict = field(default_factory=dict)
     reflect_calls: int = 0
+    delivered_ids: set[str] = field(default_factory=set)
+    snapshot_id: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -409,7 +412,7 @@ class MemoryTools:
                 request_ref=request_ref, event_ref=weakref.ref(event),
                 selected_provider=selected_provider,
                 prefix=marker or request_marker(),
-                names=names, reflect_options=reflect_options,
+                offered_names=names, names=names, reflect_options=reflect_options,
             )
             self.filter_request(event, request, original, enable=True)
             turn.toolset_ref = weakref.ref(request.func_tool)
@@ -513,7 +516,7 @@ class MemoryTools:
             if kind == "reflect":
                 self.plugin.reflection.record(turn, state, code)
 
-    def deliver(self, turn, value):
+    def deliver(self, turn, kind, value):
         text = canonical(value)
         count, length = reading.token_count(text, turn.guard.client.tokenizer), len(text.encode("utf-8"))
         exhausted = value.get("error") == "tool_budget_exhausted"
@@ -521,17 +524,25 @@ class MemoryTools:
             turn.output_tokens + count > 2 * turn.tokens - NOTICE_TOKENS
             or turn.output_bytes + length > MAX_BYTES - NOTICE_BYTES
         ):
-            text = canonical({"error": "tool_budget_exhausted"})
+            value = {"error": "tool_budget_exhausted"}
+            text = canonical(value)
             count, length = reading.token_count(text, turn.guard.client.tokenizer), len(text.encode("utf-8"))
             exhausted = True
         turn.output_tokens += count
         turn.output_bytes += length
         if exhausted:
+            status = "budget"
             self.record(turn, "budget", "tool_budget_exhausted")
             self.retire(turn)
-        elif value.get("error") == "reading_changed":
-            self.retire(turn)
-        return text
+        elif "error" in value:
+            status = "error"
+            if value["error"] == "reading_changed":
+                self.retire(turn)
+        else:
+            status = value.get("status", "delivered")
+            if kind == "recall":
+                turn.delivered_ids.update(item["id"] for item in value.get("items", []))
+        return text, status
 
     async def execute(self, context, kind, arguments):
         if self.closed or self.plugin.stopping:
@@ -557,10 +568,23 @@ class MemoryTools:
         if (
             turn is None or getattr(actual, "context", None) is not self.plugin.context
             or turn.context_ref is None or turn.context_ref() is not context
-            or turn.expires == 0
-            or PREFIX + kind not in turn.names
+            or PREFIX + kind not in turn.offered_names
         ):
             return canonical({"error": "tool_context_unavailable"})
+        text, status = await self._run(turn, event, context, kind, arguments)
+        if (
+            turn.snapshot_id and not self.closed and self.plugin.outbox is turn.guard.queue
+            and self.tool_turns.get(event) is turn and belongs_to_event(self.plugin, event, context)
+            and (incoming := self.plugin.snapshot(event)) is not None
+            and incoming_digest(incoming, turn.guard.queue.deployment_id) == turn.digest
+        ):
+            self.plugin.record_tool_delivery(turn, kind, text, status)
+        return text
+
+    async def _run(self, turn, event, context, kind, arguments):
+        unavailable = canonical({"error": "tool_context_unavailable"}), "error"
+        if turn.expires == 0 or PREFIX + kind not in turn.names:
+            return unavailable
         try:
             async with (
                 self.plugin.using_resources(),
@@ -568,18 +592,18 @@ class MemoryTools:
                 turn.lock,
             ):
                 if self.tool_turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
-                    return canonical({"error": "tool_context_unavailable"})
+                    return unavailable
                 if PREFIX + kind not in turn.names:
-                    return canonical({"error": "tool_context_unavailable"})
+                    return unavailable
                 if turn.context_ref() is not context or not self.valid(turn, event):
                     self.record(turn, "unavailable", "reading_changed", kind=kind)
-                    return self.deliver(turn, {"error": "reading_changed"})
+                    return self.deliver(turn, kind, {"error": "reading_changed"})
                 if (
                     turn.calls >= MAX_CALLS or 2 * turn.tokens - turn.output_tokens <= NOTICE_TOKENS
                     or MAX_BYTES - turn.output_bytes <= NOTICE_BYTES
                 ):
                     self.record(turn, "budget", "tool_budget_exhausted", kind=kind)
-                    return self.deliver(turn, {"error": "tool_budget_exhausted"})
+                    return self.deliver(turn, kind, {"error": "tool_budget_exhausted"})
                 turn.calls += 1
                 if kind == "reflect":
                     turn.reflect_calls += 1
@@ -597,12 +621,15 @@ class MemoryTools:
 
                 try:
                     await recheck()
-                    await turn.guard.client.ensure_auth()
-                    await recheck()
+                    if kind != "recall" or (
+                        turn.guard.settings["types"] and len(turn.delivered_ids) < turn.guard.settings["detail_limit"]
+                    ):
+                        await turn.guard.client.ensure_auth()
+                        await recheck()
                     value = await self.read(turn, kind, arguments, recheck)
                     await recheck()
                     self.record(turn, "success", kind=kind)
-                    return self.deliver(turn, value)
+                    return self.deliver(turn, kind, value)
                 except (HindsightError, QueueError, TimeoutError) as exc:
                     code = "tool_read_timeout" if isinstance(exc, TimeoutError) else (
                         exc.code if isinstance(exc, HindsightError) else str(exc)
@@ -617,23 +644,23 @@ class MemoryTools:
                             queue.control.set_bank_state(queue.connection_id, turn.guard.scope["bank"], "missing")
                             queue.apply_control()
                     self.record(turn, "error", code, kind=kind)
-                    return self.deliver(turn, {"error": code, "message": self.plugin.diagnostic(code)})
+                    return self.deliver(turn, kind, {"error": code, "message": self.plugin.diagnostic(code)})
                 except Exception:
                     self.record(turn, "error", "tool_read_failed", kind=kind)
-                    return self.deliver(turn, {"error": "tool_read_failed"})
+                    return self.deliver(turn, kind, {"error": "tool_read_failed"})
                 finally:
                     if kind == "reflect":
                         self.remove_turn_tools(turn, frozenset({REFLECT_NAME}))
         except QueueError as exc:
             if self.tool_turns.get(event) is not turn or turn.expires == 0:
-                return canonical({"error": "tool_context_unavailable"})
-            return self.deliver(turn, {"error": str(exc)})
+                return unavailable
+            return self.deliver(turn, kind, {"error": str(exc)})
         except TimeoutError:
             if self.tool_turns.get(event) is not turn or turn.expires == 0:
-                return canonical({"error": "tool_context_unavailable"})
+                return unavailable
             code = "reflect_timeout" if kind == "reflect" else "tool_read_timeout"
             self.record(turn, "error", code, kind=kind)
-            return self.deliver(turn, {"error": code, "message": self.plugin.diagnostic(code)})
+            return self.deliver(turn, kind, {"error": code, "message": self.plugin.diagnostic(code)})
 
     async def read(self, turn, kind, arguments, recheck):
         schema = ALL_SCHEMAS.get(kind)
@@ -662,17 +689,35 @@ class MemoryTools:
             if kind == "search_pages":
                 rows = await reading.search_pages(client, bank, query)
             else:
-                rows = reading.recall_records(await client.recall(
-                    bank, query, turn.tokens, timestamp=turn.timestamp, bounded=True,
-                ), bank)
+                settings = turn.guard.settings
+                remaining = settings["detail_limit"] - len(turn.delivered_ids)
+                if remaining <= 0 or not settings["types"]:
+                    return {**base, "items": [], "returned": 0, "available_results": 0,
+                            "status": "limit" if remaining <= 0 else "filtered"}
+                native = await client.recall(
+                    bank, query, turn.tokens, timestamp=turn.timestamp, bounded=True, types=settings["types"],
+                )
+                rows, excluded = reading.chat_records(native, bank, settings, strict=True)
             await recheck()
             result = {**base, "items": [], "returned": 0, "available_results": len(rows)}
-            for row in rows[:12]:
+            seen = set(turn.delivered_ids) if kind == "recall" else set()
+            oversized = False
+            for row in rows:
+                if kind == "recall" and result["returned"] >= remaining:
+                    break
+                if row["id"] in seen:
+                    continue
                 candidate = {**result, "items": [*result["items"], row], "returned": result["returned"] + 1}
                 if reading.fits(candidate, **limits):
                     result = candidate
-            if rows and not result["items"]:
-                raise HindsightError("tool_result_too_large")
+                    seen.add(row["id"])
+                else:
+                    oversized = True
+            if not result["items"]:
+                if oversized:
+                    raise HindsightError("tool_result_too_large")
+                if kind == "recall":
+                    result["status"] = "duplicate" if rows else "filtered" if excluded else "no_match"
             return result
         page = await reading.mapped_page(client, bank, arguments["page_id"], recheck)
         if kind == "read_page":

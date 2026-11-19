@@ -93,6 +93,15 @@ a { color: var(--accent); }
 .input-action button { flex-shrink: 0; }
 .memory-feature { margin-top: 16px; padding: 14px 0 0; border-top: 1px solid var(--line); }
 .memory-feature .knowledge-row { margin: 0; }
+.reference-label, .reference-types { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-block: 14px 8px; }
+.reference-label { justify-content: space-between; }
+#reference-tokens, .usage-meta { font-size: 0.85rem; color: var(--muted); }
+.reference-types .check-label { margin-top: 8px; }
+.reference-limits { margin-top: 16px; }
+#usage-open { margin-bottom: 16px; }
+.usage-delivery { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.usage-text, #usage-json { margin-block: 10px; }
+.usage-meta { margin-block: 8px; overflow-wrap: anywhere; }
 .reflect-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 14px 24px; }
 .reflect-controls .check-label { margin-top: 0; }
 .reflect-timeout { display: flex; align-items: center; gap: 12px; margin-left: auto; }

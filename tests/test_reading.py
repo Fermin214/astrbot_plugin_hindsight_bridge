@@ -17,6 +17,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.background import compose_back
 from plugins.astrbot_plugin_hindsight_bridge.core.client import BACKGROUND_MAX_BYTES, HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.control import QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import canonical
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 
 
 class ReadContracts(unittest.IsolatedAsyncioTestCase):
@@ -73,6 +74,29 @@ class ReadContracts(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reading.native_sources({"based_on": None})["available"])
         with self.assertRaisesRegex(HindsightError, "invalid_recall_response"):
             reading.recall_records([{**record, "bank_id": "another-bank"}], "bank")
+
+    def test_filter_keeps_mixed_and_incomplete_native_attribution(self):
+        user = {"id": "user", "type": "world", "text": "request", "document_id": "uw1-0-" + "a" * 64}
+        assistant = {"id": "assistant", "type": "experience", "text": "promise", "document_id": "aw1-12-" + "b" * 64}
+        custom = {"id": "custom", "type": "world", "text": "custom document", "document_id": "aw1-12-import"}
+        observations = [
+            {"id": name, "type": "observation", "text": name, "source_fact_ids": ids}
+            for name, ids in (
+                ("known", ["assistant"]), ("both", ["assistant", "user"]),
+                ("incomplete", ["assistant", "absent"]), ("imported", ["assistant", "custom"]), ("unlinked", []),
+            )
+        ]
+        records = reading.attributed_records(
+            [assistant, custom, *observations], "bank", {row["id"]: row for row in (user, assistant)},
+        )
+        selected, excluded = reading.chat_records(records, "bank", {
+            "types": ["world", "experience", "observation"], "exclude_assistant": True,
+        })
+        self.assertEqual(excluded, 2)
+        self.assertEqual([(row["id"], row["source_kind"]) for row in selected], [
+            ("custom", "unknown"), ("both", "mixed"), ("incomplete", "unknown"),
+            ("imported", "unknown"), ("unlinked", "unknown"),
+        ])
 
 
 class RunContext:
@@ -132,15 +156,53 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(original.tools), len(NAMES) + 1)
         with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "external_data": True, "items": []})) as read:
             turn = self.tools.tool_turns[event]
+            history = self.plugin.outbox.references
+            turn.snapshot_id = history.start(turn.guard.scope, "chat", "message", {"kind": "request"})
             results = await asyncio.gather(*(self.tools.execute(context, "recall", {"query": "q"}) for _ in range(9)))
         self.assertEqual(read.await_count, 4)
         self.assertEqual(turn.calls, 4)
         self.assertTrue(any("tool_budget_exhausted" in (item or "") for item in results))
+        self.assertEqual(json.loads(results[-1]), {"error": "tool_context_unavailable"})
+        foreign = RunContext()
+        foreign.context = context.context
+        self.assertEqual(await self.tools.execute(foreign, "recall", {"query": "q"}), results[-1])
+        deliveries = history.detail(turn.guard.scope, turn.snapshot_id)["deliveries"][1:]
+        self.assertEqual([delivery["text"] for delivery in deliveries], results)
+        self.assertEqual(deliveries[-1]["status"], "error")
+        paused = self.plugin.outbox.set_mode(turn.guard.scope["scope_id"], "paused")
+        self.assertEqual(await self.tools.execute(context, "recall", {"query": "q"}), results[-1])
+        self.assertEqual(history.detail(paused, turn.snapshot_id)["deliveries"][1:], deliveries)
         self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
         self.assertEqual(self.request.func_tool.tools, [])
         self.assertEqual(turn.expires, 0)
         self.tools.finish(event, context)
         self.assertNotIn(event, self.tools.tool_turns)
+
+    async def test_overlapping_reads_share_final_ids_and_skip_past_duplicates(self):
+        scope = self.scope()
+        options = reference_options(self.plugin.outbox, scope)
+        save_reference_options(self.plugin.outbox, scope, **{**options, "detail_limit": 3, "types": ["world"]})
+        event, context = await self.ready()
+        turn = self.tools.tool_turns[event]
+        turn.snapshot_id = "test-record"
+
+        def rows(bank, query, *args, **kwargs):
+            self.assertEqual(kwargs["types"], ["world"])
+            return [{"id": identity, "text": identity, "type": "world"} for identity in query]
+
+        with (
+            patch.object(self.plugin.client, "recall", AsyncMock(side_effect=rows)) as recall,
+            patch.object(self.plugin, "record_tool_delivery") as write,
+        ):
+            raw = await asyncio.gather(*(self.tools.execute(context, "recall", {"query": query}) for query in (
+                "AB", "B" * 16 + "C",
+            )))
+            self.assertEqual([[row["id"] for row in json.loads(text)["items"]] for text in raw], [["A", "B"], ["C"]])
+            limited = await self.tools.execute(context, "recall", {"query": "D"})
+            self.assertEqual(json.loads(limited)["status"], "limit")
+            self.assertEqual(recall.await_count, 2)
+            self.assertEqual(turn.delivered_ids, {"A", "B", "C"})
+            self.assertEqual([call.args[2] for call in write.call_args_list], [*raw, limited])
 
     async def test_only_agent_begin_binds_context_and_agent_done_retires_unused_turn(self):
         event, context = await self.ready()
@@ -211,12 +273,17 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         event, context = await self.ready()
         turn = self.tools.tool_turns[event]
         turn.tokens = 256
-        with patch.object(self.tools, "read", AsyncMock(return_value={"content": "word " * 245})):
+        turn.snapshot_id = "test-record"
+        with patch.object(self.tools, "read", AsyncMock(side_effect=[
+            {"kind": "recall", "items": [{"id": identity, "text": "word " * 235}]} for identity in ("first", "second")
+        ])), patch.object(self.plugin, "record_tool_delivery") as write:
             results = [await self.tools.execute(context, "recall", {"query": "q"}) for _ in range(2)]
         self.assertTrue(all(isinstance(value, str) and value for value in results))
         self.assertIn("tool_budget_exhausted", results[-1])
         self.assertLessEqual(turn.output_tokens, 2 * turn.tokens)
         self.assertLessEqual(turn.output_bytes, 16 * 1024)
+        self.assertEqual(turn.delivered_ids, {"first"})
+        self.assertEqual(write.call_args.args[2:], (results[-1], "budget"))
         self.assertEqual(self.request.func_tool.tools, [])
 
     async def test_tool_result_drops_after_model_change_and_arguments_cannot_select_bank(self):

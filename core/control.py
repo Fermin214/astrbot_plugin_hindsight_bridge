@@ -381,6 +381,18 @@ class Control:
                     "format": 1, "revision": revision + 1, "enabled": False,
                     "timeout": 12, "invalidated": True,
                 }), key))
+            key = "reference:" + sha256(canonical([connection, owner_id]))
+            previous = self.setting(key)
+            if previous:
+                try:
+                    revision = json.loads(previous)["revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError
+                except (ValueError, TypeError, KeyError, RecursionError):
+                    revision = int(self.setting("revision"))
+                self.db.execute("UPDATE settings SET value=? WHERE key=?", (
+                    canonical({"revision": revision + 1}), key,
+                ))
             self.bump()
         return self.db.execute(
             "SELECT * FROM erasures WHERE forget_id=?", (fid,)

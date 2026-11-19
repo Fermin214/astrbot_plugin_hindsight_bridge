@@ -3,6 +3,7 @@
 import asyncio
 import json
 import pickle
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from .identity import Scope, canonical, sha256
 from .source import TIME_SOURCES
 
 FORMAT = "user_window_v1"
+DEFAULT_MEMORY_PROMPT = "Hindsight 长期记忆：插件已根据本轮对话自动检索，相关内容如下："
 _loaded_encodings = {}
 _ENCODING_LOADER = """
 import pickle, sys, tiktoken
@@ -215,43 +217,47 @@ def request_digest(connection: str, bank: str, generation: int, payload: dict) -
     )
 
 
-def memory_block(results: list[dict], *, limit=4000) -> str:
-    header = (
-        "Hindsight 长期记忆：插件已根据本轮对话自动检索，相关内容如下：\n"
-    )
-    def render(facts):
-        return header + json.dumps(
-            {"记忆": facts},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+def document_role(document):
+    match = re.fullmatch(r"([au])w1-(?:0|[1-9][0-9]*)-[0-9a-f]{64}", document) if isinstance(document, str) else None
+    if match:
+        return "assistant" if match[1] == "a" else "user"
+    return None
 
-    facts = []
+
+def memory_item(row):
+    item = {key: row[key] for key in (
+        "text", "id", "type", "document_id", "chunk_id", "context", "occurred_start",
+        "occurred_end", "mentioned_at", "source_fact_ids", "source_memory_ids", "source_kind",
+    ) if key in row}
+    metadata = row.get("metadata") or {}
+    attribution = {key: metadata[key] for key in (
+        "source", "role", "delivery", "occurred_at", "time_source",
+    ) if key in metadata}
+    if attribution:
+        item["metadata"] = attribution
+    if item.get("source_kind") == "assistant" or (
+        "source_kind" not in item and document_role(row.get("document_id")) == "assistant"
+    ):
+        item["来源角色"] = "assistant"
+        item["发送状态"] = attribution.get("delivery", "unknown")
+    return item
+
+
+def render_memories(items, prompt):
+    header = DEFAULT_MEMORY_PROMPT + "\n" if prompt == DEFAULT_MEMORY_PROMPT else ""
+    return header + json.dumps({"记忆": items}, ensure_ascii=False, separators=(",", ":"))
+
+
+def memory_block(results: list[dict], *, limit=4000) -> str:
+    items, block = [], ""
     for row in results[:12]:
-        if not isinstance(row, dict) or not isinstance(row.get("text"), str):
-            continue
-        item = {
-            key: row[key]
-            for key in (
-                "text",
-                "id",
-                "type",
-                "document_id",
-                "occurred_start",
-                "occurred_end",
-                "source_fact_ids",
-                "source_memory_ids",
-            )
-            if key in row
-        }
-        document = str(row.get("document_id") or "")
-        if document.startswith("aw1-"):
-            item["来源角色"] = "assistant"
-            item["发送状态"] = "unknown"
-        if len(render([*facts, item])) <= limit:
-            facts.append(item)
-    block = render(facts)
-    return block if facts and len(block) <= limit else ""
+        if isinstance(row, dict) and isinstance(row.get("text"), str):
+            item = memory_item(row)
+            candidate = render_memories([*items, item], DEFAULT_MEMORY_PROMPT)
+            if len(candidate) <= limit:
+                items.append(item)
+                block = candidate
+    return block
 
 
 def utc_timestamp() -> str:

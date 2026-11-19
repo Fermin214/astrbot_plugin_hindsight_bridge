@@ -20,6 +20,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 from queue_fixture import confirm_sources
 
@@ -263,6 +264,20 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.recall_status(scope)["code"], "history_timeout")
         self.assertIn("记忆准备失败", req.extra_user_content_parts[0].text)
         self.assertEqual(self.requests, [])
+
+    async def test_full_capture_queue_preserves_custom_prompt_and_final_request(self):
+        event, req = self.turn()
+        queue = self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        prompt = "  保留原文\n  "
+        save_reference_options(queue, scope, **{**reference_options(queue, scope), "prompt": prompt})
+        with patch.object(self.plugin, "freeze_user_capture", side_effect=QueueError("queue_capacity_reached")):
+            await self.plugin.add_memory(event, req)
+        turn, = queue.references.list(scope)
+        delivery, = queue.references.detail(scope, turn["id"])["deliveries"]
+        self.assertEqual((turn["conversation_id"], turn["message_id"]), ("conversation", self.incoming.message_id))
+        self.assertEqual((delivery["prompt"], delivery["code"]), (prompt, "queue_capacity_reached"))
+        self.assertEqual(delivery["text"], req.extra_user_content_parts[0].text)
 
     async def test_chat_auth_timeout_does_not_overwrite_a_newer_successful_request(self):
         self.config["recall_timeout"] = 0.2

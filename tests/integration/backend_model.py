@@ -139,7 +139,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             request_text = json.dumps(body)
             page_content = MARKER
-            if "HB-FEEDBACK-EMPTY" in request_text:
+            if any(message.get("role") == "user" and str(message.get("content", "")).startswith("HB-REFLECT-QUESTION")
+                   for message in body.get("messages", [])):
+                page_content = "HB-REFLECT-ANSWER: Cedar-120 is the native constraint; preserve it when choosing the next step."
+            elif "HB-FEEDBACK-EMPTY" in request_text:
                 time.sleep(20)
             elif "HB-FEEDBACK-LONG" in request_text:
                 page_content = "HB-FEEDBACK-LONG complete paragraph. " * 120
@@ -149,8 +152,6 @@ class Handler(BaseHTTPRequestHandler):
                 prefix = "HB-TOOLS-V2" if "HB-TOOLS-PAGE-V2" in request_text else "HB-TOOLS-V1"
                 page_content = "".join(f"{prefix}-LINE-{index:03d} complete original paragraph; conditions preserved.\n"
                                        for index in range(200))
-            elif "HB-REFLECT-QUESTION" in request_text:
-                page_content = "HB-REFLECT-ANSWER: Cedar-120 is the native constraint; preserve it when choosing the next step."
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 for message in body.get("messages", []):

@@ -1,6 +1,7 @@
 """Maintenance races and stale snapshots require controlled HTTP failures."""
 
 import asyncio
+import json
 import logging
 import math
 import sqlite3
@@ -19,6 +20,7 @@ from test_controls import MemoryService
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 from plugins.astrbot_plugin_hindsight_bridge.core.worker import Worker
 
 
@@ -479,6 +481,35 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
                 return
             self.assertEqual(self.queue.control.erasures("test")[0]["last_error"], "")
         self.fail("erasure did not finish across bounded cancellation batches")
+
+    async def test_locked_history_retries_erasure_without_losing_other_owners_turns(self):
+        alice = self.queue.scope(self.source)
+        bob = self.queue.scope(replace(self.source, user_id="bob"))
+        history = self.queue.references
+        alice_id = history.start(alice, "chat", "first", {"text": "erase"})
+        bob_id = history.start(bob, "chat", "first", {"text": "keep"})
+        control = self.queue.control
+        save_reference_options(self.queue, bob, **reference_options(self.queue, bob))
+        with control.transaction():
+            key, value = control.db.execute("SELECT key,value FROM settings WHERE key GLOB 'reference:*'").fetchone()
+            control.db.execute("UPDATE settings SET value=? WHERE key=?", (
+                json.dumps({**json.loads(value), "history_limit": "broken"}), key,
+            ))
+        with closing(sqlite3.connect(history.path)) as snapshot:
+            snapshot.execute("BEGIN IMMEDIATE")
+            self.queue.forget(alice["scope_id"])
+            self.assertTrue(await self.worker.maintenance.startup())
+            erasure = control.erasures("test")[0]
+            self.assertEqual((erasure["phase"], erasure["last_error"]), ("cleaning", "reference_history_unavailable"))
+            self.assertIsNone(erasure["verified_at"])
+            self.assertTrue(self.queue.can_recall(bob))
+            self.assertEqual({row[0] for row in snapshot.execute("SELECT id FROM turns")}, {alice_id, bob_id})
+            snapshot.rollback()
+            self.assertTrue(await self.worker.maintenance.check(force=True))
+            self.assertEqual(control.erasures("test")[0]["phase"], "verified")
+            self.assertEqual(snapshot.execute("SELECT id FROM turns").fetchall(), [(bob_id,)])
+            self.assertEqual(snapshot.execute("SELECT turn_id,payload FROM deliveries").fetchall(),
+                             [(bob_id, '{"text":"keep"}')])
 
     async def test_resumed_verification_detects_hidden_operation_writeback(self):
         bank, record = await self.checkpointed_erasure("operation")

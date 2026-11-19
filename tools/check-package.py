@@ -64,7 +64,7 @@ def main():
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
         "core/source.py", "core/access.py", "core/onebot_source.py", "core/qq_source.py",
         "core/weixin_source.py", "core/telegram_source.py", "core/lark_source.py",
-        "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py",
+        "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py", "core/reference.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",

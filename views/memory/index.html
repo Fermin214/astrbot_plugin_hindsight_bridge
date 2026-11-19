@@ -46,6 +46,28 @@
           <label id="bank-range-field" hidden for="bank-picker">记忆库<select id="bank-picker"></select></label>
           <div class="bank-row"><span>Bank ID</span><input id="scope-bank" readonly spellcheck="false" aria-label="Bank ID"><button id="copy-bank" type="button">复制 ID</button></div>
           <p id="bank-state" class="operation-status" hidden></p>
+          <form id="reference-form" class="memory-feature" method="post" aria-labelledby="reference-heading">
+            <h4 id="reference-heading">聊天参考</h4>
+            <fieldset id="reference-fields" disabled>
+              <legend class="sr-only">聊天参考设置</legend>
+              <div class="reference-label"><label for="reference-prompt">记忆提示</label><span id="reference-tokens"></span></div>
+              <textarea id="reference-prompt" name="prompt" rows="3" aria-describedby="reference-tokens"></textarea>
+              <fieldset class="reference-types">
+                <legend>细节记忆类别</legend>
+                <label class="check-label"><input type="checkbox" name="types" value="world" id="reference-world">世界事实</label>
+                <label class="check-label"><input type="checkbox" name="types" value="experience" id="reference-experience">经历</label>
+                <label class="check-label"><input type="checkbox" name="types" value="observation" id="reference-observation">观察</label>
+              </fieldset>
+              <label class="check-label"><input type="checkbox" name="exclude_assistant" id="reference-exclude">排除可确认的纯助手发言</label>
+              <div class="form-grid reference-limits">
+                <label for="reference-limit">每条消息最多参考（条）<input id="reference-limit" name="detail_limit" type="number" min="0" max="100" step="1" required inputmode="numeric"></label>
+                <label for="reference-history">使用记录保留（轮）<input id="reference-history" name="history_limit" type="number" min="0" max="300" step="1" required inputmode="numeric" aria-describedby="reference-pruning"></label>
+              </div>
+              <p id="reference-pruning" class="operation-status" hidden></p>
+            </fieldset>
+            <div class="actions"><button id="reference-save" class="primary" type="submit" disabled>保存聊天参考</button><button id="reference-reload" type="button" hidden>重新载入</button></div>
+            <p id="reference-feedback" class="operation-status" role="status" hidden></p>
+          </form>
           <section class="memory-feature" aria-labelledby="reading-heading">
             <div class="knowledge-row reading-row"><label id="reading-heading" for="reading-mode">细节记忆</label><select id="reading-mode"><option value="automatic">自动召回</option><option value="tools">按需工具</option></select><button id="reading-save" class="primary" aria-label="保存细节记忆设置" type="button">保存</button></div>
             <p id="reading-status" class="operation-status" role="status" hidden></p>
@@ -67,6 +89,7 @@
         </section>
         <section class="content-section">
           <h3>记忆状态</h3>
+          <button id="usage-open" type="button" disabled>使用记录</button>
           <div class="stats"><div><span>已保存</span><strong id="saved-count">暂无数据</strong></div><div><span>待保存</span><strong id="pending-count">0</strong></div><div><span>保存失败</span><strong id="failed-count">0</strong></div></div>
           <p id="queue-summary" class="operation-status" hidden></p>
           <div id="scope-error" class="notice error" role="status" hidden></div>
@@ -147,6 +170,14 @@
   <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading"><div class="dialog-header"><h2 id="remove-account-heading">移除用户</h2></div><p id="remove-account-user"></p><p>移除访问权限，保留记忆。</p><div class="dialog-actions"><button id="cancel-remove-account" type="button">取消</button><button id="confirm-remove-account" type="button" class="danger">确认移除</button></div><p id="remove-account-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading"><div class="dialog-header"><h2 id="forget-heading">清空记忆</h2></div><p>删除此记忆库的全部内容，无法撤销。</p><p id="forget-user" class="forget-user"></p><p id="forget-message" class="operation-status"></p><label class="check-label" for="forget-agree"><input id="forget-agree" type="checkbox">确认清空</label><div class="dialog-actions"><button id="cancel-forget" type="button">取消</button><button id="confirm-forget" type="button" class="danger" disabled>确认清空</button></div><p id="forget-feedback" class="operation-status" role="status"></p></dialog>
 
+  <dialog id="usage-dialog" aria-labelledby="usage-heading">
+    <div class="dialog-header"><h2 id="usage-heading">使用记录</h2><button type="button" data-close="usage-dialog" aria-label="关闭">×</button></div>
+    <label id="usage-picker" for="usage-turn" hidden>时间 · 会话 · 消息<select id="usage-turn"></select></label>
+    <div id="usage-deliveries"></div>
+    <div class="actions"><button id="usage-copy-json" type="button" hidden>复制整轮 JSON</button></div>
+    <textarea id="usage-json" rows="5" aria-label="整轮 JSON" readonly hidden></textarea>
+    <p id="usage-feedback" class="operation-status" role="status"></p>
+  </dialog>
   <dialog id="deployment-dialog" aria-labelledby="deployment-heading"><div class="dialog-header"><h2 id="deployment-heading">重新部署</h2><button type="button" data-close="deployment-dialog" aria-label="关闭">×</button></div><p id="deployment-description"></p><div id="installation" class="command-output" hidden><textarea id="install-command" aria-label="部署命令" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-command" type="button">复制命令</button></div></div><div class="dialog-actions"><button id="generate-deployment" type="button">生成部署命令</button><button id="check-deployment" type="button" hidden>检查服务连接</button></div><p id="deployment-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>删除这套配套服务的专属容器、全部记忆和专属数据卷，无法撤销。</p><label class="check-label" for="delete-memory-data"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="backup-dialog" aria-labelledby="backup-heading">

@@ -6,7 +6,7 @@ from urllib.parse import quote, urlencode
 
 from .client import FACT_TYPES, HindsightError, native_page_id
 from .identity import canonical, sha256
-from .materials import token_count
+from .materials import document_role, token_count
 
 
 def fits(value, *, tokens, chars, bytes_limit, tokenizer):
@@ -108,18 +108,23 @@ def page_excerpt(page, *, start_line=1, version="", **limits):
     return result
 
 
-def recall_records(rows, bank):
+def recall_records(rows, bank, *, strict=True):
     """Project native attribution without flattening sources into new evidence."""
     clean = []
     for row in rows:
-        if (
-            not isinstance(row, dict) or row.get("bank_id", bank) != bank
-            or not isinstance(row.get("id"), str) or not row["id"]
-            or not isinstance(row.get("text"), str)
-            or row.get("type", row.get("fact_type")) not in FACT_TYPES
-        ):
+        if not isinstance(row, dict) or row.get("bank_id", bank) != bank or not isinstance(row.get("text"), str):
             raise HindsightError("invalid_recall_response")
-        record = {"id": row["id"], "text": row["text"], "type": row.get("type", row.get("fact_type"))}
+        identity = row.get("id")
+        kind = row.get("type", row.get("fact_type"))
+        if (strict or identity is not None) and (not isinstance(identity, str) or not identity):
+            raise HindsightError("invalid_recall_response")
+        if (strict or kind is not None) and (not isinstance(kind, str) or kind not in FACT_TYPES):
+            raise HindsightError("invalid_recall_response")
+        record = {"text": row["text"]}
+        if identity:
+            record["id"] = identity
+        if kind:
+            record["type"] = kind
         for key in ("document_id", "chunk_id", "context", "occurred_start", "occurred_end", "mentioned_at"):
             if row.get(key) is not None:
                 if not isinstance(row[key], str):
@@ -142,6 +147,60 @@ def recall_records(rows, bank):
                 record["metadata"][key] = metadata[key]
         clean.append(record)
     return clean
+
+
+def direct_roles(record):
+    inferred = document_role(record.get("document_id"))
+    roles = {inferred} if inferred else set()
+    role = record.get("metadata", {}).get("role")
+    if role in ("user", "assistant"):
+        roles.add(role)
+    elif role == "mixed":
+        roles.update(("user", "assistant"))
+    elif role:
+        roles.add("unknown")
+    return roles
+
+
+def attributed_records(rows, bank, sources, *, strict=False):
+    records = recall_records(rows, bank, strict=strict)
+    if sources is not None and not isinstance(sources, dict):
+        raise HindsightError("invalid_recall_response")
+    lookup = {item["id"]: item for item in records if "id" in item}
+    for identity, raw in (sources or {}).items():
+        item, = recall_records([raw], bank, strict=False)
+        if item.get("id") != identity:
+            raise HindsightError("invalid_recall_response")
+        lookup[identity] = item
+    for record in records:
+        links = set(record.get("source_fact_ids", ())) | set(record.get("source_memory_ids", ()))
+        roles = direct_roles(record)
+        if links:
+            for identity in links:
+                source = lookup.get(identity)
+                known = direct_roles(source) if source and source.get("type") != "observation" else set()
+                roles.update(known or {"unknown"})
+        elif record.get("type") == "observation":
+            roles.add("unknown")
+        if {"user", "assistant"} <= roles:
+            source_kind = "mixed"
+        elif len(roles) == 1:
+            source_kind = next(iter(roles))
+        else:
+            source_kind = "unknown"
+        record["source_kind"] = source_kind
+    return records
+
+
+def chat_records(rows, bank, settings, *, strict=False):
+    if any("source_kind" not in row for row in rows):
+        rows = attributed_records(rows, bank, None, strict=strict)
+    types = set(settings["types"])
+    records = [
+        row for row in rows if (row.get("type") in types or ("type" not in row and types == FACT_TYPES))
+        and not (settings["exclude_assistant"] and row["source_kind"] == "assistant")
+    ]
+    return records, len(rows) - len(records)
 
 
 def native_sources(response):

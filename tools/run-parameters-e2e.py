@@ -31,15 +31,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("existing", "managed"), required=True)
-    parser.add_argument("--scope", choices=("single-page", "advanced"), default="single-page")
+    parser.add_argument("--scope", choices=("single-page", "advanced", "references"), default="single-page")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.4")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
     args = parser.parse_args()
     if args.mode == "existing":
         subprocess.run([sys.executable, str(ROOT / "tools/run-feedback-e2e.py"), "--output", str(args.output),
                         "--astrbot-version", args.astrbot_version, "--hindsight-version", args.hindsight_version,
-                        "--scope", "parameters" if args.scope == "advanced" else "single-page"], check=True)
+                        "--scope", "parameters" if args.scope == "advanced" else args.scope], check=True)
         return
+    if args.scope == "references":
+        parser.error("the reference rollback scenario requires --mode existing")
     if args.hindsight_version != "1.2.0":
         parser.error("new managed installations use Hindsight 1.2.0")
     args.magpie_url, args.chat_model = "http://127.0.0.1:3425/v1", "compatibility-fixture"

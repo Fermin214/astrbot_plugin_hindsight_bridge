@@ -538,7 +538,10 @@ class HindsightClient:
         timestamp: str,
         timeout: float | None = None,
         bounded: bool = False,
+        types: list[str] | None = None,
     ) -> list[dict]:
+        if types == []:
+            return []
         if not query.strip() or token_count(query, self.tokenizer) > 400:
             raise HindsightError("invalid_query_budget", permanent=True)
         await self.ensure_auth(timeout=timeout)
@@ -547,7 +550,7 @@ class HindsightClient:
                 body={
                     "query": query, "budget": "mid", "max_tokens": max_tokens,
                     "query_timestamp": timestamp,
-                    "types": ["world", "experience", "observation"],
+                    "types": types if types is not None else ["world", "experience", "observation"],
                     "include": {"source_facts": {"max_tokens": 256, "max_tokens_per_observation": 64}},
                 }, timeout=timeout,
             )
@@ -567,6 +570,10 @@ class HindsightClient:
         rows = result.get("results")
         if not isinstance(rows, list):
             raise HindsightError("invalid_recall_response")
+        if types is not None:
+            from .reading import attributed_records
+
+            return attributed_records(rows, bank, result.get("source_facts"), strict=bounded)
         return rows
 
     async def submit(self, bank: str, payload: dict) -> None:
