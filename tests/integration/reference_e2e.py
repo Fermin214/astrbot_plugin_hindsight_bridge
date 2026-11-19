@@ -2,9 +2,11 @@
 
 import asyncio
 from contextlib import closing
+import json
 import sqlite3
+import time
 
-from live_e2e import ALICE, BOB, jsonl, until
+from live_e2e import ALICE, BOB, ROOT, jsonl, until
 import reference_panel_e2e
 import reference_tools_e2e
 
@@ -163,6 +165,7 @@ async def verify(acceptance, page, frame, bank):
 
     await settings(history_limit=30, prompt=CUSTOM)
     await chat("One reference before downgrade.")
+    old_timestamp = int(time.time())
     await acceptance.install("baseline-install.zip")
     await acceptance.usable()
     prepared = await acceptance.action(scope["scope_id"], "forget_prepare")
@@ -176,3 +179,37 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.usable()
     assert (await settings())["prompt"] == DEFAULT and not await turns() and await turns(bob_route)
     acceptance.passed("forget_in_035_then_upgrade_removes_stale_snapshots_and_custom_prompt_before_read")
+
+    await acceptance.action(scope["scope_id"], "mode", mode="active")
+    await asyncio.sleep(1.1)
+    new_prompt = "Only for messages after erasure."
+    await settings(prompt=new_prompt)
+    tasks_before = acceptance.tasks()
+    calls = len(jsonl("recall-trace"))
+    await acceptance.bot.chat(ALICE, "A delayed message before erasure.", timestamp=old_timestamp)
+    assert all(new_prompt not in part for part in user_parts(acceptance.requests()[-1]))
+    assert not await turns() and acceptance.tasks() == tasks_before and len(jsonl("recall-trace")) == calls
+    acceptance.passed("pre_erasure_onebot_message_cannot_read_new_prompt_create_snapshot_or_enter_retain_queue")
+
+    retain_start = len(jsonl("retain-trace"))
+    text = "Preserve my original message while reference settings are damaged."
+    with closing(sqlite3.connect(ROOT / "control-volume/control.sqlite3")) as control:
+        key, original_value = control.execute(
+            "SELECT key,value FROM settings WHERE key GLOB 'reference:*' AND json_extract(value,'$.prompt')=?",
+            (new_prompt,),
+        ).fetchone()
+        with control:
+            control.execute("UPDATE settings SET value=? WHERE key=?",
+                            (json.dumps({**json.loads(original_value), "history_limit": "invalid"}), key))
+        try:
+            await acceptance.bot.chat(ALICE, text)
+            await acceptance.drained()
+            assert all(new_prompt not in part for part in user_parts(acceptance.requests()[-1]))
+            assert len(jsonl("recall-trace")) == calls
+            assert any(text in item["content"] and item["metadata"]["role"] == "user"
+                       for trace in jsonl("retain-trace")[retain_start:] for item in trace["body"]["items"])
+        finally:
+            with control:
+                control.execute("UPDATE settings SET value=? WHERE key=?", (original_value, key))
+    assert not await turns() and await turns(bob_route)
+    acceptance.passed("invalid_reference_settings_preserve_original_retain_without_recall_or_new_snapshots")

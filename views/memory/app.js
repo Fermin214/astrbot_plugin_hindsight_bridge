@@ -705,11 +705,14 @@ function renderReferences() {
   if (referenceDraft?.key !== key || (changed && !referenceDraft.dirty)) {
     clearReferenceDraft();
     if (available) referenceDraft = { key, id: scopeId, revision: scope.reference_revision,
-      scopeRevision: scope.revision, configRevision: data.config_revision };
+      observedRevision: scope.reference_revision, scopeRevision: scope.revision, configRevision: data.config_revision };
   }
   const draft = referenceDraft;
   const conflict = changed && draft?.dirty;
-  if (conflict && draft.revision !== scope.reference_revision && $("usage-dialog").open) resetUsage();
+  if (draft && draft.observedRevision !== scope.reference_revision) {
+    draft.observedRevision = scope.reference_revision;
+    resetUsage();
+  }
   const blocked = !draft?.selection || locks.has("memory");
   $("reference-fields").disabled = blocked;
   $("reference-save").disabled = blocked || !draft.dirty || conflict;

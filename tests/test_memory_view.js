@@ -1090,6 +1090,36 @@ test("reading mode preserves original revisions and drops feedback after user ch
   assert.doesNotMatch(context.$("reading-feedback").textContent, /saved-other-user/);
 });
 
+test("usage history reopened during a draft conflict stays open until the next reference revision", () => {
+  const context = harness();
+  Object.assign(context, { referenceDraft: null, usageReadRevision: 0, promptCountTimer: null, scopeId: "one" });
+  for (const name of ["clearUsageDetail", "resetUsage", "clearReferenceDraft", "renderReferences"]) {
+    vm.runInContext(declaration(name), context);
+  }
+  const scope = { scope_id: "one", bank: "bank-one", revision: 1, reference_revision: 0 };
+  context.data = { config: {}, config_revision: "config", scopes: [scope] };
+  context.renderReferences();
+  context.referenceDraft.selection = { history_limit: 30 };
+  context.referenceDraft.dirty = true;
+  context.$("reference-prompt").value = "my draft";
+  const dialog = context.$("usage-dialog");
+  dialog.showModal();
+  for (const revision of [1, 2]) {
+    scope.reference_revision = revision;
+    context.renderReferences();
+    assert.equal(dialog.open, false);
+    assert.equal(context.$("usage-json").value, "");
+    assert.equal(context.$("reference-prompt").value, "my draft");
+    assert.equal(context.$("reference-save").disabled, true);
+    assert.equal(context.$("reference-reload").hidden, false);
+    dialog.showModal();
+    context.$("usage-json").value = "reloaded turn";
+    context.renderReferences();
+    assert.equal(dialog.open, true);
+    assert.equal(context.$("usage-json").value, "reloaded turn");
+  }
+});
+
 test("Reflect keeps dirty values across polling, detects conflicts and ignores a former user's save", async () => {
   const context = harness();
   for (const name of ["renderReflect", "saveReflect", "perform", "endpoint"]) vm.runInContext(declaration(name), context);

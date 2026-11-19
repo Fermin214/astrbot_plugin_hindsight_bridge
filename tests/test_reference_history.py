@@ -89,23 +89,40 @@ class ReferenceIsolation(unittest.TestCase):
 
     def test_corrupt_options_affect_only_their_owner_and_can_be_forgotten(self):
         options = reference_options(self.queue, self.alice)
-        save_reference_options(self.queue, self.alice, **options)
-        self.queue.apply_control()
         old_id = self.queue.references.start(self.alice, "chat", "private", self.payload)
+        latest_id = self.queue.references.start(self.alice, "chat", "latest", self.payload)
         bob_id = self.queue.references.start(self.bob, "chat", "keep", self.payload)
+        snapshot = Path(self.tmp.name) / "old.sqlite3"
+        self.queue.references.close()
+        shutil.copyfile(self.queue.references.path, snapshot)
+        save_reference_options(self.queue, self.alice, **{**options, "history_limit": 0})
+        self.queue.apply_control()
         key, value = self.queue.control.db.execute(
             "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
         ).fetchone()
-        self.queue.close()
-        with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
-            control.execute("UPDATE settings SET value=? WHERE key=?", (
-                json.dumps({**json.loads(value), "history_limit": "broken"}), key,
-            ))
-        self.queue = self.open_queue()
-        self.queue.sync_permissions([("qq", "alice"), ("qq", "bob")])
-        self.assertEqual(self.queue.references.detail(self.bob, bob_id)["deliveries"], [self.payload])
-        with self.assertRaisesRegex(QueueError, "reference_settings_invalid"):
-            self.queue.references.list(self.alice)
+        cases = (
+            ({"revision": None}, {bob_id}),
+            ({"types": ["broken"]}, {bob_id}),
+            ({"types": ["broken"], "history_limit": 1}, {bob_id, latest_id}),
+            ({"history_limit": "broken"}, {bob_id, old_id, latest_id}),
+        )
+        for damaged, retained in cases:
+            with self.subTest(damaged=damaged):
+                self.queue.close()
+                with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
+                    control.execute("UPDATE settings SET value=? WHERE key=?", (
+                        json.dumps({**json.loads(value), **damaged}), key,
+                    ))
+                shutil.copyfile(snapshot, self.directory / "references.sqlite3")
+                self.queue = self.open_queue()
+                self.queue.sync_permissions([("qq", "alice"), ("qq", "bob")])
+                self.assertEqual(self.queue.references.detail(self.bob, bob_id)["deliveries"], [self.payload])
+                with self.assertRaisesRegex(QueueError, "reference_settings_invalid"):
+                    self.queue.references.list(self.alice)
+                self.assertIsNone(self.queue.references.start(self.alice, "chat", "new", self.payload))
+                with closing(sqlite3.connect(self.queue.references.path)) as database:
+                    self.assertEqual({row[0] for row in database.execute("SELECT id FROM turns")}, retained)
+                    self.assertEqual({row[0] for row in database.execute("SELECT turn_id FROM deliveries")}, retained)
         self.queue.forget(self.alice["scope_id"], journal_only=True)
         self.queue.references.append(self.alice, old_id, {"text": "late"})
         with self.assertRaisesRegex(QueueError, "scope_not_available"):

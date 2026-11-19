@@ -801,6 +801,7 @@ class HindsightBridge(Star):
         code = ""
         content = ""
         read_guard = None
+        read_error = None
         background_status = None
         request_prefix = ""
         conversation = ""
@@ -813,12 +814,18 @@ class HindsightBridge(Star):
             if not self.outbox.can_recall(scope):
                 self.record_recall(scope, "skipped", started)
                 return
+            if incoming.timestamp < scope["accept_from"] or not self.outbox.accepts(incoming):
+                self.record_recall(scope, "skipped", started, "message_before_accept_from")
+                return
             self.background_sequence += 1
             sequence = self.background_sequence
             background_key = (self.outbox.connection_id, scope["owner_id"])
             self.background_sequences[background_key] = sequence
             outcome = "error"
-            read_guard = ReadGuard.freeze(self, scope)
+            try:
+                read_guard = ReadGuard.freeze(self, scope)
+            except QueueError as exc:
+                read_error = exc
             conversation, rows = await self.request_history(event, req)
             if not conversation:
                 code = "conversation_not_available"
@@ -839,6 +846,8 @@ class HindsightBridge(Star):
                     return
                 if rows is not None:
                     request_prefix = self.track_assistant_capture(event, req, incoming, scope, conversation, capture)
+            if read_error is not None:
+                raise read_error
             options = await self.read_tools.prepare(
                 event, req, incoming, scope, original_tools, marker=request_prefix
             )
@@ -864,6 +873,9 @@ class HindsightBridge(Star):
             self.warning(exc.code)
         except QueueError as exc:
             code = str(exc)
+            if code in {"message_before_accept_from", "message_identity_content_conflict", "invalid_capture",
+                        "scope_not_active", "permissions_not_synced"}:
+                outcome = None
             self.warning(code)
         except Exception as exc:
             code = "local_" + type(exc).__name__

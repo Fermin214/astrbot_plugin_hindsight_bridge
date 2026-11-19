@@ -119,7 +119,7 @@ class OneBot:
                 await self.replies.put({**params, "message": segments})
             await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
 
-    async def send(self, user, text, *, group=False, message_id=None):
+    async def send(self, user, text, *, group=False, message_id=None, timestamp=None):
         if any(text.startswith("/hindsight " + command) for command in (
             "on", "readonly", "pause", "retry", "cancel", "forget",
         )):
@@ -130,7 +130,8 @@ class OneBot:
         while not self.replies.empty():
             self.replies.get_nowait()
         event = {
-            "time": int(time.time()), "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
+            "time": int(time.time()) if timestamp is None else timestamp,
+            "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
             "sub_type": "normal" if group else "friend", "user_id": user,
             "message_id": message_id or self.message_id, "message": [{"type": "text", "data": {"text": text}}],
             "raw_message": text, "font": 0, "sender": {"user_id": user, "nickname": "Synthetic user", "role": "member"},
@@ -140,8 +141,8 @@ class OneBot:
         await self.socket.send_json(event)
         return event["message_id"]
 
-    async def chat(self, user, text):
-        await self.send(user, text)
+    async def chat(self, user, text, *, timestamp=None):
+        await self.send(user, text, timestamp=timestamp)
         async with asyncio.timeout(100):
             while True:
                 reply = await self.replies.get()

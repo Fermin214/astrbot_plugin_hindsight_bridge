@@ -41,11 +41,22 @@ def _scope_binding(queue, scope):
 def _stored(value):
     try:
         options = json.loads(value)
-        if not isinstance(options, dict) or type(options.get("revision")) is not int or options["revision"] < 1:
+        if not isinstance(options, dict):
             raise ValueError
         return options
     except (ValueError, TypeError, RecursionError):
         raise QueueError("reference_settings_invalid") from None
+
+
+def _stored_revision(options):
+    revision = options.get("revision")
+    if type(revision) is not int or revision < 1:
+        raise QueueError("reference_settings_invalid")
+    return revision
+
+
+def _valid_history_limit(limit):
+    return type(limit) is int and 0 <= limit <= HISTORY_LIMIT_MAX
 
 
 def _validate(prompt, types, exclude_assistant, detail_limit, history_limit):
@@ -53,8 +64,7 @@ def _validate(prompt, types, exclude_assistant, detail_limit, history_limit):
         not isinstance(prompt, str) or not isinstance(types, list) or len(types) > len(REFERENCE_TYPES)
         or any(kind not in REFERENCE_TYPES for kind in types) or len(set(types)) != len(types)
         or type(exclude_assistant) is not bool or type(detail_limit) is not int
-        or not 0 <= detail_limit <= DETAIL_LIMIT_MAX or type(history_limit) is not int
-        or not 0 <= history_limit <= HISTORY_LIMIT_MAX
+        or not 0 <= detail_limit <= DETAIL_LIMIT_MAX or not _valid_history_limit(history_limit)
     ):
         raise QueueError("reference_settings_invalid")
 
@@ -74,8 +84,9 @@ def reference_options(queue, scope):
     if not value:
         return _options({"revision": 0})
     stored = _stored(value)
+    revision = _stored_revision(stored)
     if not stored.get("binding") or stored["binding"] != _scope_binding(queue, scope):
-        return _options({"revision": stored["revision"]})
+        return _options({"revision": revision})
     return _options(stored)
 
 
@@ -176,16 +187,18 @@ class ReferenceHistory:
                 previous_revision = int(revision)
                 try:
                     options = _stored(value)
-                    previous_revision = options["revision"]
-                    if options.keys() == {"revision"}:
-                        continue
                     binding = options.get("binding")
                     if isinstance(binding, str) and bindings.get(binding) == key:
+                        limit = options.get("history_limit", 30)
+                        limits[binding] = limit if _valid_history_limit(limit) else None
                         try:
-                            limits[binding] = _options(options)["history_limit"]
+                            _stored_revision(options)
+                            _options(options)
                         except QueueError:
                             self.warning("reference_settings_invalid")
-                            limits[binding] = None
+                        continue
+                    previous_revision = _stored_revision(options)
+                    if options.keys() == {"revision"}:
                         continue
                 except QueueError:
                     self.warning("reference_settings_invalid")
