@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       host: ${{ steps.scope.outputs.host }}
+      qq: ${{ steps.scope.outputs.qq }}
+      weixin: ${{ steps.scope.outputs.weixin }}
       models: ${{ steps.scope.outputs.models }}
     steps:
       - uses: actions/checkout@v4
@@ -69,11 +71,21 @@ jobs:
               "core/providers.py", "deploy/model_transport.py", "deploy/model_probe.py",
               "tools/check-model-protocols.py", "requirements.txt", "deploy/compose.yaml",
           })
+          shared_sources = {
+              "main.py", "core/source.py", "core/identity.py", "core/access.py", "core/permissions.py",
+              "core/control.py", "core/outbox.py", "core/materials.py", "requirements.txt",
+              "tests/integration/astrbot_smoke.py", ".github/workflows/check.yml",
+          }
+          qq = bool(set(code) & (shared_sources | {"core/qq_source.py", "tests/integration/qq_source_contracts.py"}))
+          weixin = (bool(set(code) & (shared_sources | {"core/weixin_source.py", "tests/integration/weixin_source_contracts.py"}))
+                    or any(name.startswith("tests/integration/platform_probe/") for name in code))
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              for name, enabled in (("python", python), ("frontend", frontend), ("host", host), ("models", models)):
+              for name, enabled in (("python", python), ("frontend", frontend), ("host", host), ("models", models),
+                                    ("qq", qq), ("weixin", weixin)):
                   output.write(f"{name}={str(enabled).lower()}\n")
           print("Selected:", ", ".join(name for name, enabled in (
               ("regressions", python), ("page", frontend), ("host", host), ("models", models),
+              ("QQ contracts", qq), ("Weixin contracts", weixin),
           ) if enabled) or "syntax, metadata, package and documentation")
           PY
       - uses: actions/setup-python@v5
@@ -98,7 +110,15 @@ jobs:
           python -m pip install playwright==1.56.0
           python -m playwright install --with-deps chromium
           python tests/integration/background_view.py
-      - run: python tools/check-package.py
+      - name: Check plugin package and release version
+        env:
+          RELEASE_BASE: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.base.sha || '' }}
+        run: |
+          if [ -n "$RELEASE_BASE" ]; then
+            python tools/check-package.py --release-base "$RELEASE_BASE"
+          else
+            python tools/check-package.py
+          fi
 
   windows:
     runs-on: windows-latest
@@ -139,23 +159,17 @@ jobs:
 
   astrbot-smoke:
     needs: check
-    if: needs.check.outputs.host == 'true'
+    if: needs.check.outputs.host == 'true' || needs.check.outputs.qq == 'true' || needs.check.outputs.weixin == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - version: "4.29.1"
+        version: ["4.29.1", "4.29.4"]
+        platform: ${{ fromJSON(needs.check.outputs.host == 'true' && '["aiocqhttp","lark","telegram"]' || '["lark"]') }}
+        exclude:
+          - version: "4.29.4"
             platform: aiocqhttp
-          - version: "4.29.1"
-            platform: lark
-          - version: "4.29.4"
-            platform: lark
-          - version: "4.29.1"
-            platform: telegram
-          - version: "4.29.4"
-            platform: telegram
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -170,6 +184,8 @@ jobs:
             -e ASTRBOT_ROOT=/verification \
             -e ASTRBOT_TEST_VERSION=${{ matrix.version }} \
             -e ASTRBOT_PLATFORM_FIXTURE=${{ matrix.platform }} \
+            -e RUN_QQ_CONTRACTS=${{ needs.check.outputs.qq }} \
+            -e RUN_WEIXIN_CONTRACTS=${{ needs.check.outputs.weixin }} \
             -e ASTRBOT_DASHBOARD_INITIAL_PASSWORD='Delivery-Test-2026!' \
             -v "${{ runner.temp }}/hindsight-delivery:/delivery" \
             -v "${{ github.workspace }}:/candidate-source:ro" \
@@ -179,6 +195,17 @@ jobs:
               if [ "$ASTRBOT_PLATFORM_FIXTURE" = lark ]; then
                 ASTRBOT_ROOT=/contracts python /candidate-source/tests/integration/lark_source_contracts.py \
                   --output /delivery/lark-contracts.json
+                if [ "$RUN_QQ_CONTRACTS" = true ]; then
+                  for transport in qq_official qq_official_webhook; do
+                    ASTRBOT_ROOT="/contracts-$transport" QQ_TRANSPORT="$transport" \
+                      python /candidate-source/tests/integration/qq_source_contracts.py \
+                      > "/delivery/$transport-contracts.log"
+                  done
+                fi
+                if [ "$RUN_WEIXIN_CONTRACTS" = true ]; then
+                  ASTRBOT_ROOT=/contracts-weixin python /candidate-source/tests/integration/weixin_source_contracts.py \
+                    --output /delivery/weixin-contracts.json
+                fi
               elif [ "$ASTRBOT_PLATFORM_FIXTURE" = telegram ]; then
                 ASTRBOT_ROOT=/contracts python /candidate-source/tests/integration/telegram_source_contracts.py \
                   --output /delivery/telegram-contracts.json

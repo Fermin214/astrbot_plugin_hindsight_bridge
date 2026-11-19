@@ -464,13 +464,23 @@ class Environment:
         print("Real AstrBot dashboard is ready", flush=True)
 
     def verify(self):
-        self.docker("build", "-t", "hindsight-bridge-live-browser:1.56.0", "-f", str(ROOT / "tests/integration/Dockerfile.browser"), str(ROOT / "tests/integration"),
-                    stdout=(self.output / "browser-build.log").open("w"), stderr=subprocess.STDOUT)
+        expected_tree = json.loads((self.output / "package-inventory.json").read_text())["tree_sha256"]
+        if not isinstance(expected_tree, str) or len(expected_tree) != 64:
+            raise ValueError("候选包清单缺少有效的树摘要")
+        with (self.output / "browser-build.log").open("w") as log:
+            self.docker("build", "-t", "hindsight-bridge-live-browser:1.56.0", "-f", str(ROOT / "tests/integration/Dockerfile.browser"),
+                        str(ROOT / "tests/integration"), stdout=log, stderr=subprocess.STDOUT)
         name = self.owner + "-browser"
         self.containers.append(name)
         self.docker("run", "--name", name, "--label", "hindsight-bridge.test=" + self.owner, "--network", "host", "--memory", "2g", "--shm-size", "512m",
                     "-e", "HOME=/tmp", "-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
                     "hindsight-bridge-live-browser:1.56.0", "python", "/candidate-source/tests/integration/" + self.driver)
+        report = json.loads((self.output / "live-e2e-report.json").read_text())
+        passed = report.get("passed")
+        if report.get("complete") is not True or not isinstance(passed, list) or not passed:
+            raise ValueError("验收报告缺少完成标记或通过项")
+        if report.get("candidate_tree_sha256") != expected_tree:
+            raise ValueError("验收报告与候选包的树摘要不符")
 
     def cleanup(self):
         for name in reversed(self.containers):
