@@ -696,6 +696,7 @@ class MemoryTools:
                             "status": "limit" if remaining <= 0 else "filtered"}
                 native = await client.recall(
                     bank, query, turn.tokens, timestamp=turn.timestamp, bounded=True, types=settings["types"],
+                    budget=settings["recall_budget"],
                 )
                 rows, excluded = reading.chat_records(native, bank, settings, strict=True)
             await recheck()

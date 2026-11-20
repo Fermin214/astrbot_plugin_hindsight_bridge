@@ -59,7 +59,9 @@
                 <label class="check-label"><input type="checkbox" name="types" value="observation" id="reference-observation">观察</label>
               </fieldset>
               <label class="check-label"><input type="checkbox" name="exclude_assistant" id="reference-exclude">排除可确认的纯助手发言</label>
+              <label class="check-label" for="reference-capture-assistant"><input type="checkbox" name="capture_assistant" id="reference-capture-assistant" checked>保存助手回复</label>
               <div class="form-grid reference-limits">
+                <label for="reference-budget">检索预算<select id="reference-budget" name="recall_budget"><option value="low">低</option><option value="mid" selected>中</option><option value="high">高</option></select></label>
                 <label for="reference-limit">每条消息最多参考（条）<input id="reference-limit" name="detail_limit" type="number" min="0" max="100" step="1" required inputmode="numeric"></label>
                 <label for="reference-history">使用记录保留（轮）<input id="reference-history" name="history_limit" type="number" min="0" max="300" step="1" required inputmode="numeric" aria-describedby="reference-pruning"></label>
               </div>

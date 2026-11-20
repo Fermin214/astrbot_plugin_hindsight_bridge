@@ -40,6 +40,7 @@ from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.reading import chat_records
+from .core.reference import reference_options
 from .core.reflection import Reflection
 from .core.source import inspect_header, local_runner, native_login, platform_details, prepare_bot_identity
 from .core.worker import Worker
@@ -551,7 +552,8 @@ class HindsightBridge(Star):
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
 
-    async def recall_text(self, bank, current, history=(), *, timestamp, prefix="", settings=None, delivered=None):
+    async def recall_text(self, bank, current, history=(), *, timestamp, prefix="", settings=None, delivered=None,
+                          recall_budget="mid"):
         if settings is not None and (not settings["types"] or not settings["detail_limit"]):
             delivered["status"] = "filtered" if not settings["types"] else "limit"
             return ""
@@ -569,6 +571,7 @@ class HindsightBridge(Star):
                 stage = "recall"
                 results = await client.recall(
                     bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
+                    budget=settings["recall_budget"] if settings is not None else recall_budget,
                     **({"types": settings["types"]} if settings is not None else {}),
                 )
                 if settings is not None:
@@ -627,6 +630,7 @@ class HindsightBridge(Star):
                         guard.scope["bank"], query, tokens, timestamp=timestamp,
                         timeout=max(0.001, deadline - time.monotonic()),
                         types=guard.settings["types"],
+                        budget=guard.settings["recall_budget"],
                     )
                     rows, excluded = chat_records(rows, guard.scope["bank"], guard.settings)
                     if excluded and not rows:
@@ -767,6 +771,7 @@ class HindsightBridge(Star):
                         or scope["revision"] != turn["revision"]
                         or scope["bank"] != turn["bank"]
                         or self.permission_revision != turn["permission_revision"]
+                        or not self.captures_assistant(scope)
                     ):
                         return
                     rows = await self.conversation_history(event, turn["conversation"])
@@ -776,6 +781,7 @@ class HindsightBridge(Star):
                         not self.allowed(event)
                         or not self.outbox.can_recall(scope)
                         or self.permission_revision != turn["permission_revision"]
+                        or not self.captures_assistant(scope)
                     ):
                         return
                     anchor = self.outbox.history_anchor(
@@ -812,9 +818,18 @@ class HindsightBridge(Star):
         except TimeoutError:
             raise HindsightError("history_timeout") from None
 
-    def freeze_user_capture(self, incoming, scope, conversation, rows):
-        self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
-        return self.outbox.capture(incoming, conversation, history_before=history_boundary(rows))
+    def captures_assistant(self, scope):
+        try:
+            return reference_options(self.outbox, scope)["capture_assistant"]
+        except (QueueError, sqlite3.Error):
+            return False
+
+    def freeze_user_capture(self, incoming, scope, conversation, rows, *, capture_assistant):
+        if capture_assistant:
+            self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
+        return self.outbox.capture(
+            incoming, conversation, history_before=history_boundary(rows) if capture_assistant else "",
+        )
 
     def track_assistant_capture(self, event, request, incoming, scope, conversation, capture):
         marker = request_marker()
@@ -916,11 +931,12 @@ class HindsightBridge(Star):
             ):
                 return
             if scope["mode"] == "active":
-                capture = self.freeze_user_capture(incoming, scope, conversation, rows)
+                capture_assistant = self.captures_assistant(scope)
+                capture = self.freeze_user_capture(incoming, scope, conversation, rows, capture_assistant=capture_assistant)
                 if not capture.created:
                     outcome = None
                     return
-                if rows is not None:
+                if capture_assistant and rows is not None:
                     request_prefix = self.track_assistant_capture(event, req, incoming, scope, conversation, capture)
             if read_error is not None:
                 raise read_error
@@ -1375,7 +1391,8 @@ class HindsightBridge(Star):
                 from .core.materials import utc_timestamp
 
                 result = await self.recall_text(
-                    scope["bank"], query, timestamp=utc_timestamp()
+                    scope["bank"], query, timestamp=utc_timestamp(),
+                    recall_budget=reference_options(self.outbox, scope)["recall_budget"],
                 )
                 await self.prepare_sources()
                 if not self.outbox.can_recall(scope, manual=True) or not self.allowed(

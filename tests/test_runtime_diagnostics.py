@@ -301,6 +301,69 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.recall_status(scope)["consecutive_failures"], 0)
         self.logger.info.assert_called()
 
+    async def test_automatic_recall_sends_user_budget_without_changing_token_limit(self):
+        scope = self.plugin.outbox.scope(self.incoming)
+        for budget in ("low", "mid", "high"):
+            save_reference_options(self.plugin.outbox, scope, **{
+                **reference_options(self.plugin.outbox, scope), "recall_budget": budget,
+            })
+            event, req = self.turn("budget-" + budget)
+            await self.plugin.add_memory(event, req)
+            request = next(request for request in reversed(self.requests) if request.url.path.endswith("/recall"))
+            payload = json.loads(request.content)
+            self.assertEqual((payload["budget"], payload["max_tokens"]), (budget, 1200))
+        with self.assertRaisesRegex(HindsightError, "invalid_recall_budget"):
+            await self.plugin.client.recall("bank", "hello", timestamp=self.incoming.iso_timestamp, budget="medium")
+
+    async def test_disabling_assistant_capture_blocks_late_callback_and_future_backfill(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        event, request = self.turn("enabled-before-callback")
+        await plugin.add_memory(event, request)
+        queued_turn = plugin.pending_assistant_captures[event]
+        scope = queue.scope(self.incoming)
+        rows = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "delayed answer"}]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_history(event, conversation):
+            entered.set()
+            await release.wait()
+            return rows
+
+        def settings(enabled):
+            save_reference_options(queue, scope, **{
+                **reference_options(queue, scope), "capture_assistant": enabled,
+            })
+
+        with patch.object(plugin, "conversation_history", side_effect=delayed_history):
+            callback = asyncio.create_task(plugin.persist_history(event, queued_turn, "delayed answer"))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                settings(False)
+            finally:
+                release.set()
+                await asyncio.wait_for(callback, 2)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
+
+        event, request = self.turn("disabled")
+        with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows)), \
+                patch.object(plugin, "record_history", wraps=plugin.record_history) as backfill, \
+                patch.object(plugin, "track_assistant_capture", wraps=plugin.track_assistant_capture) as track:
+            await plugin.add_memory(event, request)
+            backfill.assert_not_called()
+            track.assert_not_called()
+        anchor = queue.history_anchor(scope["scope_id"], "conversation")
+        self.assertIsNone(anchor["history_before"])
+        self.assertNotIn(event, plugin.pending_assistant_captures)
+        self.assertEqual(queue.db.execute("SELECT released FROM outbox ORDER BY id").fetchall()[-1][0], 1)
+
+        settings(True)
+        event, request = self.turn("reenabled")
+        with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows + rows)):
+            await plugin.add_memory(event, request)
+        self.assertIn(event, plugin.pending_assistant_captures)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 3)
+
     async def test_authentication_and_recall_deadlines_are_distinct_and_honor_setting(self):
         self.config["recall_timeout"] = 0.2
         async def stall(*args, **kwargs):

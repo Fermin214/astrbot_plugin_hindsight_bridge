@@ -365,8 +365,8 @@ class Feedback(Acceptance):
                 if self.settings.get("assistant_capture"):
                     from reading_e2e import verify_assistant_capture
 
-                    await verify_assistant_capture(self)
-                    self.report.update(complete=True, acceptance_scope="native primary assistant retention in automatic and tool reading modes")
+                    await verify_assistant_capture(self, frame)
+                    self.report.update(complete=True, acceptance_scope="native assistant retention, recall budget, and private skip diagnostics")
                     self.save()
                     return
                 if self.settings.get("reflect"):

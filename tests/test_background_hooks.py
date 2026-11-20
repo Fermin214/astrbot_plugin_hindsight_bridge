@@ -17,6 +17,7 @@ from test_background import native_model, native_tree
 from plugins.astrbot_plugin_hindsight_bridge.core.background import reference, save_reference
 from plugins.astrbot_plugin_hindsight_bridge.core.control import QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 
 
 class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
@@ -67,6 +68,8 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
 
     async def test_enabled_background_and_recall_are_temporary_and_not_frozen_material(self):
         self.select()
+        options = reference_options(self.plugin.outbox, self.scope())
+        save_reference_options(self.plugin.outbox, self.scope(), **{**options, "recall_budget": "low"})
         self.results = [{"id": "fact", "text": "Native fact marker.", "type": "world"}]
         event, req = self.turn()
         await self.plugin.add_memory(event, req)
@@ -75,6 +78,8 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(block._no_save)
         self.assertIn("Native background marker.", block.text)
         self.assertIn("Native fact marker.", block.text)
+        recall = next(request for request in self.requests if request.url.path.endswith("/recall"))
+        self.assertEqual(json.loads(recall.content)["budget"], "low")
         self.assertTrue(all(request.method == "GET" or request.url.path.endswith("/recall") for request in self.requests))
         row = self.plugin.outbox.db.execute("SELECT * FROM outbox LIMIT 1").fetchone()
         self.assertNotIn("Native background marker.", row["payload"])

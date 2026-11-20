@@ -1490,8 +1490,9 @@ class MemoryPanel:
             queue, scope = await self.reference_scope(scope_id)
             config_revision = self.config_revision()
             if posting:
-                if (set(payload) != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
-                                     "history_limit", "scope_revision", "config_revision"}
+                if (set(payload) - {"recall_budget", "capture_assistant"}
+                    != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
+                        "history_limit", "scope_revision", "config_revision"}
                     or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]
                     or payload.pop("config_revision") != config_revision):
                     raise QueueError("reference_changed")
