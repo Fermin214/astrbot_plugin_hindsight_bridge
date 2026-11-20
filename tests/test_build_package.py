@@ -12,21 +12,29 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("build_test_package", ROOT / "tools/build-test-package.py")
-BUILDER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(BUILDER)
+SPEC = importlib.util.spec_from_file_location("distribution", ROOT / "tools/distribution.py")
+DISTRIBUTION = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DISTRIBUTION)
 
 
 class CandidatePackaging(unittest.TestCase):
-    def test_export_ignored_directories_exclude_all_descendants(self):
+    def test_distribution_excludes_ignored_files_and_directories(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             (root / ".gitattributes").write_text(
                 "tests/ export-ignore\ntools/ export-ignore\n*.private export-ignore\n"
             )
-            names = ["main.py", "core/background.py", "tests/deep/test.py", "tools/build.py", "secret.private"]
-            self.assertEqual(BUILDER.distribution_files(root, names), ["main.py", "core/background.py"])
+            (root / ".gitignore").write_text(".venv/\n")
+            for name in ("main.py", "core/background.py", "tests/deep/test.py", "tools/build.py",
+                         "secret.private", ".venv/dependency.py"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            self.assertEqual(
+                DISTRIBUTION.working_tree_files(root, distribution=True),
+                [".gitattributes", ".gitignore", "core/background.py", "main.py"],
+            )
 
     def test_distribution_has_complete_assets_and_reproducible_archive(self):
         with tempfile.TemporaryDirectory() as directory:

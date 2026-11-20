@@ -11,6 +11,8 @@ import unicodedata
 
 import yaml
 
+from distribution import working_tree_files
+
 
 class ViewAssets(HTMLParser):
     def __init__(self):
@@ -141,10 +143,21 @@ def main():
     assert len(account) == 1 and account[0]["__template_key"] == "account"
     assert account[0]["platform_instance_id"] == "your-qq-official-instance"
     assert account[0]["user_id"] == "your-openid-from-sid"
+    distributed = set(working_tree_files(root, distribution=True))
     for path in root.rglob("*.py"):
-        if not {".git", ".local"} & set(path.relative_to(root).parts):
+        relative = path.relative_to(root)
+        if not {".git", ".local"} & set(relative.parts):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            in_distribution = relative.as_posix() in distributed
             for node in ast.walk(tree):
+                if in_distribution:
+                    modules = []
+                    if isinstance(node, ast.Import):
+                        modules = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom) and not node.level:
+                        modules = [node.module]
+                    if any(module.split(".", 1)[0] == "logging" for module in modules):
+                        raise ValueError(f"{relative}:{node.lineno} 分发源码不能导入标准库 logging")
                 if not isinstance(node, ast.ImportFrom) or not node.level:
                     continue
                 package = path.parent

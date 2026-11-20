@@ -1,7 +1,6 @@
 """Verify model access from the managed Hindsight runtime."""
 
 import asyncio
-import logging
 import math
 import os
 
@@ -30,5 +29,4 @@ async def probe():
 
 
 if __name__ == "__main__":
-    logging.disable(logging.CRITICAL)
     asyncio.run(probe())
