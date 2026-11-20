@@ -142,9 +142,19 @@ def main():
     assert account[0]["platform_instance_id"] == "your-qq-official-instance"
     assert account[0]["user_id"] == "your-openid-from-sid"
     for path in root.rglob("*.py"):
-        if not {".git", ".local"} & set(path.relative_to(root).parts):
+        relative = path.relative_to(root)
+        if not {".git", ".local"} & set(relative.parts):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            distributed = relative.parts[0] not in {".github", "tests", "tools"}
             for node in ast.walk(tree):
+                if distributed:
+                    modules = []
+                    if isinstance(node, ast.Import):
+                        modules = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom) and not node.level:
+                        modules = [node.module]
+                    if any(module.split(".", 1)[0] == "logging" for module in modules):
+                        raise ValueError(f"{relative}:{node.lineno} 分发源码不能导入标准库 logging")
                 if not isinstance(node, ast.ImportFrom) or not node.level:
                     continue
                 package = path.parent

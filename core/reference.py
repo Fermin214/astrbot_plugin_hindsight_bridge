@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import sqlite3
 import time
@@ -118,11 +117,11 @@ def save_reference_options(queue, scope, *, revision, prompt, types, exclude_ass
 
 
 class ReferenceHistory:
-    def __init__(self, queue, warning=None):
+    def __init__(self, queue, warning):
         self.queue = queue
         self.path = queue.directory / "references.sqlite3"
         self.db = None
-        self.warning = warning or logging.getLogger(__name__).warning
+        self.warning = warning
         self.revision = None
 
     def close(self):

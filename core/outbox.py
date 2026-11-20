@@ -68,7 +68,7 @@ class Outbox:
     ):
         self.db = self.lock = self.control = None
         self.directory = Path(directory)
-        self.references = ReferenceHistory(self, warning)
+        self.references = ReferenceHistory(self, warning if warning is not None else lambda _message: None)
         self.connection_id, self.zone = service_id.strip(), zone
         self.agent_id = agent_id.strip()
         self.permission_pairs = None
