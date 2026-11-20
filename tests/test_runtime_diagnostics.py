@@ -236,8 +236,13 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             plugin.record_skip(event, queue)
             outcome = plugin.skip_status("qq", "123")
             self.assertEqual(outcome["code"], "quoted_or_reply")
-            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")]), {"code", "at"})
+            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")][1]), {"code", "at"})
             self.assertEqual(queue.summary(self.incoming.scope(queue.deployment_id).id)["counts"], {})
+            self.assertTrue(queue.access.observe_bot("qq", "aiocqhttp", "new-bot"))
+            self.assertIsNone(plugin.skip_status("qq", "123"))
+            grant = queue.access.authorization("qq", "123")
+            queue.activate(replace(self.incoming, bot_id="new-bot"), grant["revision"])
+            self.assertIsNone(plugin.skip_status("qq", "123"))
             self.config["allowed_accounts"] = []
             self.assertIsNone(plugin.skip_status("qq", "123"))
 
@@ -343,6 +348,8 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.wait_for(callback, 2)
         self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
+        prior = queue.capture_assistant(queued_turn["task_id"], "already saved assistant context")
+        queue.release(prior.task_id)
 
         event, request = self.turn("disabled")
         with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows)), \
@@ -355,14 +362,16 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(anchor["history_before"])
         self.assertNotIn(event, plugin.pending_assistant_captures)
         self.assertEqual(queue.db.execute("SELECT released FROM outbox ORDER BY id").fetchall()[-1][0], 1)
+        payload = json.loads(queue.db.execute("SELECT payload FROM outbox ORDER BY id DESC LIMIT 1").fetchone()[0])
+        self.assertNotIn("already saved assistant context", payload["items"][0]["content"])
 
         settings(True)
         event, request = self.turn("reenabled")
         with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows + rows)):
             await plugin.add_memory(event, request)
         self.assertIn(event, plugin.pending_assistant_captures)
-        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
-        self.assertEqual(queue.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 3)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 1)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 4)
 
     async def test_authentication_and_recall_deadlines_are_distinct_and_honor_setting(self):
         self.config["recall_timeout"] = 0.2

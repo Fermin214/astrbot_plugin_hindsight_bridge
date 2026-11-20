@@ -88,6 +88,24 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         event.message_obj.raw_message["time"] = None
         self.assertIsNone(self.plugin.command_scope(event))
 
+    async def test_state_command_with_native_wake_prefix_does_not_replace_last_skip(self):
+        queue = self.plugin.outbox
+        timestamp_error = self.event(timestamp=500)
+        self.plugin.record_skip(timestamp_error, queue)
+        previous = self.plugin.skip_status("qq", "2001")
+        self.assertEqual(previous["code"], "unsupported_message")
+
+        self.context.get_config = lambda *args: {
+            "platform": [{"id": "qq", "type": "aiocqhttp"}], "wake_prefix": ["!"],
+        }
+        self.config["command_prefixes"] = ["!"]
+        status = self.event("!hindsight status")
+        status.get_message_str = lambda: "hindsight status"
+        status.is_at_or_wake_command = True
+        self.assertIsNone(self.plugin.snapshot(status))
+        self.plugin.record_skip(status, queue)
+        self.assertEqual(self.plugin.skip_status("qq", "2001"), previous)
+
     async def test_native_forget_waits_for_upgrade_including_an_earlier_confirmation(self):
         panel = self.plugin.panel
         panel.directory = lambda: self.root / "setup"

@@ -99,17 +99,22 @@ def header(event, plain_type, wake_prefixes, adapter, *, inspect=None):
         return None
     timestamp = raw.get("time")
     if isinstance(timestamp, str) and timestamp.isdecimal():
-        timestamp = int(timestamp)
+        try:
+            timestamp = int(timestamp)
+        except ValueError:
+            timestamp = None
     received = getattr(event, "created_at", None)
-    if (
-        type(timestamp) is not int or not 0 < timestamp <= time.time() + 300
-        or type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + HOST_CLOCK_TOLERANCE
-    ):
-        return None
-    segments, components = raw.get("message"), event.get_messages()
+    segments = raw.get("message")
+    valid_time = (
+        type(timestamp) is int and 0 < timestamp <= time.time() + 300
+        and type(received) in (int, float) and math.isfinite(received)
+        and 0 < received <= time.time() + HOST_CLOCK_TOLERANCE
+    )
     if inspect is not None:
-        inspect(fields[1], timestamp, received, lambda: message_shape(segments))
+        inspect(fields[1], timestamp if valid_time else None, received, lambda: message_shape(segments))
+    if not valid_time:
+        return None
+    components = event.get_messages()
     if not isinstance(segments, list) or not segments or not components:
         return None
     texts = []

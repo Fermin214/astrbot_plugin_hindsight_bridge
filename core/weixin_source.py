@@ -122,12 +122,6 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     finished = raw["message_state"] == 2
     occurred = raw.get("create_time_ms")
-    if (
-        type(occurred) is not int or not 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
-        or not valid_update(raw.get("update_time_ms"), occurred, finished)
-        or raw.get("delete_time_ms") not in (None, 0)
-    ):
-        return None
     user, mid = raw.get("from_user_id"), raw.get("message_id")
     if (
         not identifier(user) or user == login.account_id
@@ -138,19 +132,21 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     ):
         return None
     received = getattr(event, "created_at", None)
-    if (
-        type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
-        return None
-    items, parts = raw.get("item_list"), event.get_messages()
+    valid_time = (
+        type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
+        and valid_update(raw.get("update_time_ms"), occurred, finished)
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+    )
+    items = raw.get("item_list")
     if inspect is not None:
-        inspect(login.account_id, occurred / 1000, received, lambda: message_shape(raw, items))
-    if set(raw) - MESSAGE_FIELDS or any(
-        value is not None and (type(value) is not int or value != 0)
-        for value in (raw.get("root_id"), raw.get("parent_id"))
+        inspect(login.account_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw, items))
+    if (
+        not valid_time or raw.get("delete_time_ms") not in (None, 0) or set(raw) - MESSAGE_FIELDS
+        or any(value is not None and (type(value) is not int or value != 0)
+               for value in (raw.get("root_id"), raw.get("parent_id")))
     ):
         return None
+    parts = event.get_messages()
     if not isinstance(items, list) or not items or len(items) > 8000 or not isinstance(parts, list):
         return None
     texts, length = [], 0

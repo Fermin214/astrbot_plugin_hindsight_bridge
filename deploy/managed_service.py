@@ -54,8 +54,8 @@ PROBE_ERRORS = {
 SERVICE_ERRORS = {
     "probe_failed": "模型连接或应用失败，请检查所选模型的地址、密钥与网络。",
     "probe_timeout": "模型探测超时，请检查模型服务与网络。",
-    "service_start_timeout": "记忆服务启动超时，请检查服务日志与模型配置。",
-    "service_exited": "记忆服务在启动时退出，请检查服务日志与模型配置。",
+    "service_start_timeout": "记忆服务启动超时，请检查数据库是否就绪及容器资源是否充足。",
+    "service_exited": "记忆服务在启动时退出，请检查数据库连接与容器内存限制。",
 }
 
 

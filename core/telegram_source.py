@@ -116,20 +116,17 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     ):
         return None
     date, original = msg.date, msg.text
-    if not isinstance(date, datetime) or date.utcoffset() is None:
-        return None
-    occurred = date.timestamp()
+    occurred = date.timestamp() if isinstance(date, datetime) and date.utcoffset() is not None else None
     received = getattr(event, "created_at", None)
-    if (
-        not math.isfinite(occurred) or not 0 < occurred <= time.time() + 300
-        or type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
-        return None
+    valid_time = (
+        occurred is not None and math.isfinite(occurred) and 0 < occurred <= time.time() + 300
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+    )
     if inspect is not None:
-        inspect(login.bot_id, occurred, received, lambda: message_shape(msg))
+        inspect(login.bot_id, occurred if valid_time else None, received, lambda: message_shape(msg))
     if (
-        set(raw.to_dict()) - {"update_id", "message"} or set(msg.to_dict()) - MESSAGE_FIELDS or msg.api_kwargs
+        not valid_time or set(raw.to_dict()) - {"update_id", "message"}
+        or set(msg.to_dict()) - MESSAGE_FIELDS or msg.api_kwargs
         or any(getattr(msg, name, False) for name in (
             "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
         ))

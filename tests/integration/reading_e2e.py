@@ -101,7 +101,8 @@ async def verify_assistant_capture(acceptance, frame):
             await acceptance.drained()
         captured = [item for trace in jsonl("retain-trace")[retain_start:] for item in trace["body"]["items"]]
         assert [item["metadata"]["role"] for item in captured] == ["user", "user"], captured
-        assert all("HB-CAPTURE-PRIMARY-disabled-" in item["content"] for item in captured)
+        assert all("HB-CAPTURE-PRIMARY-disabled-" in item["content"] and "[assistant;" not in item["content"]
+                   for item in captured)
         assert [trace["body"]["budget"] for trace in jsonl("recall-trace")[recall_start:]] == ["low", "low"]
         await frame.locator("#reference-capture-assistant").check()
         await frame.locator("#reference-save").click()

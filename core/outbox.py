@@ -579,6 +579,7 @@ class Outbox:
         conversation_id: str,
         *,
         history_before="",
+        include_assistant_context=True,
     ) -> Capture:
         if (
             not incoming.text.strip()
@@ -661,7 +662,7 @@ class Outbox:
                 identity,
                 scope["generation"],
                 current,
-                tuple(history),
+                tuple(message for message in history if include_assistant_context or message.role != "assistant"),
                 conversation_id,
                 str(uuid.uuid4()),
                 self.zone,

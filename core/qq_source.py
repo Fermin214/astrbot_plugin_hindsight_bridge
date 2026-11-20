@@ -148,8 +148,10 @@ def timestamp(value):
 
 
 def message_shape(data):
+    elements = data.get("msg_elements")
     if data.get("message_reference") is not None or (
-        data.get("message_type") == 103 and data.get("parallel_message")
+        data.get("message_type") in (103, "103") and isinstance(elements, list)
+        and elements and isinstance(elements[0], Mapping)
     ):
         return "quoted_or_reply"
     if data.get("attachments") or data.get("msg_elements") or data.get("message_type") != 0:
@@ -185,14 +187,15 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     occurred = timestamp(data.get("timestamp"))
     received = getattr(event, "created_at", None)
-    if (
-        occurred is None or data["timestamp"] != getattr(raw, "timestamp", None)
-        or type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
-        return None
+    valid_time = (
+        occurred is not None and data["timestamp"] == getattr(raw, "timestamp", None)
+        and type(received) in (int, float) and math.isfinite(received)
+        and 0 < received <= time.time() + 1
+    )
     if inspect is not None:
-        inspect(login.appid, occurred, received, lambda: message_shape(data))
+        inspect(login.appid, occurred if valid_time else None, received, lambda: message_shape(data))
+    if not valid_time:
+        return None
     if (
         set(data) - TEXT_FIELDS or type(data.get("message_type")) is not int or data["message_type"] != 0
         or data.get("message_reference") is not None or not isinstance(original, str)

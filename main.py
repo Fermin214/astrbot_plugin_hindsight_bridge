@@ -52,7 +52,7 @@ SKIP_MESSAGES = {
     "quoted_or_reply": "引用或回复消息",
     "media_or_non_text": "包含媒体或非纯文字内容",
     "command_prefix": "命令或排除前缀",
-    "unsupported_message": "不支持的消息格式",
+    "unsupported_message": "不支持的消息格式或时间",
 }
 
 
@@ -434,6 +434,7 @@ class HindsightBridge(Star):
                 return
         except ValueError:
             return
+        grant = queue.access.authorization(*account)
         code = "bot_not_confirmed"
         classify = None
 
@@ -447,8 +448,11 @@ class HindsightBridge(Star):
                 queue.permission_pairs is None or account not in queue.permission_pairs
                 or getattr(self.context, "get_platform_inst", None) is not None
                 and self.source_accounts.get(account[0], {}).get("bot_id") != bot
-                or not queue.access.permitted(identity)
+                or not grant or not grant["enabled"] or grant["source_id"] != identity.id
             ):
+                return
+            if timestamp is None:
+                code = "unsupported_message"
                 return
             scope = queue.scope_owner(identity.id)
             if not queue.accepts(incoming) or scope and timestamp < scope["accept_from"]:
@@ -457,14 +461,18 @@ class HindsightBridge(Star):
             classify = message_shape
 
         incoming = self.source_header(event, inspect=inspect)
-        if incoming and incoming.text.strip().split() == ["/hindsight", "status"]:
-            return
+        if incoming:
+            if incoming.text.strip().split() == ["/hindsight", "status"] or (
+                getattr(event, "is_at_or_wake_command", False) is True
+                and event.get_message_str().strip().split() == ["hindsight", "status"]
+            ):
+                return
         if classify is not None:
             if incoming and self.excluded_prefix(incoming.text):
                 code = "command_prefix"
             else:
                 code = classify()
-        self.skip_outcomes[account] = {"code": code, "at": time.time()}
+        self.skip_outcomes[account] = (grant["revision"] if grant else None, {"code": code, "at": time.time()})
 
     def skip_status(self, platform, user):
         if self.outbox is None or self.stopping:
@@ -474,8 +482,14 @@ class HindsightBridge(Star):
                 return None
         except ValueError:
             return None
-        outcome = self.skip_outcomes.get((platform, user))
-        return {**outcome, "message": SKIP_MESSAGES[outcome["code"]]} if outcome else None
+        record = self.skip_outcomes.get((platform, user))
+        if record is None:
+            return None
+        revision, outcome = record
+        grant = self.outbox.access.authorization(platform, user)
+        if revision != (grant["revision"] if grant else None):
+            return None
+        return {**outcome, "message": SKIP_MESSAGES[outcome["code"]]}
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
@@ -829,6 +843,7 @@ class HindsightBridge(Star):
             self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
         return self.outbox.capture(
             incoming, conversation, history_before=history_boundary(rows) if capture_assistant else "",
+            include_assistant_context=capture_assistant,
         )
 
     def track_assistant_capture(self, event, request, incoming, scope, conversation, capture):

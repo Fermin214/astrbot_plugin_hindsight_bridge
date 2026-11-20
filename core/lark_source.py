@@ -113,14 +113,6 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     occurred = milliseconds(raw.create_time)
     updated = milliseconds(raw.update_time)
-    if (
-        type(occurred) is not int
-        or not 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
-        or raw.update_time is not None and (
-            updated is None or updated not in (0, occurred)
-        )
-    ):
-        return None
     user, mid = event.get_sender_id(), raw.message_id
     if (
         not identifier(user) or not user.startswith("ou_") or user == login.open_id
@@ -129,15 +121,16 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     ):
         return None
     received = getattr(event, "created_at", None)
-    if (
-        type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
-        return None
+    valid_time = (
+        type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
+        and (raw.update_time is None or updated in (0, occurred))
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+    )
     if inspect is not None:
-        inspect(login.bot_id, occurred / 1000, received, lambda: message_shape(raw))
+        inspect(login.bot_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw))
     if (
-        raw.message_type != "text" or raw.parent_id or raw.root_id or getattr(raw, "thread_id", None)
+        not valid_time or raw.message_type != "text"
+        or raw.parent_id or raw.root_id or getattr(raw, "thread_id", None)
         or raw.mentions or getattr(raw, "lark_agent_context", None) is not None
         or not isinstance(raw.content, str) or len(raw.content) > 64_000
     ):
