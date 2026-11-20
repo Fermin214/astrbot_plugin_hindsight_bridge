@@ -17,6 +17,11 @@ PLAIN_ENTITIES = frozenset({
     "code", "pre", "blockquote", "expandable_blockquote", "url", "email",
     "phone_number", "hashtag", "cashtag",
 })
+REPLY_FIELDS = frozenset({"reply_to_message", "external_reply", "quote", "reply_to_story"})
+MEDIA_FIELDS = frozenset({
+    "animation", "audio", "contact", "dice", "document", "game", "location", "paid_media",
+    "photo", "poll", "sticker", "story", "venue", "video", "video_note", "voice",
+})
 
 
 def numeric_id(value):
@@ -77,7 +82,16 @@ def bound_login(event, adapter, binding):
     return login
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding):
+def message_shape(message):
+    fields = set(message.to_dict())
+    if fields & REPLY_FIELDS:
+        return "quoted_or_reply"
+    if fields & MEDIA_FIELDS or any(entity.type not in PLAIN_ENTITIES for entity in message.entities or ()):
+        return "media_or_non_text"
+    return "unsupported_message"
+
+
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
@@ -85,10 +99,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
 
     raw = event.message_obj.raw_message
     msg = raw.message
-    if (
-        type(msg) is not Message or set(raw.to_dict()) - {"update_id", "message"}
-        or set(msg.to_dict()) - MESSAGE_FIELDS or msg.api_kwargs
-    ):
+    if type(msg) is not Message:
         return None
     try:
         if msg.get_bot() is not login.client:
@@ -102,17 +113,10 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
         or str(sender.id) != event.get_sender_id()
         or str(chat.id) != event.message_obj.session_id
         or not numeric_id(msg.message_id) or str(msg.message_id) != event.message_obj.message_id
-        or any(getattr(msg, name, False) for name in (
-            "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
-        ))
     ):
         return None
     date, original = msg.date, msg.text
-    if (
-        not isinstance(date, datetime) or date.utcoffset() is None
-        or not isinstance(original, str) or not original.strip() or len(original) > 8000
-        or any(entity.type not in PLAIN_ENTITIES for entity in msg.entities or ())
-    ):
+    if not isinstance(date, datetime) or date.utcoffset() is None:
         return None
     occurred = date.timestamp()
     received = getattr(event, "created_at", None)
@@ -120,6 +124,17 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
         not math.isfinite(occurred) or not 0 < occurred <= time.time() + 300
         or type(received) not in (int, float) or not math.isfinite(received)
         or not 0 < received <= time.time() + 1
+    ):
+        return None
+    if inspect is not None:
+        inspect(login.bot_id, occurred, received, lambda: message_shape(msg))
+    if (
+        set(raw.to_dict()) - {"update_id", "message"} or set(msg.to_dict()) - MESSAGE_FIELDS or msg.api_kwargs
+        or any(getattr(msg, name, False) for name in (
+            "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
+        ))
+        or not isinstance(original, str) or not original.strip() or len(original) > 8000
+        or any(entity.type not in PLAIN_ENTITIES for entity in msg.entities or ())
     ):
         return None
     # AstrBot removes the Bot username suffix before dispatching a command.

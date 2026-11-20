@@ -672,6 +672,9 @@ function renderScope() {
   $("retry").disabled = !!unavailable || !!summary.maintenance || !!summary.bank_missing || locks.has("memory");
   $("retry").hidden = $("retry").disabled || !(counts.failed || counts.dead);
   $("scope-recall-status").textContent = recallDescription(summary.recall);
+  $("scope-skip-row").hidden = !summary.skip;
+  $("scope-skip-status").textContent = summary.skip
+    ? `${new Date(summary.skip.at * 1000).toLocaleString()} · ${summary.skip.message}` : "";
   $("maintenance-state").textContent = summary.bank_missing ? "找不到原记忆库，读写已暂停。请恢复原库，或清空旧记忆后重新开始。" : summary.maintenance ? "这个记忆库的插件读写已暂停。" : "";
   $("maintenance-state").hidden = !$("maintenance-state").textContent;
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;

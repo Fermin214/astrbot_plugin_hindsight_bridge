@@ -199,6 +199,77 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
+    async def test_skip_diagnostics_rank_identity_and_time_before_shape_and_ignore_other_senders(self):
+        plugin = self.plugin
+        queue = plugin.outbox
+        event = Mock()
+        event.is_private_chat.return_value = True
+        event.get_group_id.return_value = ""
+        event.get_platform_name.return_value = "aiocqhttp"
+        event.get_platform_id.return_value = "qq"
+        event.get_sender_id.return_value = "123"
+        shape = Mock(return_value="quoted_or_reply")
+        timestamp = self.incoming.timestamp + 2
+
+        def source_header(event, *, inspect=None):
+            inspect(bot, timestamp, time.time(), shape)
+
+        with patch.object(plugin, "source_header", side_effect=source_header) as header:
+            event.get_sender_id.return_value = "stranger"
+            plugin.record_skip(event, queue)
+            event.get_sender_id.return_value = "123"
+            event.get_group_id.return_value = "group"
+            plugin.record_skip(event, queue)
+            header.assert_not_called()
+            self.assertEqual(plugin.skip_outcomes, {})
+            event.get_group_id.return_value = ""
+            bot = "new-bot"
+            plugin.record_skip(event, queue)
+            self.assertEqual(plugin.skip_status("qq", "123")["code"], "bot_not_confirmed")
+            shape.assert_not_called()
+            bot = "456"
+            timestamp = self.incoming.timestamp - 1
+            plugin.record_skip(event, queue)
+            self.assertEqual(plugin.skip_status("qq", "123")["code"], "before_accept_from")
+            shape.assert_not_called()
+            timestamp = self.incoming.timestamp + 2
+            plugin.record_skip(event, queue)
+            outcome = plugin.skip_status("qq", "123")
+            self.assertEqual(outcome["code"], "quoted_or_reply")
+            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")]), {"code", "at"})
+            self.assertEqual(queue.summary(self.incoming.scope(queue.deployment_id).id)["counts"], {})
+            self.config["allowed_accounts"] = []
+            self.assertIsNone(plugin.skip_status("qq", "123"))
+
+    async def test_observer_resuming_after_reload_cannot_record_a_skip(self):
+        plugin = self.plugin
+        queue = plugin.outbox
+        event = Mock()
+        event.get_platform_name.return_value = "aiocqhttp"
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def prepare(platform):
+            entered.set()
+            await release.wait()
+
+        with patch.object(plugin, "source_header", return_value=self.incoming), \
+                patch.object(plugin, "prepare_sources", side_effect=prepare), \
+                patch.object(plugin, "record_skip") as record:
+            observation = asyncio.create_task(plugin.observe_incoming(event))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                plugin.outbox = object()
+                release.set()
+                await observation
+                record.assert_not_called()
+                self.assertEqual(plugin.skip_outcomes, {})
+                self.assertNotIn(event, plugin.incoming)
+            finally:
+                plugin.outbox = queue
+                if not observation.done():
+                    observation.cancel()
+                    await asyncio.gather(observation, return_exceptions=True)
+
     async def test_success_empty_and_failure_are_temporary_and_captured_durably(self):
         self.results = [{"id": "fact", "text": "coffee", "type": "world"}]
         event, req = self.turn()

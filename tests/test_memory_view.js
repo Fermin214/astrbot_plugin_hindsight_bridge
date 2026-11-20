@@ -793,6 +793,23 @@ test("connected service does not hide the user's recall failure", () => {
   assert.match(text, /增加召回等待时间/);
 });
 
+test("the last skip only appears for the selected user's recorded outcome", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderScope"), context);
+  context.data = { config: {}, scopes: [
+    { scope_id: "one", summary: { skip: { code: "quoted_or_reply", at: 1700000000, message: "引用或回复消息" } } },
+    { scope_id: "two", summary: {} },
+  ] };
+  context.scopeId = "one";
+  context.renderScope();
+  assert.equal(context.$("scope-skip-row").hidden, false);
+  assert.match(context.$("scope-skip-status").textContent, /引用或回复消息/);
+  context.scopeId = "two";
+  context.renderScope();
+  assert.equal(context.$("scope-skip-row").hidden, true);
+  assert.equal(context.$("scope-skip-status").textContent, "");
+});
+
 test("connection errors retain specific guidance and existing services hide models", () => {
   const context = harness();
   context.data = { config: { managed: false }, status: { connected: false, message: "连接密钥无效，请检查 API Key" }, scopes: [] };

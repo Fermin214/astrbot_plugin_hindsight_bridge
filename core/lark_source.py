@@ -90,7 +90,15 @@ def bound_login(event, adapter, binding):
     return login
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding):
+def message_shape(raw):
+    if raw.parent_id or raw.root_id or getattr(raw, "thread_id", None):
+        return "quoted_or_reply"
+    if raw.message_type != "text" or raw.mentions:
+        return "media_or_non_text"
+    return "unsupported_message"
+
+
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
     from lark_oapi.api.im.v1 import EventMessage
 
@@ -101,12 +109,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
     ):
         return None
     raw = getattr(event.message_obj, "raw_message", None)
-    if (
-        type(raw) is not EventMessage or raw.chat_type != "p2p"
-        or raw.message_type != "text" or not identifier(raw.chat_id)
-        or raw.parent_id or raw.root_id or getattr(raw, "thread_id", None)
-        or raw.mentions or getattr(raw, "lark_agent_context", None) is not None
-    ):
+    if type(raw) is not EventMessage or raw.chat_type != "p2p" or not identifier(raw.chat_id):
         return None
     occurred = milliseconds(raw.create_time)
     updated = milliseconds(raw.update_time)
@@ -123,6 +126,19 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
         not identifier(user) or not user.startswith("ou_") or user == login.open_id
         or not identifier(mid) or mid in {"0", "None"}
         or mid != event.message_obj.message_id
+    ):
+        return None
+    received = getattr(event, "created_at", None)
+    if (
+        type(received) not in (int, float) or not math.isfinite(received)
+        or not 0 < received <= time.time() + 1
+    ):
+        return None
+    if inspect is not None:
+        inspect(login.bot_id, occurred / 1000, received, lambda: message_shape(raw))
+    if (
+        raw.message_type != "text" or raw.parent_id or raw.root_id or getattr(raw, "thread_id", None)
+        or raw.mentions or getattr(raw, "lark_agent_context", None) is not None
         or not isinstance(raw.content, str) or len(raw.content) > 64_000
     ):
         return None
@@ -150,11 +166,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
             for prefix in wake_prefixes if isinstance(prefix, str) and prefix
         )
     )
-    received = getattr(event, "created_at", None)
-    if (
-        not matching or type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
+    if not matching:
         return None
     return Incoming(
         "lark", event.get_platform_id(), login.bot_id, user, mid,

@@ -643,6 +643,11 @@ class MemoryPanel:
             }
             summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
             summary["recall"] = plugin.recall_status(scope) if queue and not scope.get("pending") else None
+            account = (scope["platform_instance_id"], scope["user_id"])
+            if account in accounts and (not scope.get("historical") or scope.get("availability") == "disconnected"):
+                skipped = plugin.skip_status(*account)
+                if skipped:
+                    summary["skip"] = skipped
             if summary["recall"]:
                 summary["recall"]["error_message"] = (
                     self.error_message(summary["recall"]["code"]) if summary["recall"]["code"] else ""

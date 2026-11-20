@@ -41,8 +41,18 @@ from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.reading import chat_records
 from .core.reflection import Reflection
-from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity
+from .core.source import inspect_header, local_runner, native_login, platform_details, prepare_bot_identity
 from .core.worker import Worker
+
+
+SKIP_MESSAGES = {
+    "bot_not_confirmed": "机器人未连接或身份未确认",
+    "before_accept_from": "消息早于开通或恢复时间",
+    "quoted_or_reply": "引用或回复消息",
+    "media_or_non_text": "包含媒体或非纯文字内容",
+    "command_prefix": "命令或排除前缀",
+    "unsupported_message": "不支持的消息格式",
+}
 
 
 class HindsightBridge(Star):
@@ -58,6 +68,7 @@ class HindsightBridge(Star):
         self.status = "未配置"
         self.warning_log = WarningLog(logger)
         self.recall_outcomes = {}
+        self.skip_outcomes = {}
         self.background_outcomes = {}
         self.background_sequence = 0
         self.background_sequences = {}
@@ -198,6 +209,7 @@ class HindsightBridge(Star):
                 return
             self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer)
             self.recall_outcomes.clear()
+            self.skip_outcomes.clear()
             self.background_outcomes.clear()
             self.background_sequences.clear()
             self.outbox = Outbox(
@@ -269,6 +281,8 @@ class HindsightBridge(Star):
             accounts = frozenset()
         if self.outbox is not None and accounts != self.outbox.permission_pairs:
             self.outbox.sync_permissions(accounts)
+            self.skip_outcomes = {account: value for account, value in self.skip_outcomes.items()
+                                  if account in accounts}
             self.permissions = accounts
             self.permission_revision += 1
         if self.outbox is not None:
@@ -389,28 +403,83 @@ class HindsightBridge(Star):
             return incoming
         return None
 
-    def source_header(self, event):
+    def source_header(self, event, *, inspect=None):
         getter = getattr(self.context, "get_platform_inst", None)
         adapter = getter(event.get_platform_id()) if getter else None
         if getter and adapter is None:
             return None
-        return native_header(
+        return inspect_header(
             event, Plain, self.context.get_config().get("wake_prefix", []),
-            adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()),
+            adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()), inspect=inspect,
         )
+
+    def excluded_prefix(self, text):
+        prefixes = ("/", *self.config.get("command_prefixes", []))
+        return any(text.lstrip().startswith(prefix) for prefix in prefixes if prefix)
 
     def snapshot(self, event):
         incoming = self.authorized_source(event)
-        if incoming is None:
+        return incoming if incoming is not None and not self.excluded_prefix(incoming.text) else None
+
+    def record_skip(self, event, queue):
+        if self.outbox is not queue or self.stopping or not event.is_private_chat() or event.get_group_id():
+            return
+        account = (event.get_platform_id(), event.get_sender_id())
+        platform = platform_details(event.get_platform_name())
+        if not platform["supported"]:
+            return
+        try:
+            if account not in pairs(self.config.get("allowed_accounts", [])):
+                return
+        except ValueError:
+            return
+        code = "bot_not_confirmed"
+        classify = None
+
+        def inspect(bot, timestamp, received, message_shape):
+            nonlocal code, classify
+            platform_id, user_id = account
+            incoming = Incoming(platform["logical_type"], platform_id, bot, user_id,
+                                "", timestamp, "", received_at=received)
+            identity = incoming.scope(queue.deployment_id)
+            if (
+                queue.permission_pairs is None or account not in queue.permission_pairs
+                or getattr(self.context, "get_platform_inst", None) is not None
+                and self.source_accounts.get(account[0], {}).get("bot_id") != bot
+                or not queue.access.permitted(identity)
+            ):
+                return
+            scope = queue.scope_owner(identity.id)
+            if not queue.accepts(incoming) or scope and timestamp < scope["accept_from"]:
+                code = "before_accept_from"
+                return
+            classify = message_shape
+
+        incoming = self.source_header(event, inspect=inspect)
+        if incoming and incoming.text.strip().split() == ["/hindsight", "status"]:
+            return
+        if classify is not None:
+            if incoming and self.excluded_prefix(incoming.text):
+                code = "command_prefix"
+            else:
+                code = classify()
+        self.skip_outcomes[account] = {"code": code, "at": time.time()}
+
+    def skip_status(self, platform, user):
+        if self.outbox is None or self.stopping:
             return None
-        prefixes = ("/", *self.config.get("command_prefixes", []))
-        return incoming if not any(
-            incoming.text.lstrip().startswith(prefix) for prefix in prefixes if prefix
-        ) else None
+        try:
+            if (platform, user) not in pairs(self.config.get("allowed_accounts", [])):
+                return None
+        except ValueError:
+            return None
+        outcome = self.skip_outcomes.get((platform, user))
+        return {**outcome, "message": SKIP_MESSAGES[outcome["code"]]} if outcome else None
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
-        if self.outbox is not None and not self.stopping and event not in self.incoming:
+        queue = self.outbox
+        if queue is not None and not self.stopping and event not in self.incoming:
             if event.get_platform_name() == "aiocqhttp":
                 header = self.source_header(event)
                 if (
@@ -418,9 +487,16 @@ class HindsightBridge(Star):
                     and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
                 ):
                     await self.prepare_sources(header.platform_instance_id)
+            if self.outbox is not queue or self.stopping:
+                return
             incoming = self.snapshot(event)
             if incoming:
                 self.incoming[event] = incoming
+                scope = queue.scope_owner(incoming.scope(queue.deployment_id).id)
+                if scope and incoming.timestamp < scope["accept_from"]:
+                    self.record_skip(event, queue)
+            else:
+                self.record_skip(event, queue)
 
     def warning(self, label):
         self.status = label
@@ -1191,7 +1267,11 @@ class HindsightBridge(Star):
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
-            yield event.plain_result(f"Hindsight：{self.status}；当前私聊未开放记忆。")
+            skipped = self.skip_status(event.get_platform_id(), event.get_sender_id()) if (
+                event.is_private_chat() and not event.get_group_id()
+            ) else None
+            skip_line = f"\n最近跳过：{skipped['message']}" if skipped else ""
+            yield event.plain_result(f"Hindsight：{self.status}；当前私聊未开放记忆。{skip_line}")
             return
         async with self.using_resources():
             stats = {}
@@ -1255,6 +1335,8 @@ class HindsightBridge(Star):
                 f"{r['id']}（{task_labels.get(r['state'], r['state'])}）"
                 for r in summary["tasks"]
             ) or "无"
+            skipped = self.skip_status(scope["platform_instance_id"], scope["user_id"])
+            skip_line = f"最近跳过：{skipped['message']}\n" if skipped else ""
             yield event.plain_result(
                 f"Hindsight：{connection}\n{runner}；模式：{modes[scope['mode']]}\n"
                 f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
@@ -1270,6 +1352,7 @@ class HindsightBridge(Star):
                 f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
                 f"最近记录状态：{self.status}\n"
                 f"最近记忆检索：{recall_description(self.recall_status(scope))}\n"
+                f"{skip_line}"
                 "常用操作：/hindsight help"
             )
 
@@ -1523,6 +1606,7 @@ class HindsightBridge(Star):
         self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()
+        self.skip_outcomes.clear()
         self.source_accounts.clear()
         self.handled.clear()
         self.pending_assistant_captures.clear()

@@ -65,7 +65,21 @@ def bound_client(event, adapter):
     return None
 
 
-def header(event, plain_type, wake_prefixes, adapter):
+def message_shape(segments):
+    if not isinstance(segments, list):
+        return "unsupported_message"
+    types = {
+        segment["type"] for segment in segments
+        if isinstance(segment, Mapping) and isinstance(segment.get("type"), str)
+    }
+    if "reply" in types:
+        return "quoted_or_reply"
+    if types - {"text"}:
+        return "media_or_non_text"
+    return "unsupported_message"
+
+
+def header(event, plain_type, wake_prefixes, adapter, *, inspect=None):
     if not event.is_private_chat() or event.get_group_id():
         return None
     if adapter is not None and bound_client(event, adapter) is None:
@@ -83,7 +97,19 @@ def header(event, plain_type, wake_prefixes, adapter):
     mid = str(getattr(event.message_obj, "message_id", "") or "")
     if not mid or mid in {"0", "None"} or str(raw.get("message_id")) != mid:
         return None
+    timestamp = raw.get("time")
+    if isinstance(timestamp, str) and timestamp.isdecimal():
+        timestamp = int(timestamp)
+    received = getattr(event, "created_at", None)
+    if (
+        type(timestamp) is not int or not 0 < timestamp <= time.time() + 300
+        or type(received) not in (int, float) or not math.isfinite(received)
+        or not 0 < received <= time.time() + HOST_CLOCK_TOLERANCE
+    ):
+        return None
     segments, components = raw.get("message"), event.get_messages()
+    if inspect is not None:
+        inspect(fields[1], timestamp, received, lambda: message_shape(segments))
     if not isinstance(segments, list) or not segments or not components:
         return None
     texts = []
@@ -113,17 +139,6 @@ def header(event, plain_type, wake_prefixes, adapter):
         or not matching_text
         or not original.strip()
         or len(original) > 8000
-    ):
-        return None
-    timestamp = raw.get("time")
-    if isinstance(timestamp, str) and timestamp.isdecimal():
-        timestamp = int(timestamp)
-    if type(timestamp) is not int or not 0 < timestamp <= time.time() + 300:
-        return None
-    received = getattr(event, "created_at", None)
-    if (
-        type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + HOST_CLOCK_TOLERANCE
     ):
         return None
     return Incoming("aiocqhttp", *fields, mid, timestamp, original, received_at=received)

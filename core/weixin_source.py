@@ -95,16 +95,26 @@ def bound_login(event, adapter, binding):
     return login
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding):
+def message_shape(raw, items):
+    entries = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+    if raw.get("root_id") or raw.get("parent_id") or any(item.get("ref_msg") is not None for item in entries):
+        return "quoted_or_reply"
+    if any(
+        item.get("type") not in (None, 1)
+        or any(item.get(name) is not None for name in NON_TEXT_FIELDS - {"ref_msg"})
+        or any(item.get(name) for name in EMPTY_LIST_FIELDS)
+        for item in entries
+    ):
+        return "media_or_non_text"
+    return "unsupported_message"
+
+
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
     raw = event.message_obj.raw_message
-    if (
-        set(raw) - MESSAGE_FIELDS or raw.get("group_id")
-        or any(value is not None and (type(value) is not int or value != 0)
-               for value in (raw.get("root_id"), raw.get("parent_id")))
-    ):
+    if raw.get("group_id"):
         return None
     if type(raw.get("message_type")) is not int or raw["message_type"] != 1:
         return None
@@ -127,7 +137,20 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
         or not 0 < int(mid) < 2**64 or str(mid) != event.message_obj.message_id
     ):
         return None
+    received = getattr(event, "created_at", None)
+    if (
+        type(received) not in (int, float) or not math.isfinite(received)
+        or not 0 < received <= time.time() + 1
+    ):
+        return None
     items, parts = raw.get("item_list"), event.get_messages()
+    if inspect is not None:
+        inspect(login.account_id, occurred / 1000, received, lambda: message_shape(raw, items))
+    if set(raw) - MESSAGE_FIELDS or any(
+        value is not None and (type(value) is not int or value != 0)
+        for value in (raw.get("root_id"), raw.get("parent_id"))
+    ):
+        return None
     if not isinstance(items, list) or not items or len(items) > 8000 or not isinstance(parts, list):
         return None
     texts, length = [], 0
@@ -169,11 +192,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
             )
         )
     )
-    received = getattr(event, "created_at", None)
-    if (
-        not matching or type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
+    if not matching:
         return None
     return Incoming(
         "weixin_oc", event.get_platform_id(), login.account_id, user, str(mid),

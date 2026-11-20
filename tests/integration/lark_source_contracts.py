@@ -71,7 +71,7 @@ async def main(output):
     from astrbot.core.message.components import Plain
     from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
     from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-        native_header, native_login, prepare_bot_identity,
+        inspect_header, native_header, native_login, prepare_bot_identity,
     )
 
     assert VERSION == os.environ.get("ASTRBOT_TEST_VERSION", "4.29.4"), VERSION
@@ -122,6 +122,15 @@ async def main(output):
             sample = await fixture.event()
             setattr(sample.message_obj.raw_message, field, value)
             assert header(sample) is None, (mode, field, type(value))
+            expected = {
+                "message_type": "media_or_non_text", "parent_id": "quoted_or_reply",
+                "root_id": "quoted_or_reply", "thread_id": "quoted_or_reply",
+            }.get(field)
+            if expected:
+                reasons = []
+                assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding,
+                                      inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                assert reasons == [expected]
         passed.append(mode + "_media_references_edits_unknown_chat_invalid_ids_and_times_rejected")
         sample = await fixture.event()
         sample.message_obj.raw_message.update_time = sample.message_obj.raw_message.create_time

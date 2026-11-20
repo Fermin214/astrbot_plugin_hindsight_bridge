@@ -147,7 +147,17 @@ def timestamp(value):
         return None
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding):
+def message_shape(data):
+    if data.get("message_reference") is not None or (
+        data.get("message_type") == 103 and data.get("parallel_message")
+    ):
+        return "quoted_or_reply"
+    if data.get("attachments") or data.get("msg_elements") or data.get("message_type") != 0:
+        return "media_or_non_text"
+    return "unsupported_message"
+
+
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
@@ -159,30 +169,40 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
     ):
         return None
     data = getattr(raw, "raw_data", None)
-    if not isinstance(data, Mapping) or set(data) - TEXT_FIELDS:
-        return None
-    if type(data.get("message_type")) is not int or data["message_type"] != 0:
-        return None
-    for name in ("attachments", "msg_elements"):
-        if name in data and data[name] is not None:
-            if not isinstance(data[name], list) or data[name]:
-                return None
-    if data.get("message_reference") is not None:
+    if not isinstance(data, Mapping):
         return None
     author = data.get("author")
     if not isinstance(author, Mapping) or author.get("bot") is not False:
         return None
     user, mid, original = author.get("user_openid"), data.get("id"), data.get("content")
     if (
-        not all(isinstance(value, str) and value for value in (user, mid, original))
+        not all(isinstance(value, str) and value for value in (user, mid))
         or ":" in user or any(ord(char) < 32 or ord(char) == 127 for char in user)
         or mid in {"0", "None"} or user != event.get_sender_id()
         or user != getattr(getattr(raw, "author", None), "user_openid", None)
         or mid != getattr(raw, "id", None) or mid != event.message_obj.message_id
-        or original != getattr(raw, "content", None)
-        or not original.strip() or len(original) > 8000
     ):
         return None
+    occurred = timestamp(data.get("timestamp"))
+    received = getattr(event, "created_at", None)
+    if (
+        occurred is None or data["timestamp"] != getattr(raw, "timestamp", None)
+        or type(received) not in (int, float) or not math.isfinite(received)
+        or not 0 < received <= time.time() + 1
+    ):
+        return None
+    if inspect is not None:
+        inspect(login.appid, occurred, received, lambda: message_shape(data))
+    if (
+        set(data) - TEXT_FIELDS or type(data.get("message_type")) is not int or data["message_type"] != 0
+        or data.get("message_reference") is not None or not isinstance(original, str)
+        or original != getattr(raw, "content", None) or not original.strip() or len(original) > 8000
+    ):
+        return None
+    for name in ("attachments", "msg_elements"):
+        if name in data and data[name] is not None:
+            if not isinstance(data[name], list) or data[name]:
+                return None
     components = event.get_messages()
     if (
         not isinstance(components, list) or len(components) != 2
@@ -202,14 +222,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding):
             for prefix in wake_prefixes if isinstance(prefix, str) and prefix
         )
     )
-    occurred = timestamp(data.get("timestamp"))
-    if not matching or occurred is None or data["timestamp"] != getattr(raw, "timestamp", None):
-        return None
-    received = getattr(event, "created_at", None)
-    if (
-        type(received) not in (int, float) or not math.isfinite(received)
-        or not 0 < received <= time.time() + 1
-    ):
+    if not matching:
         return None
     return Incoming("qq_official", event.get_platform_id(), login.appid,
                     user, mid, occurred, original, received_at=received)
