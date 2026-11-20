@@ -94,17 +94,37 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.record_skip(timestamp_error, queue)
         previous = self.plugin.skip_status("qq", "2001")
         self.assertEqual(previous["code"], "unsupported_message")
+        self.assertIn("请检查平台和 AstrBot 的时钟", previous["message"])
 
         self.context.get_config = lambda *args: {
             "platform": [{"id": "qq", "type": "aiocqhttp"}], "wake_prefix": ["!"],
         }
         self.config["command_prefixes"] = ["!"]
-        status = self.event("!hindsight status")
-        status.get_message_str = lambda: "hindsight status"
+        status = self.event("!hindsight status extra")
+        status.get_message_str = lambda: "hindsight status extra"
         status.is_at_or_wake_command = True
         self.assertIsNone(self.plugin.snapshot(status))
         self.plugin.record_skip(status, queue)
         self.assertEqual(self.plugin.skip_status("qq", "2001"), previous)
+
+    async def test_reconfirmed_bot_does_not_inherit_skip_from_queued_old_login(self):
+        queue = self.plugin.outbox
+        old_event = self.event()
+        old_event.message_obj.raw_message["message"].append({"type": "reply", "data": {}})
+        self.plugin.record_skip(old_event, queue)
+        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "quoted_or_reply")
+
+        self.bot.get_login_info.return_value = {"user_id": 1002}
+        await self.plugin.prepare_sources()
+        grant = queue.access.authorization("qq", "2001")
+        queue.activate(replace(self.incoming, bot_id="1002"), grant["revision"])
+        self.assertIsNone(self.plugin.skip_status("qq", "2001"))
+        self.plugin.record_skip(old_event, queue)
+        self.assertIsNone(self.plugin.skip_status("qq", "2001"))
+        new_event = self.event(bot=1002)
+        new_event.message_obj.raw_message["message"].append({"type": "image", "data": {}})
+        self.plugin.record_skip(new_event, queue)
+        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "media_or_non_text")
 
     async def test_native_forget_waits_for_upgrade_including_an_earlier_confirmation(self):
         panel = self.plugin.panel

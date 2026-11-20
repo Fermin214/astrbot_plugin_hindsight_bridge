@@ -236,7 +236,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             plugin.record_skip(event, queue)
             outcome = plugin.skip_status("qq", "123")
             self.assertEqual(outcome["code"], "quoted_or_reply")
-            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")][1]), {"code", "at"})
+            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")][-1]), {"code", "at"})
             self.assertEqual(queue.summary(self.incoming.scope(queue.deployment_id).id)["counts"], {})
             self.assertTrue(queue.access.observe_bot("qq", "aiocqhttp", "new-bot"))
             self.assertIsNone(plugin.skip_status("qq", "123"))
@@ -348,7 +348,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.wait_for(callback, 2)
         self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
-        prior = queue.capture_assistant(queued_turn["task_id"], "already saved assistant context")
+        prior = queue.capture_assistant(queued_turn["task_id"], "already saved assistant context " + "字" * 4100)
         queue.release(prior.task_id)
 
         event, request = self.turn("disabled")
@@ -364,6 +364,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.db.execute("SELECT released FROM outbox ORDER BY id").fetchall()[-1][0], 1)
         payload = json.loads(queue.db.execute("SELECT payload FROM outbox ORDER BY id DESC LIMIT 1").fetchone()[0])
         self.assertNotIn("already saved assistant context", payload["items"][0]["content"])
+        self.assertRegex(payload["items"][0]["content"], r"【历史语境】\n\[user;[^\n]+\]\nhello")
 
         settings(True)
         event, request = self.turn("reenabled")

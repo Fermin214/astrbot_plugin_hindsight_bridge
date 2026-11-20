@@ -34,7 +34,7 @@ from .core.dialogue import (
     history_messages,
     persistent_messages,
 )
-from .core.identity import Incoming, sha256
+from .core.identity import Incoming, Scope, sha256
 from .core.materials import DEFAULT_MEMORY_PROMPT, TokenizerError, load_encoding, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
@@ -52,7 +52,7 @@ SKIP_MESSAGES = {
     "quoted_or_reply": "引用或回复消息",
     "media_or_non_text": "包含媒体或非纯文字内容",
     "command_prefix": "命令或排除前缀",
-    "unsupported_message": "不支持的消息格式或时间",
+    "unsupported_message": "不支持的消息格式",
 }
 
 
@@ -434,26 +434,35 @@ class HindsightBridge(Star):
                 return
         except ValueError:
             return
+        platform_id, user_id = account
         grant = queue.access.authorization(*account)
-        code = "bot_not_confirmed"
+        getter = getattr(self.context, "get_platform_inst", None)
+        binding = self.source_accounts.get(platform_id, {})
+        bot_id = binding.get("bot_id")
+        active_source = Scope(queue.deployment_id, platform["logical_type"], platform_id, bot_id, user_id) if bot_id else None
+        confirmed = (
+            grant and grant["enabled"] and active_source and grant["source_id"] == active_source.id
+            and getter and getter(platform_id) is binding.get("adapter") and binding.get("adapter") is not None
+        )
+        code = None
+        invalid_time = False
         classify = None
 
         def inspect(bot, timestamp, received, message_shape):
-            nonlocal code, classify
-            platform_id, user_id = account
-            incoming = Incoming(platform["logical_type"], platform_id, bot, user_id,
-                                "", timestamp, "", received_at=received)
-            identity = incoming.scope(queue.deployment_id)
+            nonlocal code, classify, invalid_time
+            identity = Scope(queue.deployment_id, platform["logical_type"], platform_id, bot, user_id)
             if (
                 queue.permission_pairs is None or account not in queue.permission_pairs
-                or getattr(self.context, "get_platform_inst", None) is not None
-                and self.source_accounts.get(account[0], {}).get("bot_id") != bot
+                or getter is not None and bot_id != bot
                 or not grant or not grant["enabled"] or grant["source_id"] != identity.id
             ):
                 return
             if timestamp is None:
                 code = "unsupported_message"
+                invalid_time = True
                 return
+            incoming = Incoming(platform["logical_type"], platform_id, bot, user_id,
+                                "", timestamp, "", received_at=received)
             scope = queue.scope_owner(identity.id)
             if not queue.accepts(incoming) or scope and timestamp < scope["accept_from"]:
                 code = "before_accept_from"
@@ -462,9 +471,9 @@ class HindsightBridge(Star):
 
         incoming = self.source_header(event, inspect=inspect)
         if incoming:
-            if incoming.text.strip().split() == ["/hindsight", "status"] or (
+            if incoming.text.split()[:2] == ["/hindsight", "status"] or (
                 getattr(event, "is_at_or_wake_command", False) is True
-                and event.get_message_str().strip().split() == ["hindsight", "status"]
+                and event.get_message_str().split()[:2] == ["hindsight", "status"]
             ):
                 return
         if classify is not None:
@@ -472,7 +481,11 @@ class HindsightBridge(Star):
                 code = "command_prefix"
             else:
                 code = classify()
-        self.skip_outcomes[account] = (grant["revision"] if grant else None, {"code": code, "at": time.time()})
+        if code is None:
+            if confirmed:
+                return
+            code = "bot_not_confirmed"
+        self.skip_outcomes[account] = (grant["revision"] if grant else None, invalid_time, {"code": code, "at": time.time()})
 
     def skip_status(self, platform, user):
         if self.outbox is None or self.stopping:
@@ -485,11 +498,12 @@ class HindsightBridge(Star):
         record = self.skip_outcomes.get((platform, user))
         if record is None:
             return None
-        revision, outcome = record
+        revision, invalid_time, outcome = record
         grant = self.outbox.access.authorization(platform, user)
         if revision != (grant["revision"] if grant else None):
             return None
-        return {**outcome, "message": SKIP_MESSAGES[outcome["code"]]}
+        message = "消息时间异常，请检查平台和 AstrBot 的时钟" if invalid_time else SKIP_MESSAGES[outcome["code"]]
+        return {**outcome, "message": message}
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
