@@ -8,19 +8,7 @@ import shutil
 import subprocess
 import zipfile
 
-
-def distribution_files(root, files):
-    paths = set(files)
-    parents = {}
-    for name in files:
-        parents[name] = [parent.as_posix() + "/" for parent in Path(name).parents if parent != Path(".")]
-        paths.update(parents[name])
-    attributes = subprocess.check_output(
-        ["git", "check-attr", "-z", "--stdin", "export-ignore"], cwd=root,
-        input=("\0".join(sorted(paths)) + "\0").encode(),
-    ).decode().split("\0")
-    ignored = {attributes[i] for i in range(0, len(attributes) - 1, 3) if attributes[i + 2] == "set"}
-    return [name for name in files if not ignored.intersection([name, *parents[name]])]
+from distribution import working_tree_files
 
 
 def main():
@@ -51,12 +39,7 @@ def main():
             cwd=root, check=True,
         )
     else:
-        names = subprocess.check_output(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root,
-        ).decode().split("\0")
-        files = sorted({name for name in names if name and (root / name).is_file()})
-        if args.distribution:
-            files = distribution_files(root, files)
+        files = working_tree_files(root, distribution=args.distribution)
         for name in files:
             if (root / name).is_symlink():
                 parser.error("candidate packages must not contain symlinks: " + name)
