@@ -23,12 +23,12 @@ from .diagnostics import (
 )
 from .identity import Incoming, Scope, sha256
 from .installer import (
-    HINDSIGHT_VERSION, SUPPORTED_VERSIONS, installation, local_installation_supported, uninstallation,
+    HINDSIGHT_VERSION, SUPPORTED_VERSIONS, UPGRADE_PATHS, installation, local_installation_supported, uninstallation,
 )
 from .managed_connections import ManagedConnections, PanelError
 from .outbox import QueueError
 from .permissions import pairs
-from .source import local_runner, platform_details, prepare_bot_identity, valid_user_id
+from .source import local_runner, management_bot_identity, platform_details, valid_user_id
 from . import settings
 from .materials import TokenizerError, load_encoding, token_count
 from .reference import PROMPT_TOKEN_LIMIT, reference_options, save_reference_options
@@ -372,7 +372,7 @@ class MemoryPanel:
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                 raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
             result.update(version=version, supported=version in SUPPORTED_VERSIONS,
-                          upgrade_available=local_installation and managed and version == "1.1.0")
+                          upgrade_available=local_installation and managed and UPGRADE_PATHS.get(version) == HINDSIGHT_VERSION)
         except (HindsightError, TimeoutError, PanelError):
             result["message"] = "暂时无法核对服务版本，请检查连接后重试。"
         if plugin.client is not client or plugin.stopping:
@@ -517,7 +517,7 @@ class MemoryPanel:
             if action in {"verify", "resume"}:
                 check = state.get("upgrade_check")
                 if not check or status["version"] != HINDSIGHT_VERSION:
-                    raise PanelError("尚未确认服务升级到 1.2.0；保持保存和查询暂停，执行命令后再核对。")
+                    raise PanelError(f"尚未确认服务升级到 {HINDSIGHT_VERSION}；保持保存和查询暂停，执行命令后再核对。")
                 if action == "resume" and not check.get("verified"):
                     raise PanelError("请先点击「核对升级结果」，确认版本与原记忆库后再解除暂停。")
                 inspected = await verify_original(check, allow_running=action == "resume")
@@ -535,8 +535,8 @@ class MemoryPanel:
                            "版本与原记忆库核对通过。旧版安装记录未区分暂停来源，请在用户与记忆中逐个查看暂停状态并解除读写暂停。")
                 return {"message": message,
                         "config_revision": self.config_revision(), "verified": True}
-            if status["version"] != "1.1.0":
-                raise PanelError("此升级入口只支持实际运行的 Hindsight 1.1.0；请重新检查版本。")
+            if UPGRADE_PATHS.get(status["version"]) != HINDSIGHT_VERSION:
+                raise PanelError(f"此升级入口只支持实际运行的 Hindsight {'、'.join(UPGRADE_PATHS)}；请重新检查版本。")
             if action == "cancel":
                 if state.get("upgrade_check"):
                     inspected = await verify_original(state["upgrade_check"], allow_running=True)
@@ -546,7 +546,7 @@ class MemoryPanel:
                 state.pop("upgrade_check", None)
                 self.store_state(state)
                 self.version_cache = None
-                return {"message": f"继续使用 1.1.0，已解除升级造成的 {count} 个用户暂停。原有暂停保留；已复制的升级命令不会撤销，请勿再执行。",
+                return {"message": f"继续使用 {status['version']}，已解除升级造成的 {count} 个用户暂停。原有暂停保留；已复制的升级命令不会撤销，请勿再执行。",
                         "config_revision": self.config_revision()}
             if action == "begin":
                 pauses = state.setdefault("upgrade_pauses", {
@@ -577,7 +577,7 @@ class MemoryPanel:
                                   container_hostname=socket.gethostname() if Path("/.dockerenv").exists() else "",
                                   setup_path=str(self.directory() / "setup.json"),
                                   upgrade=True)
-            state["upgrade_check"] = {"banks": banks, "verified": False, "from": "1.1.0", "to": HINDSIGHT_VERSION,
+            state["upgrade_check"] = {"banks": banks, "verified": False, "from": status["version"], "to": HINDSIGHT_VERSION,
                                       "connection_id": queue.connection_id,
                                       "embedding_fingerprint": managed_status["embedding_fingerprint"]}
             self.store_state(state)
@@ -739,12 +739,7 @@ class MemoryPanel:
         return result
 
     async def bot_id(self, platform):
-        contract = next((row for row in self.platforms() if row["id"] == platform), None)
-        if contract and contract["logical_type"] in {"qq_official", "weixin_oc", "telegram", "lark"}:
-            await self.plugin.prepare_sources()
-            identity = self.plugin.source_accounts.get(platform, {}).get("bot_id", "")
-        else:
-            identity = await prepare_bot_identity(self.plugin.context, platform)
+        identity = await management_bot_identity(self.plugin, platform)
         queue = self.plugin.outbox
         if identity and queue:
             contract = next((row for row in self.platforms() if row["id"] == platform), None)
@@ -1015,10 +1010,10 @@ class MemoryPanel:
                 self.require_managed()
             status = await self.service_status()
             if status.get("managed") and status.get("upgrade_available"):
-                raise PanelError("当前服务为 1.1.0，请使用「升级 Hindsight」暂停保存和查询、备份并升级。")
+                raise PanelError(f"当前服务为 {status['version']}，请使用「升级 Hindsight」暂停保存和查询、备份并升级。")
             if (status.get("managed") and status.get("version") is None
                     and self.plugin.config.get("api_url") and payload.get("repair") is not True):
-                raise PanelError("无法确认已有服务版本。请恢复连接；重新部署命令只会替换实际确认的 1.2.0 服务，不会升级未知版本。")
+                raise PanelError(f"无法确认已有服务版本。请恢复连接；重新部署命令只会替换实际确认的 {HINDSIGHT_VERSION} 服务，不会升级未知版本。")
             state = self.state(create=True)
             if "control_plane_url" in payload:
                 state["control_plane_url"] = self.control_plane_url(payload["control_plane_url"])
@@ -1080,7 +1075,7 @@ class MemoryPanel:
             return {**result, "message": "配套组件已安装，请先选择模型并点击「保存并连接」。"}
         version = await self.managed_backend_version(state)
         return {**result, "version": version, "supported": version in SUPPORTED_VERSIONS,
-                "upgrade_available": version == "1.1.0"}
+                "upgrade_available": UPGRADE_PATHS.get(version) == HINDSIGHT_VERSION}
 
     async def managed_backend_version(self, state):
         client = HindsightClient(state["api_url"], state["api_key"])

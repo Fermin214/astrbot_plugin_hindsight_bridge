@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from types import ModuleType
 
+from . import lark_source, onebot_source, qq_source, telegram_source, weixin_source
 from .identity import Incoming
 
 
@@ -8,28 +10,40 @@ class Platform:
     logical_type: str
     user_label: str
     user_hint: str
+    source: ModuleType
     numeric: bool = False
+    login_id: str = ""
+    app_id_setting: str = ""
+    pin_client_login: bool = False
+
+    def bot_id(self, login, record=None):
+        if not login or (record is not None and self.app_id_setting
+                         and login.appid != record.get(self.app_id_setting)):
+            return ""
+        return getattr(login, self.login_id)
 
 
+QQ_OFFICIAL = Platform(
+    "qq_official", "用户 OpenID", "填写 /sid 中的用户 UID（OpenID，不是 QQ 号）",
+    qq_source, login_id="appid", app_id_setting="appid", pin_client_login=True,
+)
 PLATFORMS = {
     "aiocqhttp": Platform(
-        "aiocqhttp", "用户 QQ 号", "与这个机器人私聊的 QQ 号", True,
+        "aiocqhttp", "用户 QQ 号", "与这个机器人私聊的 QQ 号", onebot_source, numeric=True,
     ),
-    "qq_official": Platform(
-        "qq_official", "用户 OpenID", "填写 /sid 中的用户 UID（OpenID，不是 QQ 号）",
-    ),
-    "qq_official_webhook": Platform(
-        "qq_official", "用户 OpenID", "填写 /sid 中的用户 UID（OpenID，不是 QQ 号）",
-    ),
+    "qq_official": QQ_OFFICIAL,
+    "qq_official_webhook": QQ_OFFICIAL,
     "weixin_oc": Platform(
         "weixin_oc", "ClawBot 用户 UID", "填写微信私聊 /sid 中的用户 UID",
+        weixin_source, login_id="account_id",
     ),
     "lark": Platform(
         "lark", "用户 OpenID", "填写飞书私聊 /sid 中的用户 UID（ou_ 开头）",
+        lark_source, login_id="bot_id", app_id_setting="app_id",
     ),
     "telegram": Platform(
         "telegram", "Telegram 用户 ID", "填写 Telegram 私聊 /sid 中的用户 UID",
-        True,
+        telegram_source, numeric=True, login_id="bot_id",
     ),
 }
 TIME_SOURCES = {
@@ -39,8 +53,6 @@ TIME_SOURCES = {
     "lark": "lark.create_time",
     "telegram": "telegram.message.date",
 }
-# Host queue timestamps use this process's wall clock, unlike platform clocks.
-HOST_CLOCK_TOLERANCE = 1.0
 
 
 def platform_details(host_type):
@@ -72,89 +84,52 @@ def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=
 
 
 def inspect_header(event, plain_type, wake_prefixes, *, adapter, binding, inspect=None):
-    host_type = event.get_platform_name()
-    if host_type not in PLATFORMS:
+    contract = PLATFORMS.get(event.get_platform_name())
+    if not contract:
         return None
-    if host_type == "lark":
-        from .lark_source import header
-
-        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
-    if host_type in {"qq_official", "qq_official_webhook"}:
-        from .qq_source import header
-
-        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
-    if host_type == "weixin_oc":
-        from .weixin_source import header
-
-        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
-    if host_type == "telegram":
-        from .telegram_source import header
-
-        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
-    if host_type == "aiocqhttp":
-        from .onebot_source import header
-
-        return header(event, plain_type, wake_prefixes, adapter, inspect=inspect)
-    return None
+    return contract.source.header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
 
 
 def native_login(adapter):
     """Read each native adapter's login without keeping its credentials."""
     try:
-        if adapter.meta().name == "lark":
-            from .lark_source import native_login as lark_login
-
-            return lark_login(adapter)
-        if adapter.meta().name == "weixin_oc":
-            from .weixin_source import native_login as weixin_login
-
-            return weixin_login(adapter)
-        if adapter.meta().name == "telegram":
-            from .telegram_source import native_login as telegram_login
-
-            return telegram_login(adapter)
+        contract = PLATFORMS.get(adapter.meta().name)
+        return contract.source.native_login(adapter) if contract and contract.login_id else None
     except AttributeError:
         return None
-    from .qq_source import native_login as qq_login
 
-    return qq_login(adapter)
+
+def pin_client_login(host_type):
+    contract = PLATFORMS.get(host_type)
+    return bool(contract and contract.pin_client_login)
+
+
+def platform_record(context, platform):
+    return next((row for row in context.get_config().get("platform", [])
+                 if str(row.get("id")) == platform), {})
 
 
 async def prepare_bot_identity(context, platform):
     """A bounded read for management actions; never called by synchronous checks."""
-    configs = context.get_config().get("platform", [])
-    record = next((row for row in configs if str(row.get("id")) == platform), None)
-    if not record or not record.get("enable", True):
+    record = platform_record(context, platform)
+    contract = PLATFORMS.get(record.get("type"))
+    if not contract or not record.get("enable", True):
         return ""
     getter = getattr(context, "get_platform_inst", None)
     adapter = getter(platform) if getter else None
     if adapter is None:
         return ""
-    if record.get("type") in {"qq_official", "qq_official_webhook"}:
-        from .qq_source import native_login
+    if contract.login_id:
+        return contract.bot_id(contract.source.native_login(adapter), record)
+    return await contract.source.bot_identity(adapter, platform, getter)
 
-        login = native_login(adapter)
-        return login.appid if login and login.appid == record.get("appid") else ""
-    if record.get("type") == "weixin_oc":
-        from .weixin_source import native_login
 
-        login = native_login(adapter)
-        return login.account_id if login else ""
-    if record.get("type") == "lark":
-        from .lark_source import native_login
-
-        login = native_login(adapter)
-        return login.bot_id if login and login.appid == record.get("app_id") else ""
-    if record.get("type") == "telegram":
-        from .telegram_source import native_login
-
-        login = native_login(adapter)
-        return login.bot_id if login else ""
-    if record.get("type") == "aiocqhttp":
-        from .onebot_source import bot_identity
-
-        return await bot_identity(adapter, platform, getter)
-    return ""
+async def management_bot_identity(plugin, platform):
+    contract = PLATFORMS.get(platform_record(plugin.context, platform).get("type"))
+    if contract and contract.login_id:
+        await plugin.prepare_sources()
+        return plugin.source_accounts.get(platform, {}).get("bot_id", "")
+    return await prepare_bot_identity(plugin.context, platform)
 
 
 def local_runner(config) -> bool:

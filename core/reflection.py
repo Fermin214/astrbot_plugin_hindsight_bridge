@@ -7,12 +7,13 @@ import uuid
 
 from .client import HindsightError
 from .control import QueueError
-from .identity import Scope, canonical, sha256
+from .identity import Scope, canonical
+from .scope_settings import REFLECT, scope_key
 from . import reading
 
 
 def options_key(queue, scope):
-    return "reflect:" + sha256(canonical([queue.connection_id, scope["owner_id"]]))
+    return scope_key(REFLECT, queue.connection_id, scope["owner_id"])
 
 
 def read_options(queue, scope):

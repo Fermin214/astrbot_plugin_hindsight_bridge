@@ -42,7 +42,10 @@ from .core.panel import MemoryPanel, PanelError
 from .core.reading import chat_records
 from .core.reference import reference_options
 from .core.reflection import Reflection
-from .core.source import inspect_header, local_runner, native_login, platform_details, prepare_bot_identity
+from .core.source import (
+    PLATFORMS, inspect_header, local_runner, native_login, pin_client_login, platform_details,
+    platform_record, prepare_bot_identity,
+)
 from .core.worker import Worker
 
 
@@ -292,21 +295,15 @@ class HindsightBridge(Star):
                 login = evidence.get("login")
                 observed = native_login(adapter)
                 if observed is not None:
-                    logical = platform_details(adapter.meta().name)["logical_type"]
-                    if logical == "weixin_oc":
-                        bot = observed.account_id
-                    elif logical in {"telegram", "lark"}:
-                        bot = observed.bot_id
-                    else:
-                        bot = observed.appid
-                    if self.outbox.access.observe_bot(instance, logical, bot):
+                    contract = PLATFORMS[adapter.meta().name]
+                    if self.outbox.access.observe_bot(instance, contract.logical_type, contract.bot_id(observed)):
                         self.outbox.sync_permissions(accounts)
                         self.confirmations.clear()
                         self.permission_revision += 1
                 if login is not None and not login.matches(observed):
                     if (
                         observed is not None and observed.client is login.client
-                        and evidence.get("host_type") in {"qq_official", "qq_official_webhook"}
+                        and pin_client_login(evidence.get("host_type"))
                     ):
                         evidence["invalid_login"] = True
                     evidence["bot_id"] = ""
@@ -354,15 +351,14 @@ class HindsightBridge(Star):
                     bot = ""
                 previous = self.source_accounts.get(instance, {})
                 login = native_login(adapter)
-                record = next((row for row in self.context.get_config().get("platform", [])
-                               if str(row.get("id")) == instance), {})
+                record = platform_record(self.context, instance)
                 previous_login = previous.get("login")
-                unresolved_qq_login = (
-                    record.get("type") in {"qq_official", "qq_official_webhook"}
+                retained_login = (
+                    pin_client_login(record.get("type"))
                     and previous_login is not None
                     and (client is None or previous_login.client is client)
                 )
-                invalid = unresolved_qq_login and (
+                invalid = retained_login and (
                     previous.get("invalid_login", False)
                     or login is not None and not previous_login.matches(login)
                 )
@@ -370,7 +366,7 @@ class HindsightBridge(Star):
                     bot = ""
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
-                    "login": previous_login if unresolved_qq_login and (invalid or login is None) else login,
+                    "login": previous_login if retained_login and (invalid or login is None) else login,
                     "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
                 logical_type = platform_details(record.get("type", ""))["logical_type"]

@@ -6,7 +6,9 @@ import time
 from collections.abc import Mapping
 
 from .identity import Incoming
-from .source import HOST_CLOCK_TOLERANCE
+
+
+HOST_CLOCK_TOLERANCE = 1.0
 
 
 def native_types():
@@ -79,7 +81,7 @@ def message_shape(segments):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, *, inspect=None):
+def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=None):
     if not event.is_private_chat() or event.get_group_id():
         return None
     if adapter is not None and bound_client(event, adapter) is None:

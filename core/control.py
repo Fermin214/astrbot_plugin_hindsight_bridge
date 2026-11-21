@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .identity import Scope, canonical, sha256
+from .scope_settings import forget_settings
 
 
 class QueueError(ValueError):
@@ -338,61 +339,7 @@ class Control:
                 "WHERE connection_id=? AND owner_id=?",
                 (bank, generation, lower, stamp, received, received, connection, owner_id),
             )
-            # Keep a monotonic tombstone so an old page selection cannot return.
-            key = "background:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("background_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 2, "revision": revision + 1, "enabled": False,
-                    "page_id": "", "mental_model_id": "", "pages": [],
-                    "invalidated": bool(previous.get("page_id") or previous.get("pages") or previous.get("invalidated")),
-                }), key))
-            key = "reading:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("reading_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 1, "revision": revision + 1, "mode": "automatic", "invalidated": True,
-                }), key))
-            key = "reflect:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("reflect_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 1, "revision": revision + 1, "enabled": False,
-                    "timeout": 12, "invalidated": True,
-                }), key))
-            key = "reference:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    revision = json.loads(previous)["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, TypeError, KeyError, RecursionError):
-                    revision = int(self.setting("revision"))
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (
-                    canonical({"revision": revision + 1}), key,
-                ))
+            forget_settings(self, connection, owner_id)
             self.bump()
         return self.db.execute(
             "SELECT * FROM erasures WHERE forget_id=?", (fid,)

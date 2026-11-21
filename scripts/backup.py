@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.locking import exclusive_lock
+from core.scope_settings import PREFIXES
 
 
 def connect(path):
@@ -60,7 +61,7 @@ def preserves_settings(previous, incoming, same_revision):
             continue
         if same_revision or key.startswith(migration_prefix):
             return False
-        if key.startswith(("background:", "reading:", "reflect:", "reference:")):
+        if key.startswith(PREFIXES):
             try:
                 old_revision = json.loads(value)["revision"]
                 new_revision = json.loads(incoming[key])["revision"]

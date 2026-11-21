@@ -7,6 +7,7 @@ import uuid
 from .client import RECALL_BUDGETS
 from .control import QueueError
 from .identity import canonical, sha256
+from .scope_settings import REFERENCE, scope_key
 from .materials import DEFAULT_MEMORY_PROMPT, token_count
 
 
@@ -18,7 +19,7 @@ UNSET = object()
 
 
 def _options_key(connection, owner):
-    return "reference:" + sha256(canonical([connection, owner]))
+    return scope_key(REFERENCE, connection, owner)
 
 
 def _binding(control_id, connection, owner, source, bank, generation, authorization_revision):
@@ -191,7 +192,7 @@ class ReferenceHistory:
         limits = {}
         with control.transaction():
             for key, value in control.db.execute(
-                "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
+                "SELECT key,value FROM settings WHERE key GLOB ?", (REFERENCE + "*",)
             ).fetchall():
                 previous_revision = int(revision)
                 try:

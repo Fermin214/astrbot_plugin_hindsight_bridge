@@ -13,6 +13,7 @@ from .client import HindsightError
 from .control import QueueError
 from .diagnostics import recall_timeout
 from .identity import Scope, canonical, sha256
+from .scope_settings import READING, scope_key
 from . import reading
 from . import reflection
 from .source import local_runner
@@ -44,7 +45,7 @@ NOTICE_BYTES = 128
 
 
 def options_key(queue, scope):
-    return "reading:" + sha256(canonical([queue.connection_id, scope["owner_id"]]))
+    return scope_key(READING, queue.connection_id, scope["owner_id"])
 
 
 def read_options(queue, scope):
