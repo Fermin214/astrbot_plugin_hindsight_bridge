@@ -197,7 +197,7 @@ class Reflection:
 
         def settled():
             with control.transaction():
-                control.db.execute("DELETE FROM reflection_requests WHERE request_id=?", (request_id,))
+                control.db.execute("DELETE FROM reflection_requests WHERE request_id=? AND state<>'overridden'", (request_id,))
             self.plugin.worker.wake.set()
 
         try:
@@ -206,7 +206,10 @@ class Reflection:
                 with control.transaction():
                     if not turn.guard.valid(self.plugin) or read_options(queue, turn.guard.scope) != turn.reflect_options:
                         raise QueueError("reflect_changed")
-                    control.db.execute("UPDATE reflection_requests SET state='dispatched' WHERE request_id=?", (request_id,))
+                    if control.db.execute(
+                        "UPDATE reflection_requests SET state='dispatched' WHERE request_id=? AND state='prepared'", (request_id,),
+                    ).rowcount != 1:
+                        raise QueueError("reflect_changed")
                 value = await client.reflect(
                     turn.guard.scope["bank"], query, max_tokens=max_tokens,
                     settled=settled,

@@ -391,6 +391,7 @@ export function createMemories(view) {
     view.$("reflect-enabled").disabled = !!unavailable || (!saved.enabled && !!scope?.summary?.maintenance);
     view.$("reflect-timeout").disabled = !!unavailable;
     view.$("reflect-save").disabled = !!unavailable || conflict || !view.reflectDraft.dirty;
+    view.$("reflect-override").hidden = !scope?.summary?.reflect_unknown?.length;
     view.$("reflect-conflict").hidden = !conflict;
     const unsupported = saved.enabled && saved.status?.state === "unavailable";
     const messages = [];
@@ -420,6 +421,34 @@ export function createMemories(view) {
       await view.refreshBootstrap();
       if (view.scopeId === draft.id) view.notify("已保存", false, "reflect-feedback");
     }, "reflect-feedback");
+  }
+
+  function openReflectOverride(id = view.scopeId) {
+    const scope = view.data?.scopes.find((item) => item.scope_id === id);
+    const banks = scope?.summary?.reflect_unknown || [];
+    if (!banks.length) return;
+    view.reflectOverrideState = { id, banks: [...banks], configRevision: view.data.config_revision };
+    view.$("reflect-override-bank").replaceChildren(...banks.map((bank) => view.option(bank,
+      `${bank === scope.bank ? scope.historical ? "保留的旧记忆库" : "使用中的记忆库" : "清空中的旧记忆库"} · ${bank}`)));
+    view.$("reflect-override-bank").value = banks[0];
+    view.$("reflect-override-confirm").checked = false;
+    view.$("reflect-override-submit").disabled = true;
+    view.$("reflect-override-feedback").hidden = true;
+    view.$("reflect-override-dialog").showModal();
+  }
+
+  async function confirmReflectOverride() {
+    const pending = view.reflectOverrideState;
+    const bank = view.$("reflect-override-bank").value;
+    if (!pending || !view.$("reflect-override-confirm").checked || !pending.banks.includes(bank)) return;
+    await view.perform(view.$("reflect-override-submit"), "memory", async () => {
+      const response = await view.bridge.apiPost(view.endpoint("action", pending.id), {
+        action: "reflect_override", bank, config_revision: pending.configRevision, confirm_override: true,
+      });
+      view.$("reflect-override-dialog").close();
+      await view.refreshBootstrap();
+      view.notify(response.message);
+    }, "reflect-override-feedback");
   }
 
   function backgroundSnapshot(scope) {
@@ -702,5 +731,5 @@ export function createMemories(view) {
     });
   }
 
-  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }

@@ -167,7 +167,7 @@ class HindsightBridge(Star):
             "reflect_changed": "Reflect 设置或记忆范围已变化，请刷新后重试",
             "reflect_timeout": "Reflect 等待超时，服务可能仍在处理。请等待结果，不要重复发送",
             "reflect_busy": "已有 Reflect 请求尚未结束，请稍后查看状态；不要重复发送",
-            "reflect_execution_unknown": "上次 Reflect 请求未确认结束，为防数据残留，暂不能清空该记忆库。请管理员确认 Hindsight 的请求是否结束",
+            "reflect_execution_unknown": "上次 Reflect 请求未确认结束，相关记忆操作已暂停。请管理员确认 Hindsight 已重启或没有残留请求后，在插件页解除 Reflect 阻塞",
             "reflect_transport_timeout": "Reflect 连接超时，暂时无法确认请求是否结束。旧记忆库的清空会保持暂停",
             "reflect_no_answer": "Reflect 没有返回答案，可调整问题或使用 Recall 查找事实",
             "reflect_response_too_large": "Reflect 回答过长，请缩小问题范围。请求状态不明时，旧记忆库的清空会保持暂停",

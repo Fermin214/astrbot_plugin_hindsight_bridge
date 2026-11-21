@@ -101,6 +101,7 @@
           <div id="scope-skip-row" class="recall-row" hidden><span>最近跳过</span><span id="scope-skip-status"></span></div>
           <p id="maintenance-state" class="operation-status" role="status" hidden></p>
           <button id="maintenance-view" type="button" hidden>查看暂停状态</button>
+          <button id="reflect-override" type="button" hidden>解除 Reflect 阻塞</button>
         </section>
         <footer class="user-actions"><button id="remove-account" type="button" class="danger-quiet">移除用户</button><button id="forget" type="button" class="danger-quiet">清空记忆</button></footer>
       </fieldset>
@@ -174,6 +175,15 @@
   <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading"><div class="dialog-header"><h2 id="remove-account-heading">移除用户</h2></div><p id="remove-account-user"></p><p>移除访问权限，保留记忆。</p><div class="dialog-actions"><button id="cancel-remove-account" type="button">取消</button><button id="confirm-remove-account" type="button" class="danger">确认移除</button></div><p id="remove-account-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading"><div class="dialog-header"><h2 id="forget-heading">清空记忆</h2></div><p>删除此记忆库的全部内容，无法撤销。</p><p id="forget-user" class="forget-user"></p><p id="forget-message" class="operation-status"></p><label class="check-label" for="forget-agree"><input id="forget-agree" type="checkbox">确认清空</label><div class="dialog-actions"><button id="cancel-forget" type="button">取消</button><button id="confirm-forget" type="button" class="danger" disabled>确认清空</button></div><p id="forget-feedback" class="operation-status" role="status"></p></dialog>
 
+  <dialog id="reflect-override-dialog" aria-labelledby="reflect-override-heading">
+    <div class="dialog-header"><h2 id="reflect-override-heading">解除 Reflect 阻塞</h2><button type="button" data-close="reflect-override-dialog" aria-label="关闭">×</button></div>
+    <p>请先确认 Hindsight 已重启，或没有正在运行的 Reflect 请求。原请求结果仍未知，解除阻塞不会重放请求。</p>
+    <p>使用中的记忆库可再次运行 Reflect 或解除暂停；清空中的旧库仍须完成全部核查和删除。</p>
+    <label for="reflect-override-bank">记忆库<select id="reflect-override-bank" name="bank"></select></label>
+    <label class="check-label" for="reflect-override-confirm"><input id="reflect-override-confirm" type="checkbox">我已确认服务没有残留 Reflect 任务，并接受原请求结果未知。</label>
+    <div class="dialog-actions"><button type="button" data-close="reflect-override-dialog">取消</button><button id="reflect-override-submit" type="button" class="primary" disabled>解除阻塞</button></div>
+    <p id="reflect-override-feedback" class="operation-status" role="status" hidden></p>
+  </dialog>
   <dialog id="usage-dialog" aria-labelledby="usage-heading">
     <div class="dialog-header"><h2 id="usage-heading">使用记录</h2><button type="button" data-close="usage-dialog" aria-label="关闭">×</button></div>
     <label id="usage-picker" for="usage-turn" hidden>时间 · 会话 · 消息<select id="usage-turn"></select></label>
@@ -243,7 +253,7 @@
     </section>
     <p id="upgrade-result" class="operation-status" role="status" hidden></p>
   </dialog>
-  <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label for="maintenance-scope">记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>删除待发送和失败的记录，无法撤销。</p><label class="check-label" for="discard-pending"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label for="maintenance-scope">记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-reflect-override" type="button" hidden>解除 Reflect 阻塞</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>删除待发送和失败的记录，无法撤销。</p><label class="check-label" for="discard-pending"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

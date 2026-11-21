@@ -581,6 +581,24 @@ class PanelScopes:
                 raise PanelError("请使用 AstrBot 管理账号登录。")
             scope = self.scope(scope_id)
             plugin, queue = self.plugin, self.plugin.outbox
+            if action == "reflect_override":
+                if not isinstance(payload.get("config_revision"), str):
+                    raise PanelError("请重新获取用户状态后解除 Reflect 阻塞。")
+                self.check_revision(payload)
+                bank = payload.get("bank")
+                if payload.get("confirm_override") is not True:
+                    raise PanelError("请先确认 Hindsight 已重启或没有正在运行的 Reflect 请求。")
+                allowed_banks = {scope["bank"], *(row["old_bank"] for row in queue.control.erasures(
+                    queue.connection_id, owner_id=scope["owner_id"],
+                ) if row["phase"] != "verified")}
+                unknown_banks = {row["bank"] for row in queue.control.reflection_pending(
+                    queue.connection_id, owner_id=scope["owner_id"],
+                ) if row["state"] == "unknown"}
+                if not isinstance(bank, str) or bank not in allowed_banks & unknown_banks:
+                    raise PanelError("这个记忆库没有可解除的 Reflect 阻塞，请重新获取用户状态。")
+                changed = queue.control.override_unknown_reflections(queue.connection_id, bank, actor=request.username)
+                plugin.worker.wake.set()
+                return {"overridden": changed, "message": "Reflect 阻塞已解除，清空中的旧记忆仍会继续核查和删除。"}
             if action in {"forget_prepare", "forget_confirm"}:
                 self.ensure_no_upgrade()
             maintenance = plugin.worker.maintenance

@@ -115,11 +115,11 @@ QQ 的 view、show、export 保留本人范围检查，作为官方只读 API �
 
 `core/reflection.py` 保存连接和 owner 范围的 `reflect:` 设置，默认关闭，等待默认 12 秒、范围 3–30 秒。设置绑定源身份、确认修订、Bank/代次及独立修订。自动召回与按需方式均可开启 Reflect；每条原始消息最多一次，与其他读取共用调用和输出账本。单次回答受相同 token、字符和字节上限约束，原生请求使用 low budget 和受限 `max_tokens`，只接受查询参数。来源和用量从原生响应投影，未知字段与原始错误不交付。
 
-控制库格式 6 的 `reflection_requests` 在 HTTP 发送前记录请求编号、连接、owner、Bank、代次、时间与状态，不保存查询、答案或凭据。`prepared` 到 `dispatched` 的变更与最后范围核对在同一事务内完成。清空操作先使旧范围失效；删除旧 Bank 前检查其未结束请求。维护就绪检查同样包含这些请求。
+控制库格式 7 的 `reflection_requests` 在 HTTP 发送前记录请求编号、连接、owner、Bank、代次、时间与状态，不保存查询、答案或凭据。`prepared` 到 `dispatched` 的变更与最后范围核对在同一事务内完成。清空操作先使旧范围失效；删除旧 Bank 前检查其未结束请求。维护就绪检查同样包含这些请求。部分唯一索引限制同一连接和 Bank 只有一个未结束请求，人工解阻的 `overridden` 记录保留原字段、操作者与操作时间。
 
 工具等待与 HTTP 任务寿命分开，传输任务最长 120 秒。工具超时后继续跟踪原生传输，完整成功响应或传输明确证明未发送时关闭屏障；晚到正文不回填聊天。不能确认执行终点时保留 `unknown`。实例关闭取消其所属任务，重载将遗留 `dispatched` 转为 `unknown`，未发送的 `prepared` 可以删除。
 
-Hindsight 1.1.0 / 1.2.0 的 Reflect 可创建缺失 Bank，但没有公开的请求级执行终点接口。执行不明时不能靠查空 Bank、等待固定时长、审计日志或重复删除解除屏障。恢复其他用户的业务快照可与受屏障隔离的旧 Bank 清空分开进行，不把该清空标记为完成。旧插件拒绝格式 6，避免忽略屏障后删除 Bank。
+Hindsight 1.1.0 / 1.2.0 的 Reflect 可创建缺失 Bank，但没有公开的请求级完成查询。执行不明时不能靠查空 Bank、等待固定时长、审计日志或重复删除自动解除阻塞。管理员确认服务已重启或没有运行中的 Reflect 请求后，可显式将 `unknown` 改为 `overridden`；原结果仍未知，不重放请求。活跃 Bank 可继续 Reflect 或解除维护，旧 Bank 仍须完成全部核查与删除。恢复其他用户的业务快照可独立进行。旧插件拒绝格式 7，备份禁止丢失未知请求或回退人工解阻记录。
 
 ## 暂停与 Bank 协调
 
@@ -145,7 +145,7 @@ Hindsight 1.2.0 可能将被其他整合任务替代的操作记为 `cancelled`�
 
 ## AstrBot 管理视图与安装
 
-`views/memory/` 使用 AstrBot 插件视图 bridge 调用 `core/panel.py` 注册的管理 API，继承 Dashboard 登录与插件访问权限。页面分为「用户与记忆」与「插件设置」，管理连接、账号、Bank 映射、队列、诊断和保存、查询暂停操作；内容管理使用 Hindsight 原生 Control Plane。模型选项只输出标识、名称与兼容结论，服务端通过公开供应商接口生成 Hindsight 配置。
+`views/memory/` 通过原生 ES Modules 组织共享状态、DOM、接入、维护和记忆功能，使用 AstrBot 插件视图 bridge 调用 `core/panel.py` 注册的管理 API，继承 Dashboard 登录与插件访问权限。管理 API 分别由 `panel_setup.py`、`panel_upgrade.py`、`panel_scopes.py` 实现，远程只读轮询通过快照复核处理配置变化。页面分为「用户与记忆」与「插件设置」，管理连接、账号、Bank 映射、队列、诊断和保存、查询暂停操作；内容管理使用 Hindsight 原生 Control Plane。模型选项只输出标识、名称与兼容结论，服务端通过公开供应商接口生成 Hindsight 配置。
 
 `config.control_plane_url` 保存浏览器可访问的「官方管理地址」，与 `api_url` 分开配置。管理员页面显示可选择复制的地址与「记忆库 ID」（Bank ID）；普通用户命令不输出 CP/API Key。官方 Control Plane 独立登录，采用独立 HTTPS 或 SSH 隧道，不依赖 iframe、SSO、一键外链或插件反代。
 

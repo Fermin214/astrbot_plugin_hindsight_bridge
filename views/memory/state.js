@@ -31,6 +31,7 @@ export function createState(environment) {
     promptCountTimer: undefined,
     usageReadRevision: 0,
     reflectDraft: null,
+    reflectOverrideState: null,
     bootstrapReadRevision: 0,
     versionCheckRevision: 0,
     versionCheck: null,

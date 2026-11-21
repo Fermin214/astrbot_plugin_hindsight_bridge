@@ -3,6 +3,10 @@
 import asyncio
 from dataclasses import replace
 import json
+import sqlite3
+import tempfile
+from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -14,6 +18,7 @@ import test_reading as reading_tests
 import test_runtime_diagnostics as runtime
 from plugins.astrbot_plugin_hindsight_bridge.core.agent_tools import NAMES, REFLECT_NAME, save_options
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
+from plugins.astrbot_plugin_hindsight_bridge.core.control import Control
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import canonical, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
@@ -25,6 +30,48 @@ RESPONSE = {"text": "Native synthesis from the cited fact.", "based_on": {
     "memories": [{"id": "fact-1", "type": "world", "document_id": "document-1"}],
     "mental_models": [], "directives": [],
 }, "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}}
+
+
+class ReflectMigration(unittest.TestCase):
+    def test_v6_unknown_preserves_all_fields_and_releases_only_its_active_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with closing(Control(root, "fixture")):
+                pass
+            original = ("request", "connection", "owner", "bank", 3, "unknown", 123.5, "disconnect")
+            with closing(sqlite3.connect(root / "control.sqlite3")) as db, db:
+                db.execute("DROP TABLE reflection_requests")
+                db.execute("CREATE TABLE reflection_requests(request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, "
+                           "owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL, "
+                           "state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')), "
+                           "created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '', UNIQUE(connection_id,bank))")
+                db.execute("INSERT INTO reflection_requests VALUES (?,?,?,?,?,?,?,?)", original)
+                db.execute("PRAGMA user_version=6")
+            with closing(Control(root, "fixture", required=True)) as control:
+                self.assertEqual(control.db.execute("PRAGMA user_version").fetchone()[0], 7)
+                pending = control.reflection_pending("connection")[0]
+                self.assertEqual(tuple(pending)[:8], original)
+                revision = int(control.setting("revision"))
+                self.assertEqual(control.override_unknown_reflections("other", "bank", actor="admin"), 0)
+                self.assertEqual(control.override_unknown_reflections("connection", "bank", actor="admin"), 1)
+                self.assertEqual(int(control.setting("revision")), revision + 1)
+                audit = control.db.execute("SELECT * FROM reflection_requests").fetchone()
+                self.assertEqual(tuple(audit)[:8], (*original[:5], "overridden", *original[6:]))
+                self.assertIsInstance(audit["overridden_at"], float)
+                self.assertEqual(audit["overridden_by"], "admin")
+                self.assertEqual(control.override_unknown_reflections("connection", "bank", actor="other-admin"), 0)
+                self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), tuple(audit))
+                self.assertFalse(control.reflection_pending("connection"))
+                with control.transaction():
+                    control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
+                                       "VALUES ('next','connection','owner','bank',3,'prepared',124)")
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
+                                           "VALUES ('duplicate','connection','owner','bank',3,'unknown',125)")
+                self.assertEqual(len(control.reflection_pending("connection")), 1)
+            with closing(Control(root, "fixture", required=True)) as control:
+                self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), tuple(audit))
+
 
 
 class ReflectTransport(unittest.IsolatedAsyncioTestCase):
@@ -211,3 +258,30 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await maintenance.startup())
         self.assertFalse(queue.recovering)
         self.assertNotEqual(queue.control.erasures(queue.connection_id)[0]["phase"], "verified")
+
+    async def test_override_allows_new_reflect_and_late_settlement_preserves_audit(self):
+        _, context, scope = await self.ready()
+        control = self.plugin.outbox.control
+
+        async def native(*args, settled, **kwargs):
+            with control.transaction():
+                control.db.execute("UPDATE reflection_requests SET state='unknown',error_code='disconnect'")
+            control.override_unknown_reflections(self.plugin.outbox.connection_id, scope["bank"], actor="admin")
+            settled()
+            return RESPONSE
+
+        self.plugin.client.reflect = AsyncMock(side_effect=native)
+        await self.tools.execute(context, "reflect", {"query": "first"})
+        audit = tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone())
+        self.assertEqual(audit[5], "overridden")
+        _, context, _ = await self.ready(enabled=False)
+
+        async def completed(*args, settled, **kwargs):
+            settled()
+            return RESPONSE
+
+        self.plugin.client.reflect.side_effect = completed
+        result = json.loads(await self.tools.execute(context, "reflect", {"query": "next"}))
+        self.assertEqual(result["text"], RESPONSE["text"])
+        self.assertFalse(control.reflection_pending(self.plugin.outbox.connection_id))
+        self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), audit)

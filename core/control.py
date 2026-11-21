@@ -46,7 +46,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1, 2, 3, 4, 5, 6):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -104,9 +104,9 @@ class Control:
                 CREATE TABLE IF NOT EXISTS reflection_requests(
                     request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL,
-                    state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')),
+                    state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown','overridden')),
                     created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '',
-                    UNIQUE(connection_id,bank)
+                    overridden_at REAL, overridden_by TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS maintenance(
                     connection_id TEXT NOT NULL, bank TEXT NOT NULL,
@@ -151,7 +151,28 @@ class Control:
                 "ON erasure_refs(forget_id,kind,checked_pass,ref)"
             )
             with self.transaction():
-                self.db.execute("PRAGMA user_version=6")
+                if version < 7:
+                    self.db.execute("""
+                        CREATE TABLE reflection_requests_v7(
+                            request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
+                            owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL,
+                            state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown','overridden')),
+                            created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '',
+                            overridden_at REAL, overridden_by TEXT NOT NULL DEFAULT ''
+                        )
+                    """)
+                    columns = {row["name"] for row in self.db.execute("PRAGMA table_info(reflection_requests)")}
+                    copied = ["request_id", "connection_id", "owner_id", "bank", "generation", "state", "created_at", "error_code"]
+                    copied.extend(name for name in ("overridden_at", "overridden_by") if name in columns)
+                    names = ",".join(copied)
+                    self.db.execute(f"INSERT INTO reflection_requests_v7({names}) SELECT {names} FROM reflection_requests")
+                    self.db.execute("DROP TABLE reflection_requests")
+                    self.db.execute("ALTER TABLE reflection_requests_v7 RENAME TO reflection_requests")
+                self.db.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS reflection_requests_active
+                    ON reflection_requests(connection_id,bank) WHERE state IN ('prepared','dispatched','unknown')
+                """)
+                self.db.execute("PRAGMA user_version=7")
                 self.db.execute("DELETE FROM reflection_requests WHERE state='prepared'")
                 self.db.execute("UPDATE reflection_requests SET state='unknown',error_code='reflect_execution_unknown' WHERE state='dispatched'")
                 if version < 4:
@@ -514,9 +535,23 @@ class Control:
     def reflection_pending(self, connection, *, bank=None, owner_id=None):
         return self.db.execute(
             "SELECT * FROM reflection_requests WHERE connection_id=? "
+            "AND state IN ('prepared','dispatched','unknown') "
             "AND (? IS NULL OR bank=?) AND (? IS NULL OR owner_id=?) ORDER BY created_at",
             (connection, bank, bank, owner_id, owner_id),
         ).fetchall()
+
+    def override_unknown_reflections(self, connection, bank, *, actor):
+        if not isinstance(actor, str) or not actor.strip():
+            raise QueueError("reflect_override_actor_required")
+        with self.transaction():
+            changed = self.db.execute(
+                "UPDATE reflection_requests SET state='overridden',overridden_at=?,overridden_by=? "
+                "WHERE connection_id=? AND bank=? AND state='unknown'",
+                (time.time(), actor, connection, bank),
+            ).rowcount
+            if changed:
+                self.bump()
+        return changed
 
     def record_request(
         self, row, owner_id, *, dispatched=False, accepted=False, cancel=False

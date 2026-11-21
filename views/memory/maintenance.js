@@ -115,12 +115,14 @@ export function createMaintenance(view) {
   function renderMaintenance() {
     view.syncMaintenanceState();
     const scope = view.maintenanceScope();
-    const scopes = (view.data?.scopes || []).filter((item) => item.summary?.maintenance || item.summary?.bank_missing || item.scope_id === view.maintenanceScopeId);
+    const scopes = (view.data?.scopes || []).filter((item) => item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length || item.scope_id === view.maintenanceScopeId);
     view.$("maintenance-scope").replaceChildren(...scopes.map((item) => view.option(item.scope_id, view.scopeName(item))));
     view.$("maintenance-scope").value = scope?.scope_id || "";
     view.$("maintenance-detail").textContent = scope?.summary?.maintenance || scope?.summary?.bank_missing
-      ? view.maintenanceDescription(scope.summary, view.maintenanceState) : "这个记忆库未暂停读写。";
+      ? view.maintenanceDescription(scope.summary, view.maintenanceState)
+      : scope?.summary?.reflect_unknown?.length ? "有 Reflect 请求结果未知，请确认服务没有残留任务后解除阻塞。" : "这个记忆库未暂停读写。";
     view.$("maintenance-bank-check").hidden = !scope?.summary?.bank_missing;
+    view.$("maintenance-reflect-override").hidden = !scope?.summary?.reflect_unknown?.length;
     view.$("maintenance-bank-check").disabled = view.locks.has("memory") || !!view.data?.status?.recovering || view.data?.status?.connected === false;
     view.$("maintenance-retry").hidden = !scope?.summary?.maintenance || !view.maintenanceState?.error;
     view.$("maintenance-resume").hidden = !scope?.summary?.maintenance;
@@ -135,7 +137,7 @@ export function createMaintenance(view) {
   }
 
   function openMaintenance(id) {
-    view.maintenanceScopeId = id || view.data?.scopes.find((item) => item.summary?.maintenance || item.summary?.bank_missing)?.scope_id || "";
+    view.maintenanceScopeId = id || view.data?.scopes.find((item) => item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length)?.scope_id || "";
     view.renderMaintenance();
     view.$("maintenance-feedback").hidden = true;
     view.$("maintenance-dialog").showModal();

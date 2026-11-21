@@ -23,6 +23,62 @@ SPEC.loader.exec_module(BACKUP)
 
 
 class BackupTests(unittest.TestCase):
+    def test_reflect_migration_override_and_backups_preserve_uncertainty_and_audit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, control = self.fixture(root / "source", request=None)
+            latest = root / "latest/control.sqlite3"
+            with closing(sqlite3.connect(control / "control.sqlite3")) as db, db:
+                db.execute("DROP TABLE reflection_requests")
+                db.execute("CREATE TABLE reflection_requests(request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, "
+                           "owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL, "
+                           "state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')), "
+                           "created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '', UNIQUE(connection_id,bank))")
+                db.execute("INSERT INTO reflection_requests VALUES ('reflect','connection','owner','bank',2,'unknown',123,'disconnect')")
+                db.execute("PRAGMA user_version=6")
+            BACKUP.backup(data, control, root / "v6", latest)
+
+            def fork(name, change, revision):
+                directory = root / name
+                directory.mkdir()
+                with closing(BACKUP.connect(control / "control.sqlite3")) as db:
+                    BACKUP.snapshot(db, directory / "control.sqlite3")
+                with closing(sqlite3.connect(directory / "control.sqlite3")) as db, db:
+                    db.execute(change)
+                    db.execute("UPDATE settings SET value=? WHERE key='revision'", (str(revision),))
+                return directory
+
+            with closing(Control(control, "fixture", required=True)) as journal:
+                BACKUP.backup(data, control, root / "v7", latest)
+                for name, change, revision, error in (
+                    ("lost-unknown", "DELETE FROM reflection_requests", 10, "evidence"),
+                    ("same-revision-override", "UPDATE reflection_requests SET state='overridden',overridden_at=124,overridden_by='admin'", 9, "revision"),
+                    ("foreign-connection", "UPDATE reflection_requests SET connection_id='other'", 10, "evidence"),
+                    ("foreign-bank", "UPDATE reflection_requests SET bank='other'", 10, "evidence"),
+                    ("empty-actor", "UPDATE reflection_requests SET state='overridden',overridden_at=124", 10, "evidence"),
+                ):
+                    with self.subTest(name=name), self.assertRaisesRegex(ValueError, rf"latest_control_{error}_conflict \(reflection_requests\)"):
+                        BACKUP.backup(data, fork(name, change, revision), root / f"snapshot-{name}", latest)
+                old = fork("old-snapshot", "SELECT 1", 9)
+                self.assertEqual(journal.override_unknown_reflections("connection", "bank", actor="admin"), 1)
+                BACKUP.backup(data, control, root / "override", latest)
+                BACKUP.backup(data, control, root / "repeat-override", latest)
+                for name, change in (
+                    ("lost-audit", "DELETE FROM reflection_requests"),
+                    ("back-to-unknown", "UPDATE reflection_requests SET state='unknown',overridden_at=NULL,overridden_by=''"),
+                    ("back-to-dispatched", "UPDATE reflection_requests SET state='dispatched'"),
+                    ("back-to-prepared", "UPDATE reflection_requests SET state='prepared'"),
+                    ("changed-actor", "UPDATE reflection_requests SET overridden_by='other'"),
+                    ("changed-time", "UPDATE reflection_requests SET overridden_at=0"),
+                ):
+                    with self.subTest(name=name), self.assertRaisesRegex(ValueError, "latest_control_evidence_conflict \\(reflection_requests\\)"):
+                        BACKUP.backup(data, fork(name, change, 11), root / f"snapshot-{name}", latest)
+                with self.assertRaisesRegex(ValueError, "latest_control_revision_regression"):
+                    BACKUP.backup(data, old, root / "rollback", latest)
+                with closing(BACKUP.connect(latest)) as db:
+                    self.assertEqual(db.execute("SELECT state,overridden_by,error_code FROM reflection_requests").fetchone(),
+                                     ("overridden", "admin", "disconnect"))
+
     def fixture(self, root, *, deployment="fixture", control_id="control", revision=9, request="X"):
         data, control = root / "data", root / "control"
         data.mkdir(parents=True)

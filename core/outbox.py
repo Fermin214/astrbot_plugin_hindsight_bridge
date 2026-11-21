@@ -1112,6 +1112,9 @@ class Outbox:
             "maintenance": self.control.maintenance(self.connection_id, scope["bank"]),
             "bank_missing": self.control.bank_state(self.connection_id, scope["bank"]) == "missing",
             "reflect_pending": len(self.control.reflection_pending(self.connection_id, owner_id=scope["owner_id"])),
+            "reflect_unknown": [row["bank"] for row in self.control.reflection_pending(
+                self.connection_id, owner_id=scope["owner_id"],
+            ) if row["state"] == "unknown"],
             "can_discard": any(self.can_discard(row) for row in self.db.execute(
                 "SELECT id,operation_id,state,accepted FROM outbox "
                 "WHERE connection_id=? AND bank=? AND state NOT IN ('done','discarded')",
