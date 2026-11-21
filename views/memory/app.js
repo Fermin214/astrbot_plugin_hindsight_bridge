@@ -14,14 +14,6 @@ export function createApp(view) {
     if (view.data.config.managed && view.data.managed_service?.installed && !status.recovering && !view.data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
     view.$("status-description").textContent = description;
     view.$("status-description").hidden = !description;
-    const setup = view.$("panel-setup");
-    const connection = view.$("setup-fields");
-    if (connected === true || view.data.config.configured) {
-      const deployment = view.$("deployment-info");
-      if (setup.lastElementChild !== deployment || deployment.previousElementSibling !== connection) {
-        setup.append(connection, deployment);
-      }
-    } else if (setup.firstElementChild !== connection) setup.prepend(connection);
     const attention = !!status.recovering || !view.data.config.configured || connected !== true;
     view.$("service-alert").hidden = !attention;
     view.$("service-alert-message").textContent = attention ? description || view.$("status-label").textContent : "";
@@ -173,6 +165,7 @@ export function createApp(view) {
   });
   view.$("background-recheck").addEventListener("click", () => void view.loadBackground({ manual: true }));
   view.$("background-save").addEventListener("click", () => void view.saveBackground());
+  view.$("background-enabled")?.addEventListener("change", () => view.toggleBackground());
   view.$("background-settings").addEventListener("click", () => {
     view.activateTab("setup");
     view.$("memory-background_max_tokens").focus();
@@ -409,6 +402,25 @@ export function createApp(view) {
     }
   });
   view.window.addEventListener("beforeunload", () => { view.clearTimeout(view.refreshTimer); view.clearTimeout(view.maintenanceExpiryTimer); view.offContext?.(); }, { once: true });
+
+  if (!("closedBy" in (view.window.HTMLDialogElement?.prototype || {}))) {
+    view.document.querySelectorAll('dialog[closedby="any"]').forEach((dialog) => {
+      let outsidePointer;
+      const outside = (event) => {
+        const rect = dialog.getBoundingClientRect();
+        return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+      };
+      dialog.addEventListener("pointerdown", (event) => {
+        outsidePointer = dialog.open && event.button === 0 && outside(event) ? event.pointerId : undefined;
+      });
+      dialog.addEventListener("pointerup", (event) => {
+        if (dialog.open && outsidePointer === event.pointerId && outside(event)) dialog.close();
+        outsidePointer = undefined;
+      });
+      dialog.addEventListener("pointercancel", () => { outsidePointer = undefined; });
+      dialog.addEventListener("close", () => { outsidePointer = undefined; });
+    });
+  }
 
   }
 

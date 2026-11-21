@@ -89,6 +89,12 @@ export function createMemories(view) {
     view.$("mode-control").hidden = !!scope?.historical;
     view.$("historical-mode").hidden = !scope?.historical;
     view.$("historical-mode").textContent = scope?.historical ? `原记忆模式：${view.modeLabels[scope.mode] || scope.mode}` : "";
+    const modeHint = view.$("mode-hint");
+    if (modeHint) {
+      modeHint.textContent = { active: "检索已有记忆，并保存新的聊天。", readonly: "只检索已有记忆，不保存新的聊天。",
+        paused: "不检索也不保存，普通聊天不受影响。" }[scope?.mode] || "";
+      modeHint.hidden = !scope || !!scope.historical;
+    }
     for (const mode of ["active", "readonly", "paused"]) {
       const button = view.document.querySelector(`[data-mode="${mode}"]`);
       button.setAttribute("aria-pressed", String(scope?.mode === mode));
@@ -104,6 +110,7 @@ export function createMemories(view) {
     view.$("saved-count").textContent = Number.isSafeInteger(summary.saved_count) && summary.saved_count >= 0 ? summary.saved_count : !scope || scope.pending ? "待开通" : "暂不可用";
     view.$("pending-count").textContent = ["ready", "submitting", "unknown", "tracking", "deferred", "reconcile_required", "held", "cancel_requested"].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
     view.$("failed-count").textContent = (Number(counts.failed) || 0) + (Number(counts.dead) || 0);
+    view.$("failed-count").classList.toggle("is-error", Number(view.$("failed-count").textContent) > 0);
     view.$("queue-summary").textContent = counts.reconcile_required ? `有 ${counts.reconcile_required} 条记录需要确认保存结果。` : "";
     view.$("queue-summary").hidden = !view.$("queue-summary").textContent;
     view.$("scope-error").hidden = !summary.error_message;
@@ -488,6 +495,9 @@ export function createMemories(view) {
     if (draft.page_id && !draft.pages.some((page) => page.page_id === draft.page_id)) options.push(view.option(draft.page_id, draft.page_id, !!blocked));
     select.replaceChildren(...options);
     select.value = draft.enabled ? draft.page_id : "";
+    const enabled = view.$("background-enabled");
+    if (enabled) { enabled.checked = !!draft.enabled; enabled.disabled = select.disabled || !selected.length; }
+    view.$("background-selected").classList.toggle("is-paused", !draft.enabled && selected.length > 0);
     const rows = selected.map((page, index) => {
       const row = view.el("li", "knowledge-page");
       const native = draft.pages.find((item) => item.page_id === page.page_id);
@@ -565,6 +575,16 @@ export function createMemories(view) {
       if (revision !== view.backgroundReadRevision) draft.attempted = false;
       if (view.backgroundDraft === draft && view.scopeId === draft.id) view.renderBackground();
     }
+  }
+
+  function toggleBackground() {
+    const draft = view.backgroundDraft;
+    if (!draft) return;
+    draft.enabled = !!view.$("background-enabled")?.checked && draft.selected.length > 0;
+    draft.page_id = draft.selected[0]?.page_id || "";
+    draft.dirty = true;
+    view.$("background-feedback").hidden = true;
+    view.renderBackground();
   }
 
   function changeBackground() {
@@ -731,5 +751,5 @@ export function createMemories(view) {
     });
   }
 
-  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }
