@@ -1,10 +1,10 @@
 # 平台接入验证
 
-平台登录、网络、收发和媒体处理使用 AstrBot 原生适配器。Bridge 验证来源、保存与召回记忆，不持有平台 Token，不提供扫码或轮询客户端。每个平台使用独立开发分支、测试宿主和测试账号。
+平台登录、收发和媒体处理由 AstrBot 原生适配器负责；Bridge 负责来源校验、记忆存取和账号隔离。每个平台在独立分支、测试宿主和专用测试账号下完成真实端到端验证。
 
-## 创建测试宿主
+## 启动测试宿主
 
-在仓库根目录执行：
+在仓库根目录生成并启动独立测试环境（以微信 ClawBot 为例，Telegram 用 `--platform telegram`，飞书用 `--platform lark` 并先按 [飞书接入](FEISHU.md) 创建开放平台应用）：
 
 ```bash
 python3 tools/prepare-platform-acceptance.py \
@@ -14,57 +14,48 @@ python3 tools/prepare-platform-acceptance.py \
 docker compose -f /tmp/bridge-weixin/compose.yaml up -d
 ```
 
-Telegram 使用 `--platform telegram`、另一个输出目录和端口。工具只接受新目录，为每套环境生成独立名称、数据目录和初始管理密码。密码在输出目录的 `.env` 中，登录用户名为 `astrbot`。Docker 端口绑定 `127.0.0.1`；远程访问使用 SSH 隧道。
+脚本只接收尚未存在的新输出目录，并为每套环境生成独立的项目名、数据目录和管理员初始密码（密码保存在输出目录的 `.env`，用户名为 `astrbot`；端口绑定 `127.0.0.1`，远程调试可通过 SSH 隧道转发）。
 
-飞书使用 `--platform lark`，例如输出目录 `/tmp/bridge-lark`、端口 `6190`。应用创建和事件订阅见[飞书接入](FEISHU.md)。
-
-没有 Docker 时，在已安装官方 AstrBot 及其依赖的独立 Python 环境启动：
+如果本机不用 Docker，可在已配好依赖的 AstrBot 环境中直接启动原生进程（两种方式共用同一数据目录，不要同时运行）：
 
 ```bash
 sh /tmp/bridge-weixin/start-native.sh \
   /path/to/venv/bin/python /path/to/AstrBot/main.py
 ```
 
-此入口通过 `ASTRBOT_ROOT` 选择专属数据目录，Dashboard 使用指定的本机端口。两种启动方式使用同一份测试数据，一次只启动其中一种。
-
-在 AstrBot 平台管理中添加原生微信 ClawBot（`weixin_oc`）、Telegram（`telegram`）或飞书（`lark`），由宿主管理登录、凭证和网络。测试用户先私聊 `/sid`，记录平台实例 ID 与 UID。
+启动后在 AstrBot 平台管理中添加对应适配器完成登录，并让测试账号私聊发送 `/sid` 获取平台实例 ID 与 UID。
 
 ## 单次字段采样
 
-测试宿主自带「Bridge 平台字段采样」插件，默认关闭。在插件配置中填写测试平台实例 ID 和测试用户 UID，再启用单次采样。
+测试宿主预装了「Bridge 平台字段采样」辅助插件（默认关闭）。填入测试平台实例 ID 与测试用户 UID 并启用后，即可按消息类型采样：
 
-1. 私聊发送 `/bridge_probe arm text`。
-2. 看到提示后，在 120 秒内发送一条合成测试文字。
-3. 到 `data/plugin_data/bridge_platform_probe/` 读取生成的 JSON。
-4. 对其他样本重新执行 `arm`；`/bridge_probe cancel` 取消一次采样。
+1. 私聊发送 `/bridge_probe arm <标签>`（可选标签：`text`、`command`、`image`、`voice`、`file`、`video`、`reply`、`forward`、`formatted`、`text-link`、`mention`、`relogin`）。
+2. 在 120 秒内发送一条对应的测试消息（中途可用 `/bridge_probe cancel` 取消）。
+3. 到 `data/plugin_data/bridge_platform_probe/` 查看生成的 JSON 报告。
 
-标签为 `text`、`command`、`image`、`voice`、`file`、`video`、`reply`、`forward`、`formatted`、`text-link`、`mention`、`relogin`。每次只采下一条符合账号范围和接收时间的私聊事件。插件重载清除采样选择。
+采样只检查字段完整性、类型、时间戳转换、正文处理与客户端/接收者归属；所有 ID 与文本仅记录本地随机密钥生成的 HMAC 指纹（`fingerprint.key` 保存在测试目录用于同环境重登比对），不落盘原始载荷、正文或平台 Token。
 
-报告保存字段是否存在、类型、组件类型、原始 ID 与宿主 ID 是否一致、时间转换、正文转换和接收者匹配结果。ID 和正文只保存使用本地密钥计算的 HMAC；不同测试安装的指纹不能直接比较。`fingerprint.key` 留在测试数据目录，用于同一安装内的重新登录对照。
-
-`producer_at_arm` 与 `producer_at_observation` 是观察时的原生身份快照。排队事件的来源证明仍须依据原始接收者或事件携带的原生客户端。报告不保存原始载荷、正文、平台 Token、`context_token`、二维码或媒体地址与密钥。
-
-| 平台 | 字段与事件核对 |
+| 平台 | 重点核对字段 |
 | --- | --- |
 | 微信 ClawBot | `from_user_id`、`to_user_id`、原始 `message_id`、`create_time_ms`、方向、状态、文字条目与组件转换 |
-| Telegram | 普通 `Update.message`、数字 Bot ID、事件客户端、chat/发送者关系、消息 ID、带时区的 date、实体与正文转换 |
-| 飞书 | 原生 API 客户端、应用与机器人 OpenID、SDK 消息 ID、毫秒 `create_time`、单聊文字类型、引用与组件转换 |
+| Telegram | 普通 `Update.message`、数字 Bot ID、事件客户端、`chat`/发送者一致性、消息 ID、带时区 `date` 与实体转换 |
+| 飞书 | 原生 API 客户端、应用与机器人 OpenID、SDK 消息 ID、毫秒 `create_time`、`p2p/text` 类型与引用转换 |
 
-## Bridge 业务流程
+## 端到端业务验证清单
 
-使用仓库候选包安装到测试宿主，按[安装指南](INSTALL.md)连接独立 Hindsight。选择测试平台与 UID，确认机器人身份，启用读写记忆。
+将候选包安装到测试宿主，按 [安装指南](INSTALL.md) 接入独立 Hindsight，添加测试账号并切换为「读写记忆」后，逐项验证：
 
-| 场景 | 操作与预期 |
+| 验证场景 | 预期结果 |
 | --- | --- |
-| 保存与回忆 | 发送含独特合成偏好的文字；用户与最终助手文字分别保存；新会话仍能召回 |
-| 三种模式 | 读写记忆保存并召回；只读停止新增；停用停止保存和召回 |
-| 知识页与工具 | 在本人记忆库选择知识页；核对自动参考与按需工具的实际结果 |
-| 用户与实例隔离 | 使用不同用户或实例发送不同合成内容；查询和命令只作用于本人记忆库 |
-| 去重与命令防重 | 原生对象重放同一消息；材料只保存一次，旧状态命令不覆盖较新的暂停 |
-| 重新登录与换账号 | 同账号身份保持连续；不同账号重新确认；旧排队事件不能写入新账号 |
-| 权限与迟到结果 | 撤销使用者或暂停期间，不采集新内容，不注入迟到查询结果 |
-| 断线与重载 | Hindsight 恢复后沿用冻结任务；宿主与插件重载后身份、模式和记忆库保持一致 |
-| 完整遗忘 | 清除所选记忆范围及旧待办；旧查询、旧助手回调不能进入新代次 |
-| 长文与文件 | 核对原生发送、分段和 JSON 导出；平台拒绝发送时显示实际错误 |
+| 基础保存与召回 | 发送含具体偏好的文字，确认用户发言与助手回复分别入库，开启新会话可召回 |
+| 三种模式切换 | 读写正常保存召回；只读只召回不新增；停用不保存也不召回 |
+| 知识页与按需工具 | 选中并排序知识页，核对自动注入与按需工具读取的真实输出 |
+| 多用户/实例隔离 | 不同账号或实例互不串库，私聊命令仅查询本人数据 |
+| 消息去重与命令防重 | 重放同一原始消息只入库一次；旧状态命令不覆盖较新的暂停状态 |
+| 重登与换号 | 同账号重登延续原记忆库；换号后旧绑定失效、在途消息不写入新账号 |
+| 权限撤销与迟到请求 | 移除账号或暂停期间，不再保存新消息，也不注入迟到的检索结果 |
+| 断连与重载恢复 | Hindsight 恢复连接后继续处理冻结任务；宿主重载后身份、模式与 Bank 不变 |
+| 清空记忆（遗忘） | 彻底删除旧 Bank 及待办任务，旧轮次回调和查询不污染新代次 |
+| 长消息与 JSON 导出 | 核对超长文本分段及 `/hindsight export` 导出文件，平台拒收时返回明确错误 |
 
-证据记录代码提交与文件摘要、AstrBot/Hindsight/SDK 版本、模型配置标识、平台实例指纹、操作和实际结果。平台收发、原生宿主合成载荷、真实 Hindsight 与模型调用分别记录。
+验收报告需记录对应的代码 commit、文件摘要、AstrBot/Hindsight/SDK 版本、模型标识、平台指纹及实测结果。

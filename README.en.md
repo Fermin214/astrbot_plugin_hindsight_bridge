@@ -2,91 +2,98 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
-Connect self-hosted Hindsight to let AstrBot remember you across new conversations.
+Connect AstrBot to self-hosted [Hindsight](https://github.com/vectorize-io/hindsight) so your bot remembers private chats across conversations.
 
-During normal conversations, the plugin sends private chat text from QQ, WeChat ClawBot, Telegram, and Feishu to [Hindsight](https://github.com/vectorize-io/hindsight), organizing it into long-term memories and automatically retrieving relevant context in future conversations. Memories are isolated per user.
+During normal conversations, the plugin extracts private text messages from QQ, WeChat ClawBot, Telegram, and Feishu, sends them to Hindsight for long-term memory extraction, and retrieves relevant memories for future replies. Each user has an isolated memory bank.
 
-Manage connections, add users, and adjust memory modes directly in the AstrBot plugin panel. Browse, search, and manage memory contents in Hindsight's official Control Plane. You can connect to an existing Hindsight instance or deploy a companion service via the setup wizard, reusing models already configured in AstrBot.
+## Features
+
+- **Automatic Capture & Recall**: Conversations are saved automatically in the background and recalled semantically in later chats—either via **Auto Recall** or **On-Demand Agent Tools**.
+- **Knowledge Pages & Reflect**: Attach up to 8 ordered Knowledge Pages generated in Hindsight's Control Plane, or enable per-user Reflect synthesis for complex questions.
+- **Per-User Controls & Inspection**: Switch between Read/Write, Read-Only, and Paused modes per user, customize memory prompts, enable read-only recall on quoted messages or links, and inspect exact delivered context per turn.
+- **Multi-Platform Isolation**: Supports OneBot v11, QQ Official C2C (WebSocket & Webhook), WeChat ClawBot, Telegram, and Feishu private chats, isolated by bot account and user.
+- **Hassle-Free Deployment & Queuing**: Generate a companion Docker deployment command on Linux that reuses AstrBot's configured models, or connect any existing Hindsight service on Windows/Linux. Unsent messages queue locally and retry once Hindsight comes back online.
+
+## Requirements
+
+| Component | Supported |
+| --- | --- |
+| AstrBot | **4.29.1+** using the built-in `local` executor |
+| Hindsight | Self-hosted **1.1.0** or **1.2.0** |
+| Platforms (private chat) | OneBot v11 (`aiocqhttp`), QQ Official (`qq_official` / `qq_official_webhook`), WeChat ClawBot (`weixin_oc`), Telegram (`telegram`), Feishu (`lark`) |
+| Host OS | Linux (Docker Engine + Compose v2) for companion setup; Windows or any host when connecting an existing Hindsight instance |
+
+See [Compatibility](docs/SUPPORT.md) for details.
 
 ## Installation
 
-Requires **AstrBot 4.29.1+ with the built-in `local` executor** and **Hindsight 1.1.0 / 1.2.0**. Supported private chats include OneBot v11 (`aiocqhttp`), QQ Official Bot C2C (WebSocket `qq_official` and Webhook `qq_official_webhook`), WeChat native [ClawBot](docs/WEIXIN.md) (`weixin_oc`), [Telegram Bot](docs/TELEGRAM.md) (`telegram`), and [Feishu](docs/FEISHU.md) (`lark`). Linux Docker Engine supports the companion installer. On Windows, connect to a local or remote Hindsight service. See [Compatibility](docs/SUPPORT.md).
-
-1. In AstrBot, navigate to **Plugins → Install → Install from URL**, and enter:
+1. In AstrBot, go to **Plugins → Install → Install from URL** and enter:
 
    ```text
    https://github.com/Fermin214/astrbot_plugin_hindsight_bridge
    ```
 
-2. After installation, open **Hindsight Bridge Plugin Details → Memory Management → Plugin Settings**.
-3. Choose the deployment type:
-   - **Companion Service**: Generate the installation command and run it in the terminal of the Linux host running AstrBot.
-   - **Existing Service**: Enter the API URL, API Key, and official Control Plane URL for your Hindsight 1.1.0 or 1.2.0 instance, click **Test Service Connection**, then **Save Connection**.
-4. When using the companion service, select the memory processing model and embedding model (reranker model is optional) in settings, then click **Save and Connect**.
-5. Go to **Users & Memories**, click **Add User**, and select the bot instance: enter the QQ number for OneBot, or the user UID returned by `/sid` in private chat for QQ Official Bot, WeChat ClawBot, Telegram, or Feishu. Verify and confirm the bot identity to start chatting.
+2. Open **Hindsight Bridge Plugin Details → Memory Management → Plugin Settings**:
+   - **Companion Service** (recommended on Linux): Click **Generate Install Command**, run it on the Linux host running AstrBot, then select your chat and embedding models (reranker is optional) and click **Save and Connect**.
+   - **Existing Service**: Enter your Hindsight 1.1.0 or 1.2.0 API URL, API Key, and Control Plane URL, click **Test Connection**, then **Save Connection**.
+3. Switch to **Users & Memories**, click **+ Add User**, choose the bot instance, and enter the user ID (QQ number for OneBot; UID from `/sid` in private chat for QQ Official, WeChat ClawBot, Telegram, or Feishu). Confirm the bot identity and start chatting.
 
-The companion deployment reuses providers already configured in AstrBot for memory processing and embeddings—no need to re-enter endpoints or keys. If embedding models are missing, add one under AstrBot's "Model Providers → Embedding".
-
-Management differences between the two modes:
+Companion deployments reuse providers already configured in AstrBot—no duplicate endpoints or keys needed. If no embedding model appears, add one under AstrBot's **Model Providers → Embedding**.
 
 | Capability | Companion Deployment | Existing Service |
 | --- | --- | --- |
-| Memory storage, retrieval, knowledge pages, user management | In plugin panel | In plugin panel |
-| Token budgets, timeouts, query and queue settings | In plugin panel | In plugin panel |
-| Model configuration | Select AstrBot models in plugin | Maintained in existing service |
-| Service backup and upgrades | Plugin provides steps and commands | Maintained in existing service |
-| Service redeploy and uninstall | Plugin generates dedicated commands | Maintained in existing service |
+| Users, modes, knowledge pages, parameters | Plugin panel | Plugin panel |
+| Browse, search, and edit memory entries | Official Control Plane | Official Control Plane |
+| Model configuration | Selected in plugin panel | Managed by your service |
+| Service backup, upgrade, redeploy, uninstall | Plugin panel generates commands | Managed by your service |
 
-See the [Installation Guide](docs/INSTALL.md), [Native Windows Deployment](docs/WINDOWS.md), and [Linux Deployment](deploy/README.md) for setup steps.
+See the [Installation Guide](docs/INSTALL.md), [Native Windows Deployment](docs/WINDOWS.md), and [Linux Manual Deployment](deploy/README.md) for full instructions.
 
 ## Upgrading
 
-Backing up plugin business data and control state is recommended before upgrades (see [Backup & Restore](docs/DATA-MAINTENANCE.md)). Update and reload the plugin in AstrBot's plugin management; if prompted to confirm accounts, verify the bot identity to proceed.
+> **Upgrading to 0.4.0**: Back up your plugin data, control directory, and config before upgrading (see [Backup & Restore](docs/DATA-MAINTENANCE.md)). **0.4.0 automatically migrates the control database to schema format 7 while preserving existing banks, settings, and pending records; direct downgrades to older plugin versions are not supported afterward.**
 
-To upgrade companion Hindsight services, follow the [Service Upgrade Guide](docs/DATA-MAINTENANCE.md#升级-hindsight-服务) (new companion deployments use Hindsight 1.2.0 by default; updating the plugin itself does not modify the Hindsight service). For QQ Official Bots, switching between WebSocket and Webhook retains existing memories as long as the platform instance, AppID, and user OpenID remain unchanged.
+Update and reload the plugin in AstrBot's plugin manager; if prompted, re-confirm the bot identity. Updating the plugin does not touch your Hindsight containers. To upgrade a companion Hindsight service, follow the [Service Upgrade Guide](docs/DATA-MAINTENANCE.md#升级-hindsight-服务) (fresh companion installs default to 1.2.0).
 
 ## Usage & Management
 
-No memory commands are required during normal chats. In **Users & Memories**, select a user and click **Read/Write / Read-Only / Paused** to switch modes. You can also monitor saved, pending, and failed item counts and recent retrieval times. Removing a user revokes memory access immediately while preserving existing memories.
+Normal chatting requires no commands. Open **Users & Memories** in the plugin panel to:
 
-Copy the official management URL from **Plugin Settings → Connection & Access** and open Hindsight's official Control Plane in your browser. Copy the **Bank ID** (a memory bank isolated by bot and user) to browse, search, and manage memories upon logging in. See [Deployment](deploy/README.md#五打开官方-control-plane) for remote access and login key retrieval.
+- **Switch Memory Modes**: Toggle **Read/Write**, **Read-Only**, or **Paused** at the top overview card and monitor saved, pending, and failed counts alongside the latest recall result.
+- **Tune Chat Recall**: Switch between **Auto Recall** and **On-Demand Tools**, customize the memory prompt and retrieval budget, allow read-only recall on quoted replies or links, and inspect delivered context snapshots per turn.
+- **Manage Knowledge Pages & Reflect**: Pick, order, and toggle up to 8 Knowledge Pages, or enable per-user Reflect synthesis.
+- **Edit Content in Control Plane**: Copy the Control Plane URL from **Plugin Settings → Hindsight Service Connection** and the user's **Bank ID** to browse, search, edit, or export memories directly in Hindsight (see [Deployment](deploy/README.md#五打开官方-control-plane) for login key retrieval).
+- **Recover or Clear Data**: Resolve upgrade or error pauses under **View Pause Status**, clear stuck Reflect states via **Unblock Reflect** after confirming no active task remains on Hindsight, or permanently erase a user's bank via **Clear Memory** (AstrBot's own chat history stays intact).
 
-- **Chat Knowledge Pages**: Select up to 8 theme documents generated by Hindsight for the bot to reference within your token budget. Create and update pages in the official Control Plane, and manage selection and priority in the plugin panel. See [Knowledge Pages](docs/USAGE.md#可选知识页).
-- **Detailed Memories**: Defaults to **Auto Recall**. Alternatively, choose **On-Demand Tools** to let the AstrBot Agent actively call tools to search knowledge pages, read original text, or retrieve specific facts. See [On-Demand Memory Tools](docs/USAGE.md#按需记忆工具).
-- **Reflect**: Can be enabled independently in detailed memory settings, allowing Hindsight to synthesize memories to answer complex questions. See [Reflect](docs/USAGE.md#reflect).
-- **Memory & Page Parameters**: Adjust token limits, timeouts, query token budgets, tokenizer encodings, queue limits, and excluded command prefixes in **Plugin Settings → Memory & Knowledge Pages**.
-- **Clear Memory**: Deletes all long-term memories, knowledge pages, source materials, and pending records for the selected memory bank. AstrBot's own local conversation history remains intact.
-- **State Recovery**: If a companion upgrade or service disruption leaves read/write operations paused, inspect the issue under **View Pause Status** and resume once checks pass. See [User Guide](docs/USAGE.md) for full instructions.
+Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list):
 
-Users can also manage their memories via private chat commands in QQ, WeChat ClawBot, Telegram, or Feishu:
-
-| Goal | Command |
+| Action | Command |
 | --- | --- |
-| View memories | `/hindsight view` |
-| View selected knowledge page | `/hindsight background [index]` |
-| Stop recording new content while using existing memories | `/hindsight readonly` |
-| Pause recording and automatic memory retrieval | `/hindsight pause` |
-| Enable recording and automatic retrieval | `/hindsight on` |
-| Clear personal memories | `/hindsight forget`, then confirm per reply |
+| List personal memories | `/hindsight view` |
+| Read selected knowledge page | `/hindsight background [index]` |
+| Check status & diagnostics | `/hindsight status` |
+| Export personal memories as JSON | `/hindsight export` |
+| Switch to read-only (keep recalling, stop saving) | `/hindsight readonly` |
+| Pause saving and automatic recall | `/hindsight pause` |
+| Resume read/write | `/hindsight on` |
+| Erase personal memories | `/hindsight forget`, then reply to confirm |
 
-To uninstall a companion service, navigate to **Plugin Settings → Service Management** to generate a dedicated uninstallation command and run it on the host to clean up containers and data volumes.
+## Scope
 
-## Memory Scope
-
-Records private chat text from enabled accounts and the bot's final text responses saved to AstrBot's conversation history. Group chats, images, voice messages, quotes, forwards, and bot commands are not automatically recorded. Historical chats prior to installation are not automatically imported.
-
-New messages are processed in the background. If the memory service is temporarily unavailable, normal conversations continue uninterrupted, and pending records are queued for processing once the connection is restored. Conversations are sent to the connected Hindsight instance and its model services; viewing and searching read memories from Hindsight, while corrections are made in the official Control Plane.
+- **Recorded**: Private text messages from enabled users and final assistant replies saved to AstrBot's conversation history.
+- **Excluded**: Group chats, media (images, audio, files, video), forwards, commands (starting with `/`), and chats from before installation. When read-only recall for quoted replies/links is enabled, those turns read existing memories without saving new ones.
+- **Privacy**: Conversation text is sent only to your configured Hindsight instance and model providers.
 
 ## Documentation
 
-- [Installation Guide](docs/INSTALL.md): Setup wizard and connecting existing services.
-- [User Guide](docs/USAGE.md): Panel management and private chat commands.
-- [Compatibility](docs/SUPPORT.md): Versions, providers, platforms, and message types.
-- [Backup & Restore](docs/DATA-MAINTENANCE.md): Plugin data maintenance and companion service upgrades.
-- [Contributing](CONTRIBUTING.md): Code structure, interfaces, and testing guidelines.
+- [Installation Guide](docs/INSTALL.md): Setup wizard, connecting existing instances, and troubleshooting
+- [User Guide](docs/USAGE.md): Panel controls, Knowledge Pages, On-Demand Tools, Reflect, and commands
+- [Compatibility](docs/SUPPORT.md): Versions, model providers, platforms, and limits
+- [Backup & Restore](docs/DATA-MAINTENANCE.md): Backups, disaster recovery, and companion upgrades
+- [Contributing](CONTRIBUTING.md): Architecture overview, test suites, and contribution rules
 
-For bug reports or feature requests, please open an issue on [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) with version details, reproduction steps, and error logs.
+Please report issues on [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) with versions, steps to reproduce, and error details.
 
 ## License
 
-Released under the [MIT License](LICENSE). Third-party license details are available in [NOTICE.md](NOTICE.md).
+[MIT License](LICENSE). Third-party dependency notices are listed in [NOTICE.md](NOTICE.md).
