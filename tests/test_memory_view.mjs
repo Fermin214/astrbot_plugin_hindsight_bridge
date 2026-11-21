@@ -824,6 +824,7 @@ test("chat reference loads legacy defaults and saves independent recall and capt
       assert.equal(payload.recall_budget, "high");
       assert.equal(payload.capture_assistant, false);
       assert.equal(payload.exclude_assistant, true);
+      assert.equal(payload.recall_on_quoted_or_link, true);
       return { selection: { ...payload, revision: 4 }, prompt_tokens: 0 };
     },
   };
@@ -832,8 +833,10 @@ test("chat reference loads legacy defaults and saves independent recall and capt
   await context.loadReferences(draft);
   assert.equal(context.$("reference-budget").value, "mid");
   assert.equal(context.$("reference-capture-assistant").checked, true);
+  assert.equal(context.$("reference-quoted").checked, false);
   context.$("reference-budget").value = "high";
   context.$("reference-capture-assistant").checked = false;
+  context.$("reference-quoted").checked = true;
   await context.saveReferences();
   assert.equal(draft.revision, 4);
 });

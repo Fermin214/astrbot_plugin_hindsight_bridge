@@ -593,7 +593,8 @@ class Outbox:
         include_assistant_context=True,
     ) -> Capture:
         if (
-            not incoming.text.strip()
+            not incoming.capture_allowed
+            or not incoming.text.strip()
             or len(incoming.text) > 8000
             or not conversation_id
         ):

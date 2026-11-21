@@ -79,15 +79,18 @@ def valid_user_id(host_type, value):
     return not contract.numeric or (value.isascii() and value.isdecimal() and len(value) <= 20)
 
 
-def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=None) -> Incoming | None:
-    return inspect_header(event, plain_type, wake_prefixes, adapter=adapter, binding=binding)
+def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=None,
+                  allow_readonly=False) -> Incoming | None:
+    return inspect_header(event, plain_type, wake_prefixes, adapter=adapter, binding=binding,
+                          allow_readonly=allow_readonly)
 
 
-def inspect_header(event, plain_type, wake_prefixes, *, adapter, binding, inspect=None):
+def inspect_header(event, plain_type, wake_prefixes, *, adapter, binding, inspect=None, allow_readonly=False):
     contract = PLATFORMS.get(event.get_platform_name())
     if not contract:
         return None
-    return contract.source.header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
+    return contract.source.header(event, plain_type, wake_prefixes, adapter, binding,
+                                  inspect=inspect, allow_readonly=allow_readonly)
 
 
 def native_login(adapter):

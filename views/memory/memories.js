@@ -188,6 +188,7 @@ export function createMemories(view) {
       for (const type of ["world", "experience", "observation"]) view.$("reference-" + type).checked = saved.types.includes(type);
       view.$("reference-exclude").checked = saved.exclude_assistant;
       view.$("reference-capture-assistant").checked = saved.capture_assistant ?? true;
+      view.$("reference-quoted").checked = saved.recall_on_quoted_or_link ?? false;
       view.$("reference-budget").value = saved.recall_budget ?? "mid";
       view.$("reference-limit").value = saved.detail_limit;
       view.$("reference-history").value = saved.history_limit;
@@ -221,6 +222,7 @@ export function createMemories(view) {
     if (!draft?.selection || view.$("reference-save").disabled || !view.$("reference-form").reportValidity()) return;
     const payload = { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
       capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
+      recall_on_quoted_or_link: view.$("reference-quoted").checked,
       types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
       detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber,
       revision: draft.revision, scope_revision: draft.scopeRevision, config_revision: draft.configRevision };

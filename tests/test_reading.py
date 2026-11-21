@@ -1,6 +1,7 @@
 """Boundaries that are difficult to force deterministically through the Agent."""
 
 import asyncio
+from dataclasses import replace
 import json
 import time
 from types import SimpleNamespace
@@ -126,12 +127,18 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         self.tools.owned = {name: SimpleNamespace(name=name, description=name, active=True, handler_module_path="bridge.main") for name in NAMES}
         self.tools.manager = SimpleNamespace(get_func=lambda name: self.tools.owned.get(name), remove_func=lambda name: None)
 
-    async def ready(self):
+    async def ready(self, *, readonly=False):
         event, request = self.turn()
         request = self.request = ToolRequest()
         request.model = None
         request.prompt = "source"
         scope = self.scope()
+        if readonly:
+            self.incoming = replace(self.incoming, capture_allowed=False)
+            self.plugin.incoming[event] = self.incoming
+            save_reference_options(self.plugin.outbox, scope, **{
+                **reference_options(self.plugin.outbox, scope), "recall_on_quoted_or_link": True,
+            })
         save_options(self.plugin.outbox, scope, revision=0, mode="tools")
         request.func_tool = ToolSet(list(self.tools.owned.values()))
         original = self.tools.filter_request(event, request)
@@ -145,6 +152,16 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         )])]
         await self.plugin.bind_memory_tools(event, context)
         return event, context
+
+    async def test_readonly_tools_cannot_read_after_bot_identity_changes(self):
+        event, context = await self.ready(readonly=True)
+        queue = self.plugin.outbox
+        self.assertFalse(self.incoming.capture_allowed)
+        queue.access.observe_bot("qq", "aiocqhttp", "another-bot")
+        with patch.object(self.tools, "read", AsyncMock()) as read:
+            self.assertIn("reading_changed", await self.tools.execute(context, "recall", {"query": "q"}))
+        read.assert_not_awaited()
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 0)
 
     async def test_parallel_calls_share_one_ledger_and_only_filter_owned_entries(self):
         event, context = await self.ready()

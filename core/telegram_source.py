@@ -17,6 +17,7 @@ PLAIN_ENTITIES = frozenset({
     "code", "pre", "blockquote", "expandable_blockquote", "url", "email",
     "phone_number", "hashtag", "cashtag",
 })
+READONLY_ENTITIES = frozenset({"text_link", "mention"})
 REPLY_FIELDS = frozenset({"reply_to_message", "external_reply", "quote", "reply_to_story"})
 MEDIA_FIELDS = frozenset({
     "animation", "audio", "contact", "dice", "document", "game", "location", "paid_media",
@@ -91,7 +92,48 @@ def message_shape(message):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
+def readonly_text(message, bot_name):
+    if not isinstance(bot_name, str):
+        return None
+    try:
+        encoded = message.text.encode("utf-16-le")
+    except UnicodeError:
+        return None
+    pieces, mentions, end = [], [], 0
+    for entity in message.entities or ():
+        if entity.type not in READONLY_ENTITIES:
+            continue
+        if type(entity.offset) is not int or type(entity.length) is not int:
+            return None
+        start, stop = entity.offset * 2, (entity.offset + entity.length) * 2
+        if entity.api_kwargs or entity.offset < 0 or entity.length <= 0 or start < end or stop > len(encoded):
+            return None
+        try:
+            text = encoded[start:stop].decode("utf-16-le")
+        except UnicodeError:
+            return None
+        if entity.type == "mention":
+            if not text.startswith("@") or len(text) < 2:
+                return None
+            name = text[1:]
+            self_mention = name.lower() == bot_name.lower()
+            mentions.append((bot_name if self_mention else name, name))
+            if self_mention:
+                pieces.append(encoded[end:start])
+                end = stop
+        else:
+            if not isinstance(entity.url, str) or not entity.url or len(entity.url) > 8000:
+                return None
+            pieces.extend((encoded[end:stop], f" ({entity.url})".encode("utf-16-le")))
+            end = stop
+    pieces.append(encoded[end:])
+    try:
+        return b"".join(pieces).decode("utf-16-le"), mentions
+    except UnicodeError:
+        return None
+
+
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
@@ -124,14 +166,19 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     )
     if inspect is not None:
         inspect(login.bot_id, occurred if valid_time else None, received, lambda: message_shape(msg))
+    quoted = msg.reply_to_message is not None
+    linked = any(entity.type in READONLY_ENTITIES for entity in msg.entities or ())
+    readonly = quoted or linked
+    allowed_fields = MESSAGE_FIELDS | ({"reply_to_message"} if allow_readonly else set())
+    allowed_entities = PLAIN_ENTITIES | (READONLY_ENTITIES if allow_readonly else set())
     if (
         not valid_time or set(raw.to_dict()) - {"update_id", "message"}
-        or set(msg.to_dict()) - MESSAGE_FIELDS or msg.api_kwargs
+        or set(msg.to_dict()) - allowed_fields or msg.api_kwargs
         or any(getattr(msg, name, False) for name in (
             "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
         ))
         or not isinstance(original, str) or not original.strip() or len(original) > 8000
-        or any(entity.type not in PLAIN_ENTITIES for entity in msg.entities or ())
+        or any(entity.type not in allowed_entities for entity in msg.entities or ())
     ):
         return None
     # AstrBot removes the Bot username suffix before dispatching a command.
@@ -143,18 +190,35 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
             if target == login.client.username:
                 canonical = name + (separator + arguments if separator else "")
     parts = event.get_messages()
+    visible = canonical
+    if readonly and allow_readonly:
+        from astrbot.api.message_components import At, Reply
+
+        projected = readonly_text(msg, event.get_self_id())
+        if projected is None or not isinstance(parts, list) or any(type(part) not in (plain_type, At, Reply) for part in parts):
+            return None
+        if linked:
+            visible, mentions = projected
+        else:
+            mentions = []
+        if [(part.qq, part.name) for part in parts if type(part) is At] != mentions:
+            return None
+        replies = [part for part in parts if type(part) is Reply]
+        if len(replies) > 1 or replies and (not quoted or str(replies[0].id) != str(msg.reply_to_message.message_id)):
+            return None
+        parts = [part for part in parts if type(part) is plain_type]
     if (
         not isinstance(parts, list) or len(parts) != 1
-        or type(parts[0]) is not plain_type or parts[0].text != canonical
+        or type(parts[0]) is not plain_type or parts[0].text != visible
     ):
         return None
     host_text = event.get_message_str()
     matching = isinstance(host_text, str) and (
-        canonical.strip() == host_text.strip() or (
+        visible.strip() == host_text.strip() or (
             getattr(event, "is_at_or_wake_command", False) is True
             and any(
-                canonical.strip().startswith(prefix)
-                and canonical.strip()[len(prefix):].strip() == host_text.strip()
+                visible.strip().startswith(prefix)
+                and visible.strip()[len(prefix):].strip() == host_text.strip()
                 for prefix in wake_prefixes if isinstance(prefix, str) and prefix
             )
         )
@@ -163,5 +227,5 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     return Incoming(
         "telegram", event.get_platform_id(), login.bot_id, str(sender.id),
-        str(msg.message_id), occurred, canonical, received_at=received,
+        str(msg.message_id), occurred, canonical, received_at=received, capture_allowed=not readonly,
     )

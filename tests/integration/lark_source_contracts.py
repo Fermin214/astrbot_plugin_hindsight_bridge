@@ -122,6 +122,12 @@ async def main(output):
             sample = await fixture.event()
             setattr(sample.message_obj.raw_message, field, value)
             assert header(sample) is None, (mode, field, type(value))
+            readonly = native_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True)
+            if field in {"parent_id", "root_id"}:
+                assert readonly is not None and readonly.capture_allowed is False
+                assert readonly.text == "  synthetic text  "
+            else:
+                assert readonly is None, (mode, field)
             expected = {
                 "message_type": "media_or_non_text", "parent_id": "quoted_or_reply",
                 "root_id": "quoted_or_reply", "thread_id": "quoted_or_reply",

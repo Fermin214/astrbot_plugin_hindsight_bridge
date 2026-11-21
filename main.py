@@ -378,16 +378,16 @@ class HindsightBridge(Star):
             self.refresh_permissions()
 
     def allowed(self, event):
-        return self.authorized_source(event) is not None
+        return self.authorized_source(event, allow_readonly=True) is not None
 
-    def authorized_source(self, event):
+    def authorized_source(self, event, *, allow_readonly=False):
         if self.stopping or self.outbox is None:
             return None
         try:
             accounts = pairs(self.config.get("allowed_accounts", []))
         except ValueError:
             return None
-        incoming = self.source_header(event)
+        incoming = self.source_header(event, allow_readonly=allow_readonly)
         if (
             incoming is not None
             and (incoming.platform_instance_id, incoming.user_id) in accounts
@@ -400,7 +400,7 @@ class HindsightBridge(Star):
             return incoming
         return None
 
-    def source_header(self, event, *, inspect=None):
+    def source_header(self, event, *, inspect=None, allow_readonly=False):
         getter = getattr(self.context, "get_platform_inst", None)
         adapter = getter(event.get_platform_id()) if getter else None
         if getter and adapter is None:
@@ -408,6 +408,7 @@ class HindsightBridge(Star):
         return inspect_header(
             event, Plain, self.context.get_config().get("wake_prefix", []),
             adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()), inspect=inspect,
+            allow_readonly=allow_readonly,
         )
 
     def excluded_prefix(self, text):
@@ -415,7 +416,16 @@ class HindsightBridge(Star):
         return any(text.lstrip().startswith(prefix) for prefix in prefixes if prefix)
 
     def snapshot(self, event):
-        incoming = self.authorized_source(event)
+        incoming = self.authorized_source(event, allow_readonly=True)
+        if incoming is not None and not incoming.capture_allowed:
+            scope = self.outbox.scope_owner(incoming.scope(self.outbox.deployment_id).id)
+            try:
+                enabled = bool(scope and reference_options(self.outbox, scope)["recall_on_quoted_or_link"])
+            except (QueueError, sqlite3.Error):
+                self.warning("reference_settings_invalid")
+                return None
+            if not enabled:
+                return None
         return incoming if incoming is not None and not self.excluded_prefix(incoming.text) else None
 
     def record_skip(self, event, queue):
@@ -506,7 +516,7 @@ class HindsightBridge(Star):
         queue = self.outbox
         if queue is not None and not self.stopping and event not in self.incoming:
             if event.get_platform_name() == "aiocqhttp":
-                header = self.source_header(event)
+                header = self.source_header(event, allow_readonly=True)
                 if (
                     header and (header.platform_instance_id, header.user_id) in (self.permissions or ())
                     and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
@@ -930,6 +940,9 @@ class HindsightBridge(Star):
             if not self.outbox.can_recall(scope):
                 self.record_recall(scope, "skipped", started)
                 return
+            if not incoming.capture_allowed and not reference_options(self.outbox, scope)["recall_on_quoted_or_link"]:
+                self.record_skip(event, self.outbox)
+                return
             if incoming.timestamp < scope["accept_from"] or not self.outbox.accepts(incoming):
                 self.record_recall(scope, "skipped", started, "message_before_accept_from")
                 return
@@ -955,7 +968,7 @@ class HindsightBridge(Star):
                 or self.permission_revision != permission_revision
             ):
                 return
-            if scope["mode"] == "active":
+            if scope["mode"] == "active" and incoming.capture_allowed:
                 capture_assistant = self.captures_assistant(scope)
                 capture = self.freeze_user_capture(incoming, scope, conversation, rows, capture_assistant=capture_assistant)
                 if not capture.created:

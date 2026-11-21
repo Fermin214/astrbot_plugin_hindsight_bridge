@@ -280,7 +280,7 @@ class PanelScopes:
             queue, scope = await self.reference_scope(scope_id)
             config_revision = self.config_revision()
             if posting:
-                if (set(payload) - {"recall_budget", "capture_assistant"}
+                if (set(payload) - {"recall_budget", "capture_assistant", "recall_on_quoted_or_link"}
                     != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
                         "history_limit", "scope_revision", "config_revision"}
                     or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]

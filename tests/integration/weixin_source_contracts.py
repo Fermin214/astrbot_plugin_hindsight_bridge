@@ -76,8 +76,8 @@ class Fixture:
             await self.host._handle_inbound_message(copy.deepcopy(payload))
         return self.queue.get_nowait()
 
-    def header(self, event):
-        return native_header(event, Plain, ["/"], adapter=self.host, binding=self.binding)
+    def header(self, event, *, allow_readonly=False):
+        return native_header(event, Plain, ["/"], adapter=self.host, binding=self.binding, allow_readonly=allow_readonly)
 
 
 async def main(output):
@@ -175,6 +175,12 @@ async def main(output):
         ):
             sample = await fixture.event(changes=changes)
             assert fixture.header(sample) is None, label
+            readonly = fixture.header(sample, allow_readonly=True)
+            if label in {"reference", "root_relation", "parent_relation"}:
+                assert readonly is not None and readonly.capture_allowed is False
+                assert readonly.text == ("synthetic" if label == "reference" else "synthetic text")
+            else:
+                assert readonly is None, label
             if label in {"media", "reference"}:
                 reasons = []
                 assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,

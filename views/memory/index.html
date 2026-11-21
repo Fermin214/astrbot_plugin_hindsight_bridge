@@ -60,6 +60,7 @@
               </fieldset>
               <label class="check-label"><input type="checkbox" name="exclude_assistant" id="reference-exclude">排除可确认的纯助手发言</label>
               <label class="check-label" for="reference-capture-assistant"><input type="checkbox" name="capture_assistant" id="reference-capture-assistant" checked>保存助手回复</label>
+              <label class="check-label" for="reference-quoted"><input type="checkbox" name="recall_on_quoted_or_link" id="reference-quoted">引用回复或带链接的私聊文字也查找已有记忆（只读，不保存新记忆）</label>
               <div class="form-grid reference-limits">
                 <label for="reference-budget">检索预算<select id="reference-budget" name="recall_budget"><option value="low">低</option><option value="mid" selected>中</option><option value="high">高</option></select></label>
                 <label for="reference-limit">每条消息最多参考（条）<input id="reference-limit" name="detail_limit" type="number" min="0" max="100" step="1" required inputmode="numeric"></label>

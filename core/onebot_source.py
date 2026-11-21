@@ -81,7 +81,7 @@ def message_shape(segments):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=None):
+def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=None, allow_readonly=False):
     if not event.is_private_chat() or event.get_group_id():
         return None
     if adapter is not None and bound_client(event, adapter) is None:
@@ -120,16 +120,32 @@ def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=N
     if not isinstance(segments, list) or not segments or not components:
         return None
     texts = []
+    quoted = False
     for segment in segments:
-        if not isinstance(segment, Mapping) or segment.get("type") != "text":
+        if not isinstance(segment, Mapping):
             return None
         data = segment.get("data")
+        if allow_readonly and segment.get("type") == "reply":
+            if not isinstance(data, Mapping) or set(data) != {"id"} or type(data["id"]) not in (str, int):
+                return None
+            if (set(segment) != {"type", "data"} or quoted or len(str(data["id"])) > 20
+                    or not str(data["id"]).isascii() or not str(data["id"]).isdecimal() or int(data["id"]) <= 0):
+                return None
+            quoted = True
+            continue
+        if segment.get("type") != "text":
+            return None
         if not isinstance(data, Mapping) or not isinstance(data.get("text"), str):
             return None
         texts.append(data["text"])
-    if not all(
-        isinstance(value, plain_type) and isinstance(value.text, str) for value in components
-    ):
+    if quoted:
+        from astrbot.api.message_components import Reply
+
+        if (any(type(value) not in (plain_type, Reply) for value in components)
+                or sum(type(value) is Reply for value in components) > 1):
+            return None
+        components = [value for value in components if type(value) is plain_type]
+    if not components or not all(isinstance(value, plain_type) and isinstance(value.text, str) for value in components):
         return None
     original = "".join(texts)
     host_text = event.get_message_str().strip()
@@ -148,4 +164,5 @@ def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=N
         or len(original) > 8000
     ):
         return None
-    return Incoming("aiocqhttp", *fields, mid, timestamp, original, received_at=received)
+    return Incoming("aiocqhttp", *fields, mid, timestamp, original, received_at=received,
+                    capture_allowed=not quoted)

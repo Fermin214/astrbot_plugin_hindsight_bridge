@@ -199,6 +199,59 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
+    async def test_quoted_readonly_turn_recalls_and_records_usage_without_any_capture(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        save_reference_options(queue, scope, **{
+            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+        })
+        event, request = self.turn("readonly")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        with patch.object(plugin, "freeze_user_capture") as freeze, \
+                patch.object(plugin, "track_assistant_capture") as track:
+            await plugin.add_memory(event, request)
+        freeze.assert_not_called()
+        track.assert_not_called()
+        self.assertEqual(len(request.extra_user_content_parts), 1)
+        self.assertNotIn(event, plugin.pending_assistant_captures)
+        self.assertTrue(queue.references.list(scope))
+        self.assertTrue(any(str(row.url.path).endswith("/recall") for row in self.requests))
+        self.assertFalse(any(str(row.url.path).endswith("/memories") and row.method == "POST" for row in self.requests))
+        for table in ("events", "outbox", "window", "replies"):
+            self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    async def test_readonly_turn_requires_opt_in_and_discards_results_after_revocation(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        event, request = self.turn("readonly-disabled")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        with patch.object(plugin, "record_skip") as skipped:
+            await plugin.add_memory(event, request)
+        skipped.assert_called_once()
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertEqual(self.requests, [])
+        save_reference_options(queue, scope, **{
+            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+        })
+        event, request = self.turn("readonly-revoked")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        read = plugin.client.recall
+
+        async def revoke(*args, **kwargs):
+            result = await read(*args, **kwargs)
+            self.enabled = False
+            return result
+
+        with patch.object(plugin.client, "recall", side_effect=revoke):
+            await plugin.add_memory(event, request)
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertEqual(queue.references.list(scope), [])
+        for table in ("events", "outbox", "window", "replies"):
+            self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
     async def test_skip_diagnostics_rank_identity_and_time_before_shape_and_ignore_other_senders(self):
         plugin = self.plugin
         queue = plugin.outbox

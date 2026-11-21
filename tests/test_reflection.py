@@ -1,6 +1,7 @@
 """Transport uncertainty and cancellation timing beyond deterministic Agent flows."""
 
 import asyncio
+from dataclasses import replace
 import json
 from types import SimpleNamespace
 import unittest
@@ -17,6 +18,7 @@ from plugins.astrbot_plugin_hindsight_bridge.core.identity import canonical, sha
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
 from plugins.astrbot_plugin_hindsight_bridge.core.reflection import read_options, save_options as save_reflect
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 
 
 RESPONSE = {"text": "Native synthesis from the cited fact.", "based_on": {
@@ -79,9 +81,15 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.plugin.client.ensure_auth = AsyncMock()
         self.plugin.client.bank_exists = AsyncMock(return_value=True)
 
-    async def ready(self, *, mode="automatic", enabled=True):
+    async def ready(self, *, mode="automatic", enabled=True, readonly=False):
         event, _ = self.turn()
         scope = self.scope()
+        if readonly:
+            self.incoming = replace(self.incoming, capture_allowed=False)
+            self.plugin.incoming[event] = self.incoming
+            save_reference_options(self.plugin.outbox, scope, **{
+                **reference_options(self.plugin.outbox, scope), "recall_on_quoted_or_link": True,
+            })
         if mode == "tools":
             save_options(self.plugin.outbox, scope, revision=0, mode=mode)
         if enabled:
@@ -99,6 +107,15 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         ])]
         self.tools.begin(event, context)
         return event, context, scope
+
+    async def test_readonly_reflect_cannot_run_after_bot_identity_changes(self):
+        event, context, scope = await self.ready(readonly=True)
+        self.assertFalse(self.incoming.capture_allowed)
+        self.plugin.outbox.access.observe_bot("qq", "aiocqhttp", "another-bot")
+        native = self.plugin.client.reflect = AsyncMock()
+        self.assertIn("reading_changed", await self.tools.execute(context, "reflect", {"query": "q"}))
+        native.assert_not_awaited()
+        self.assertFalse(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id))
 
     async def test_independent_auto_mode_opens_only_reflect_and_uses_one_native_call(self):
         event, context, scope = await self.ready()
