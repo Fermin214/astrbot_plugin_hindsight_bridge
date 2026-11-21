@@ -102,6 +102,9 @@ async def main(port):
                 await page.clock.install()
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
+                page.on("requestfailed", lambda request: errors.append(request.url))
+                page.on("response", lambda response: errors.append(f"{response.status} {response.url}")
+                        if response.status >= 400 else None)
                 await page.add_init_script(SDK)
                 await page.goto(f"http://127.0.0.1:{port}/index.html" + ("?sandbox=1" if sandboxed else ""))
                 await page.locator('#background-page option[value="kp-fixture"]').wait_for(state="attached")
@@ -145,8 +148,8 @@ async def main(port):
             await browser.close()
     (OUTPUT / "report.json").write_text(json.dumps({
         "browser": "Chromium", "sdk_and_backend": "mock", "real_astrbot_dashboard": False,
-        "assets_sha256": {name: hashlib.sha256((VIEW / name).read_bytes()).hexdigest()
-                          for name in ("index.html", "app.js", "style.css")},
+        "assets_sha256": {asset.name: hashlib.sha256(asset.read_bytes()).hexdigest()
+                          for asset in sorted(VIEW.iterdir()) if asset.suffix in {".html", ".js", ".css"}},
         "passed": checks, "complete": True,
     }, indent=2))
 

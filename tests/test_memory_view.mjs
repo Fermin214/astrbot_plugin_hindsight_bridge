@@ -1,18 +1,15 @@
-"use strict";
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createView } from "../views/memory/app.js";
 
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const test = require("node:test");
-const vm = require("node:vm");
-
-const source = fs.readFileSync(path.join(__dirname, "../views/memory/app.js"), "utf8").replace(/\r\n/g, "\n");
-function declaration(name) {
-  const begin = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
-  assert.notEqual(begin, -1, `missing function ${name}`);
-  const end = source.indexOf("\n}\n", begin);
-  assert.notEqual(end, -1, `missing end of function ${name}`);
-  return source.slice(begin, end + 3);
+const implementations = new WeakMap();
+function loadFunctions(context, names) {
+  assert.ok(implementations.has(context));
+  for (const name of names) {
+    const implementation = implementations.get(context)[name];
+    assert.equal(typeof implementation, "function", `missing function ${name}`);
+    context[name] = implementation;
+  }
 }
 
 function harness() {
@@ -34,7 +31,9 @@ function harness() {
       focus() {}, select() {}, reset() {}, checkValidity() { return true; }, reportValidity() { return true; },
     };
   }
-  const context = vm.createContext({
+  const context = createView({ setTimeout, clearTimeout });
+  implementations.set(context, { ...context });
+  Object.assign(context, {
     console, Promise, Date, Error, URL,
     setTimeout: (callback, milliseconds) => milliseconds > 20000 ? context.expiryTimer(callback, milliseconds) : setTimeout(callback, 5),
     clearTimeout: (timer) => { if (timer?.callback) timer.cancelled = true; else clearTimeout(timer); },
@@ -46,8 +45,8 @@ function harness() {
     },
     $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
     el: (tag, kind, content) => Object.assign(node(), { textContent: content, className: kind || "" }),
-    window: { AstrBotPluginView: null, location: { reload() { context.reloads++; } } },
-    document: { documentElement: { dataset: {} }, querySelector: (selector) => selector.startsWith("[data-mode=")
+    window: { addEventListener() {}, AstrBotPluginView: null, location: { reload() { context.reloads++; } } },
+    document: { querySelectorAll: () => [], addEventListener() {}, documentElement: { dataset: {} }, querySelector: (selector) => selector.startsWith("[data-mode=")
       ? context.$("mode-" + selector.match(/"([^"]+)"/)[1]) : ({ value: "existing" }) },
     data: null, bridge: null, startRunning: false, viewReady: false, offContext: undefined, reloads: 0,
     locks: new Set(), scopeId: "", selectedAccount: "", maintenanceScopeId: "", maintenanceState: null,
@@ -78,7 +77,7 @@ function harness() {
     },
   });
   for (const name of ["withTimeout", "errorMessage", "managedMode", "versionCheckIdentity", "maintenanceSnapshot", "syncMaintenanceState", "scheduleMaintenanceExpiry", "start", "refreshView", "notify", "recallDescription", "renderStatus", "updateConnectionMode", "accountKey", "accountScopes", "updateUserChoices", "maintenanceScope", "renderMaintenance"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
   return context;
 }
@@ -86,7 +85,7 @@ function harness() {
 function parameterHarness() {
   const context = harness();
   for (const name of ["text", "renderParameterLimits", "renderParameters", "parameterPayload", "perform", "saveParameters"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
   const values = { background_max_tokens: 400, recall_max_tokens: 1200, context_max_chars: 4000,
     recall_timeout: 10, background_timeout: 1, recall_query_tokens: 380, query_tokenizer: "o200k_base",
@@ -212,7 +211,7 @@ test("a late parameter save response cannot overwrite newer bootstrap values", a
 
 test("manual version feedback survives polling and rejects results from a changed connection", async () => {
   const context = harness();
-  for (const name of ["renderServiceVersion", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  for (const name of ["renderServiceVersion", "checkServiceVersion"]) loadFunctions(context, [name]);
   context.data = { config: { configured: true, connection_revision: "a", managed: true }, backend: {} };
   let finish;
   context.bridge = { apiGet: () => new Promise((resolve) => { finish = resolve; }) };
@@ -234,7 +233,7 @@ test("manual version feedback survives polling and rejects results from a change
 
 test("manual version timeout is visible and higher versions never suggest downgrading", async () => {
   const context = harness();
-  for (const name of ["renderServiceVersion", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  for (const name of ["renderServiceVersion", "checkServiceVersion"]) loadFunctions(context, [name]);
   context.data = { config: { configured: false }, backend: {} };
   context.bridge = { apiGet: () => new Promise(() => {}) };
   await context.checkServiceVersion();
@@ -254,7 +253,7 @@ test("managed connection fields are readonly and saving the browser address cann
   assert.equal(context.$("api-key-field").hidden, true);
   assert.equal(context.$("save-settings").hidden, true);
   assert.equal(context.$("save-access").hidden, false);
-  for (const name of ["perform", "controlPlaneUrl", "saveAccess"]) vm.runInContext(declaration(name), context);
+  for (const name of ["perform", "controlPlaneUrl", "saveAccess"]) loadFunctions(context, [name]);
   context.$("control-plane-url").value = "https://memory.example.com";
   context.$("api-url").value = "http://owned-service:8888";
   context.$("api-key").value = "must-not-submit";
@@ -269,7 +268,7 @@ test("managed connection fields are readonly and saving the browser address cann
 
 test("version notices show upgrades only for the connected managed service", () => {
   const context = harness();
-  vm.runInContext(declaration("renderServiceVersion"), context);
+  loadFunctions(context, ["renderServiceVersion"]);
   context.data = { config: { configured: true, managed: true }, backend: {
     version: "1.1.0", target: "1.2.0", supported: true, managed: true, upgrade_available: true, pending: false,
   } };
@@ -306,7 +305,7 @@ test("version notices show upgrades only for the connected managed service", () 
 
 test("opening an upgrade cannot expose service management for an existing connection", () => {
   const context = harness();
-  vm.runInContext(declaration("openUpgrade"), context);
+  loadFunctions(context, ["openUpgrade"]);
   context.data = { config: { managed: false }, backend: { managed: true, upgrade_available: true } };
   context.openUpgrade();
   assert.notEqual(context.$("upgrade-dialog").open, true);
@@ -317,7 +316,7 @@ test("opening an upgrade cannot expose service management for an existing connec
 
 test("Windows shows pending upgrade recovery without command generation", async () => {
   const context = harness();
-  for (const name of ["renderServiceVersion", "openUpgrade", "checkServiceVersion"]) vm.runInContext(declaration(name), context);
+  for (const name of ["renderServiceVersion", "openUpgrade", "checkServiceVersion"]) loadFunctions(context, [name]);
   context.data = { config: { managed: false }, capabilities: { managed_installation: false }, backend: {
     managed: true, version: "1.1.0", target: "1.2.0", pending: true,
   } };
@@ -336,7 +335,7 @@ test("Windows shows pending upgrade recovery without command generation", async 
 
 test("a model task outside the connected service releases polling and setup controls", async () => {
   const context = harness();
-  vm.runInContext(declaration("watchModels"), context);
+  loadFunctions(context, ["watchModels"]);
   context.data = { config: { managed: false } };
   context.modelRequestId = "previous";
   context.bridge = { apiGet: async () => ({ status: "idle" }) };
@@ -350,7 +349,7 @@ test("a model task outside the connected service releases polling and setup cont
 
 test("upgrade controls require backup confirmation and preserve failure state", async () => {
   const context = harness();
-  vm.runInContext(declaration("upgradeAction"), context);
+  loadFunctions(context, ["upgradeAction"]);
   let calls = 0;
   context.perform = async (button, group, work) => { await work(); };
   context.bridge = { apiPost: async () => { calls++; throw new Error("maintenance pending"); } };
@@ -365,7 +364,7 @@ test("upgrade controls require backup confirmation and preserve failure state", 
 
 test("leaving or rebinding upgrade preparation clears secret commands and backup agreement", () => {
   const context = harness();
-  vm.runInContext(declaration("clearUpgrade"), context);
+  loadFunctions(context, ["clearUpgrade"]);
   context.$("upgrade-command").value = "private-command";
   context.$("upgrade-backup-confirmed").checked = true;
   context.clearUpgrade();
@@ -400,7 +399,7 @@ test("missing SDK and singleton pending handshake require reloading the plugin f
 
 test("account form uses platform hints and preserves opaque identifiers as strings", () => {
   const context = harness();
-  vm.runInContext(declaration("updateAccountHint"), context);
+  loadFunctions(context, ["updateAccountHint"]);
   context.data = { platforms: [
     { id: "onebot", numeric_user_id: true, user_label: "用户 QQ 号" },
     { id: "official", numeric_user_id: false, user_label: "用户 OpenID", user_hint: "OpenID，不是 QQ 号" },
@@ -423,8 +422,8 @@ test("account form uses platform hints and preserves opaque identifiers as strin
 
 test("historical scope disables modes and retry while preserving maintenance and deletion", () => {
   const context = harness();
-  vm.runInContext(declaration("text"), context);
-  vm.runInContext(declaration("renderScope"), context);
+  loadFunctions(context, ["text"]);
+  loadFunctions(context, ["renderScope"]);
   context.data = { config: {}, scopes: [{
     scope_id: "old", historical: true, bot_id: "990001", mode: "paused", bank: "old-bank",
     summary: { counts: {}, maintenance: null },
@@ -439,7 +438,7 @@ test("historical scope disables modes and retry while preserving maintenance and
 
 function installBootstrapChain(context) {
   for (const name of ["text", "pendingScopeHelp", "maintenanceDescription", "renderScope", "endpoint", "readMaintenanceStatus", "selectScope", "refreshBootstrap", "perform", "maintenanceAction"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
 }
 
@@ -492,7 +491,7 @@ test("starting an action invalidates an outstanding automatic bootstrap", async 
 test("failed authorization drops the consumed token and allows preparing a fresh confirmation", async () => {
   const context = harness();
   for (const name of ["perform", "requestAuthorization", "prepareAuthorization", "confirmAuthorization"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
   const calls = [];
   let prepared = 0;
@@ -746,18 +745,18 @@ test("discard visibility uses backend capability and ordinary pause never discar
   assert.equal(context.$("discard-records").hidden, true);
   const calls = [];
   context.maintenanceAction = (button, action, extra) => { calls.push(extra.discard_pending); };
-  vm.runInContext(source.split("\n").find((line) => line.startsWith('$("maintenance-discard").addEventListener')), context);
+  context.bindEvents();
   context.$("discard-pending").checked = true;
   context.$("maintenance-discard").listeners.click();
   assert.deepEqual(calls, [true]);
-  assert.equal(source.includes('$("maintenance-begin").addEventListener'), false);
+  assert.equal(context.$("maintenance-begin").listeners.click, undefined);
 });
 
 test("a late bootstrap response cannot hydrate the page after timeout", async () => {
   const context = harness();
   let resolve;
   context.bridge = { apiGet: () => new Promise((done) => { resolve = done; }) };
-  vm.runInContext(declaration("refreshBootstrap"), context);
+  loadFunctions(context, ["refreshBootstrap"]);
   await assert.rejects(context.refreshBootstrap({ hydrate: true }), /获取插件状态超时/);
   resolve({ config: {}, scopes: [] });
   await new Promise((done) => setImmediate(done));
@@ -775,8 +774,8 @@ test("successful work clears its timeout", async () => {
 
 test("connected service does not hide the user's recall failure", () => {
   const context = harness();
-  vm.runInContext(declaration("text"), context);
-  vm.runInContext(declaration("renderScope"), context);
+  loadFunctions(context, ["text"]);
+  loadFunctions(context, ["renderScope"]);
   context.data = {
     config: { managed: false }, status: { connected: true, label: "recall_timeout" },
     scopes: [{ scope_id: "one", mode: "active", summary: { counts: {}, recall: {
@@ -795,7 +794,7 @@ test("connected service does not hide the user's recall failure", () => {
 
 test("the last skip only appears for the selected user's recorded outcome", () => {
   const context = harness();
-  vm.runInContext(declaration("renderScope"), context);
+  loadFunctions(context, ["renderScope"]);
   context.data = { config: {}, scopes: [
     { scope_id: "one", summary: { skip: { code: "quoted_or_reply", at: 1700000000, message: "引用或回复消息" } } },
     { scope_id: "two", summary: {} },
@@ -812,7 +811,7 @@ test("the last skip only appears for the selected user's recorded outcome", () =
 
 test("chat reference loads legacy defaults and saves independent recall and capture settings", async () => {
   const context = harness();
-  for (const name of ["loadReferences", "saveReferences"]) vm.runInContext(declaration(name), context);
+  for (const name of ["loadReferences", "saveReferences"]) loadFunctions(context, [name]);
   context.data = { config_revision: "config", scopes: [{ scope_id: "one", revision: 2 }] };
   const draft = { id: "one", revision: 3, scopeRevision: 2, configRevision: "config" };
   context.referenceDraft = draft;
@@ -852,7 +851,7 @@ test("connection errors retain specific guidance and existing services hide mode
 function backgroundHarness() {
   const context = harness();
   for (const name of ["backgroundSnapshot", "backgroundPages", "renderBackground", "changeBackground", "endpoint", "loadBackground", "saveBackground", "perform"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
   context.renderScope = context.renderBackground;
   context.refreshBootstrap = async () => {};
@@ -890,8 +889,7 @@ test("returning to the browser tab preserves unsaved page additions, ordering, r
   context.document.hidden = false;
   context.refreshTimer = null;
   context.scheduleRefresh = () => {};
-  const begin = source.lastIndexOf('document.addEventListener("visibilitychange", () => {');
-  vm.runInContext(source.slice(begin, source.indexOf("\n});", begin) + 4), context);
+  context.bindEvents();
   const check = (ids, enabled) => {
     const draft = context.backgroundDraft;
     resume();
@@ -1009,7 +1007,7 @@ test("background index timeout releases controls and never interprets names as H
 
 test("settings refresh invalidates old drafts and allows closing during maintenance without a tree read", async () => {
   const context = backgroundHarness();
-  vm.runInContext(declaration("refreshBootstrap"), context);
+  loadFunctions(context, ["refreshBootstrap"]);
   context.hydrateConfig = () => {};
   const oldDraft = context.backgroundDraft;
   oldDraft.page_id = "unsaved-page";
@@ -1100,7 +1098,7 @@ test("multiple pages render usage per page and persist ordering and removal", as
 
 test("reading mode preserves original revisions and drops feedback after user changes", async () => {
   const context = harness();
-  for (const name of ["renderReading", "saveReading", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  for (const name of ["renderReading", "saveReading", "perform", "endpoint"]) loadFunctions(context, [name]);
   context.$("reading-mode").replaceChildren(context.option("automatic", "auto"), context.option("tools", "tools"));
   context.data = { config_revision: "config-1", status: {}, scopes: [{
     scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
@@ -1140,7 +1138,7 @@ test("usage history reopened during a draft conflict stays open until the next r
   const context = harness();
   Object.assign(context, { referenceDraft: null, usageReadRevision: 0, promptCountTimer: null, scopeId: "one" });
   for (const name of ["clearUsageDetail", "resetUsage", "clearReferenceDraft", "renderReferences"]) {
-    vm.runInContext(declaration(name), context);
+    loadFunctions(context, [name]);
   }
   const scope = { scope_id: "one", bank: "bank-one", revision: 1, reference_revision: 0 };
   context.data = { config: {}, config_revision: "config", scopes: [scope] };
@@ -1168,7 +1166,7 @@ test("usage history reopened during a draft conflict stays open until the next r
 
 test("Reflect keeps dirty values across polling, detects conflicts and ignores a former user's save", async () => {
   const context = harness();
-  for (const name of ["renderReflect", "saveReflect", "perform", "endpoint"]) vm.runInContext(declaration(name), context);
+  for (const name of ["renderReflect", "saveReflect", "perform", "endpoint"]) loadFunctions(context, [name]);
   context.data = { config_revision: "config-1", status: {}, scopes: [{
     scope_id: "one", bank: "bank-one", mode: "readonly", summary: {},
     reflect: { revision: 2, scope_revision: 3, enabled: false, timeout: 12, observed_available: false },
@@ -1211,7 +1209,7 @@ test("Reflect keeps dirty values across polling, detects conflicts and ignores a
 
 test("an enabled Reflect shows detected model unavailability and still allows disabling", () => {
   const context = harness();
-  vm.runInContext(declaration("renderReflect"), context);
+  loadFunctions(context, ["renderReflect"]);
   const reflect = { revision: 1, scope_revision: 1, enabled: true, timeout: 12,
     observed_available: true, status: { state: "success" } };
   context.data = { config_revision: "one", status: {}, scopes: [
@@ -1263,7 +1261,7 @@ test("disconnected saved Banks remain accessible without being labeled as old ro
 test("failed mode changes keep the server's mode selected", async () => {
   const context = harness();
   installBootstrapChain(context);
-  vm.runInContext(declaration("setMode"), context);
+  loadFunctions(context, ["setMode"]);
   context.data = maintenanceBootstrap();
   context.data.scopes[0].mode = "readonly";
   context.data.scopes[0].summary.maintenance = null;
@@ -1277,7 +1275,7 @@ test("failed mode changes keep the server's mode selected", async () => {
 
 test("ignored update notices never hide an unfinished upgrade", () => {
   const context = harness();
-  vm.runInContext(declaration("renderServiceVersion"), context);
+  loadFunctions(context, ["renderServiceVersion"]);
   context.data = { config: { configured: true, managed: true, connection_revision: "first" }, backend: {
     version: "1.1.0", target: "1.2.0", managed: true, upgrade_available: true, ignored: true,
   } };
@@ -1297,7 +1295,7 @@ test("ignored update notices never hide an unfinished upgrade", () => {
 
 test("confirmed additions survive failed bootstrap reads and subsequent additions", async () => {
   const context = harness();
-  for (const name of ["saveAccounts", "submitAccount", "perform"]) vm.runInContext(declaration(name), context);
+  for (const name of ["saveAccounts", "submitAccount", "perform"]) loadFunctions(context, [name]);
   context.data = maintenanceBootstrap();
   context.settingsRevision = "revision-1";
   let server = context.data.config.allowed_accounts;
@@ -1321,7 +1319,7 @@ test("confirmed additions survive failed bootstrap reads and subsequent addition
 
 test("confirmed removals survive failed bootstrap reads without reviving users", async () => {
   const context = harness();
-  for (const name of ["saveAccounts", "requestAccountRemoval", "confirmAccountRemoval", "perform"]) vm.runInContext(declaration(name), context);
+  for (const name of ["saveAccounts", "requestAccountRemoval", "confirmAccountRemoval", "perform"]) loadFunctions(context, [name]);
   context.data = maintenanceBootstrap();
   context.data.config.allowed_accounts.push({ platform_instance_id: "qq", user_id: "456" });
   context.data.scopes.push({ scope_id: "two", platform_instance_id: "qq", user_id: "456", summary: {} });

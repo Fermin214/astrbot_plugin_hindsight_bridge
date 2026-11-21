@@ -31,7 +31,7 @@ def main():
     else:
         suite = unittest.defaultTestLoader.discover(str(tests), pattern="test_*.py")
     result = unittest.TextTestRunner(verbosity=1).run(suite)
-    frontend = subprocess.run([node, str(root / "tests" / "test_memory_view.js")], check=False)
+    frontend = subprocess.run([node, str(root / "tests" / "test_memory_view.mjs")], check=False)
     return 0 if result.wasSuccessful() and frontend.returncode == 0 else 1
 
 
