@@ -21,6 +21,16 @@ ARCHIVE_SOURCE = (
     "deb [signed-by=/usr/local/share/keyrings/postgres.gpg.asc] "
     "https://apt-archive.postgresql.org/pub/repos/apt trixie-pgdg-archive main"
 )
+INPUT_FILES = (
+    "core/installer.py",
+    "deploy/HINDSIGHT-LICENSE",
+    "deploy/managed_service.py",
+    "deploy/model_probe.py",
+    "deploy/model_transport.py",
+    "deploy/postgres/Dockerfile",
+    "deploy/postgres/extensions.sql",
+    "tests/integration/install_startup.py",
+)
 SPEC = importlib.util.spec_from_file_location("installer", ROOT / "core/installer.py")
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
@@ -200,17 +210,27 @@ def verify(directory, fresh_only):
     image_names = (installer.POSTGRES_IMAGE,) if fresh_only else (installer.POSTGRES_IMAGE, LEGACY_IMAGE)
     if any(image_id(name) for name in image_names):
         raise RuntimeError("Cold-start verification requires an isolated Docker daemon without bridge database images")
+    inputs = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in INPUT_FILES}
+    checkout_revision = output("git", "rev-parse", "HEAD")
     environment = {**os.environ, "HINDSIGHT_INSTALL_ROOT": str(directory / "installations")}
     created_images = {}
+    builder = "bridge-install-" + secrets.token_hex(6)
+    run("docker", "buildx", "create", "--name", builder, "--driver", "docker-container",
+        "--driver-opt", "default-load=true", stdout=subprocess.DEVNULL)
     try:
-        result = verify_fresh(directory, environment, created_images)
+        try:
+            result = verify_fresh(directory, {**environment, "BUILDX_BUILDER": builder}, created_images)
+        finally:
+            run("docker", "buildx", "rm", builder, stdout=subprocess.DEVNULL)
         if not fresh_only:
             result.update(verify_legacy(directory, environment, created_images))
     finally:
         for name, identifier in created_images.items():
             if identifier and image_id(name) == identifier:
                 run("docker", "image", "rm", name, stdout=subprocess.DEVNULL)
-    result.update(complete=True, revision=output("git", "rev-parse", "HEAD"),
+    if inputs != {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in INPUT_FILES}:
+        raise RuntimeError("Installation inputs changed during the check")
+    result.update(complete=True, checkout_revision=checkout_revision, input_sha256=inputs,
                   database_image_id=created_images[installer.POSTGRES_IMAGE])
     (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 

@@ -5,6 +5,9 @@ on:
     paths:
       - core/installer.py
       - deploy/compose.yaml
+      - deploy/managed_service.py
+      - deploy/model_probe.py
+      - deploy/model_transport.py
       - deploy/postgres/**
       - tests/integration/install_startup.py
       - .github/workflows/managed-install.yml
