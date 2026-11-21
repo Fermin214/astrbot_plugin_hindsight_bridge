@@ -47,6 +47,7 @@ passed = []
 banks = set()
 operations = {}
 payloads = []
+recalls = []
 
 
 async def service(request):
@@ -72,6 +73,7 @@ async def service(request):
         operations[body["operation_id"]] = "completed"
         return web.json_response({"success": True, "async": True, "operation_id": body["operation_id"]})
     if path.endswith("/recall"):
+        recalls.append(await request.json())
         return web.json_response({"results": [{"id": "fixture-fact", "text": "A remembered preference", "type": "world"}]})
     if path.endswith("/mental-models/mm-background"):
         return web.json_response({
@@ -88,13 +90,17 @@ async def wait_for(predicate):
             await asyncio.sleep(0.05)
 
 
-async def message(adapter, message_id=1):
+async def message(adapter, message_id=1, *, quoted=False):
     if PLATFORM == "lark":
         from lark_source_contracts import Fixture
 
         fixture = Fixture.__new__(Fixture)
         fixture.host, fixture.queue = adapter, adapter._event_queue
-        return await fixture.event(text="hello", mid=f"om_fixture{message_id}", offset=1)
+        from astrbot.core.message.components import Reply
+
+        return await fixture.event(text="quoted hello" if quoted else "hello", mid=f"om_fixture{message_id}", offset=1,
+                                   changes={"parent_id": "om_parent"} if quoted else None,
+                                   reply=Reply(id="om_parent", chain=[Plain("referenced content")]) if quoted else None)
     if PLATFORM == "telegram":
         from telegram import Update
 
@@ -260,6 +266,41 @@ async def main():
             await wait_for(lambda: plugin.outbox.db.execute("SELECT COUNT(*) FROM outbox WHERE state='done'").fetchone()[0] == 2)
             assert "Native background smoke marker." not in json.dumps(payloads)
             passed.append("selected_background_is_real_host_temporary_content_not_history_or_retain")
+            if PLATFORM == "lark":
+                from astrbot.core.provider.entities import LLMResponse
+                from data.plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
+
+                tables = ("events", "outbox", "window", "replies")
+                for enabled in (False, True):
+                    save_reference_options(plugin.outbox, scope, **{
+                        **reference_options(plugin.outbox, scope), "recall_on_quoted_or_link": enabled,
+                    })
+                    before = [plugin.outbox.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+                    sent, read = len(payloads), len(recalls)
+                    quoted_event = await message(adapter, 7 + int(enabled), quoted=True)
+                    assert [type(part).__name__ for part in quoted_event.get_messages()] == ["Reply", "Plain"]
+                    cid = await conversations.new_conversation(quoted_event.unified_msg_origin)
+                    conversation = await conversations.get_conversation(quoted_event.unified_msg_origin, cid)
+                    request = ProviderRequest(prompt="quoted hello", conversation=conversation)
+                    await plugin.observe_incoming(quoted_event)
+                    assert (quoted_event in plugin.incoming) is enabled
+                    if enabled:
+                        assert plugin.incoming[quoted_event].capture_allowed is False
+                    await plugin.add_memory(quoted_event, request)
+                    wire = await request.assemble_context()
+                    assert ("A remembered preference" in json.dumps(wire)) is enabled
+                    assert len(recalls) == read + int(enabled)
+                    assert "referenced content" not in json.dumps(recalls[read:])
+                    history = [{"role": "user", "content": "quoted hello"},
+                               {"role": "assistant", "content": "quoted assistant reply"}]
+                    await conversations.update_conversation(quoted_event.unified_msg_origin, cid, history=history)
+                    await plugin.remember_assistant(quoted_event, SimpleNamespace(messages=history),
+                                                    LLMResponse(role="assistant", completion_text="quoted assistant reply"))
+                    await asyncio.sleep(0.1)
+                    assert quoted_event not in plugin.pending_assistant_captures
+                    assert len(payloads) == sent
+                    assert [plugin.outbox.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == before
+                passed.append("native_lark_reply_reads_only_when_enabled_and_never_saves_user_or_assistant")
             old_bank = plugin.outbox.list_scopes()[0]["bank"]
             snapshot = await plugin.panel.bootstrap()
             assert snapshot["scopes"][0]["summary"]["recall"]["outcome"] == "success"

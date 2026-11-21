@@ -24,6 +24,7 @@ for name, path in (("plugins", root.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import native_header, prepare_bot_identity
+from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
 from plugins.astrbot_plugin_hindsight_bridge.main import HindsightBridge
 
 
@@ -87,6 +88,24 @@ async def main():
                 bridge.record_skip(sample, queue)
                 assert bridge.skip_status("fixture", "2001")["code"] == expected
             assert queue.summary(incoming.scope(queue.deployment_id).id)["counts"] == {}
+            from astrbot.api.message_components import Reply
+
+            sample = await event(host, "read existing memories", mid=40)
+            sample.message_obj.raw_message["message"].insert(0, {"type": "reply", "data": {"id": "9"}})
+            sample.message_obj.message.insert(0, Reply(id="9", chain=[Plain("quoted content")]))
+            assert native_header(sample, Plain, adapter=host) is None
+            with patch.object(host.get_client(), "call_action") as platform_io:
+                readonly = native_header(sample, Plain, adapter=host, allow_readonly=True)
+            platform_io.assert_not_called()
+            assert readonly and readonly.capture_allowed is False and readonly.text == "read existing memories"
+            assert bridge.snapshot(sample) is None
+            scope = queue.scope(incoming)
+            save_reference_options(queue, scope, **{
+                **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+            })
+            assert bridge.snapshot(sample) == readonly
+            sample.message_obj.raw_message["message"].append({"type": "image", "data": {"file": "synthetic"}})
+            assert native_header(sample, Plain, adapter=host, allow_readonly=True) is None
             after_grant_event = await event(host, "new authorized", mid=4)
             after_grant = bridge.snapshot(after_grant_event)
             assert after_grant.received_at == after_grant_event.created_at

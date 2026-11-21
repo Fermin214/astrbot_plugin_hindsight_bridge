@@ -106,6 +106,36 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(QueueError, "bank_missing"):
             self.queue.set_mode(first.scope_id, "active")
 
+    async def test_override_resumes_active_bank_and_old_bank_still_requires_full_erasure(self):
+        first = await self.seed()
+        scope = self.queue.scope(self.source)
+        control = self.queue.control
+        with control.transaction():
+            control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
+                               "VALUES (?,?,?,?,?,'unknown',1)",
+                               ("active", self.queue.connection_id, scope["owner_id"], first.bank, scope["generation"]))
+        self.worker.maintenance.begin(first.scope_id)
+        self.assertFalse((await self.worker.maintenance.status(first.scope_id))["ready"])
+        with self.assertRaises(QueueError):
+            await self.worker.maintenance.resume(first.scope_id)
+        control.override_unknown_reflections(self.queue.connection_id, first.bank, actor="admin")
+        self.assertTrue((await self.worker.maintenance.status(first.scope_id))["ready"])
+        await self.worker.maintenance.resume(first.scope_id)
+        self.assertTrue(self.queue.can_recall(self.queue.scope(self.source)))
+        with control.transaction():
+            control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
+                               "VALUES (?,?,?,?,?,'unknown',2)",
+                               ("old", self.queue.connection_id, scope["owner_id"], first.bank, scope["generation"]))
+        erasure = self.queue.forget(first.scope_id)
+        self.assertFalse(await self.worker.maintenance.erase(erasure))
+        control.override_unknown_reflections(self.queue.connection_id, first.bank, actor="admin")
+        self.assertNotEqual(control.erasures(self.queue.connection_id)[0]["phase"], "verified")
+        self.assertTrue(await self.client.bank_exists(first.bank))
+        self.assertTrue(await self.worker.maintenance.erase(erasure))
+        self.assertEqual(control.erasures(self.queue.connection_id)[0]["phase"], "verified")
+        self.assertFalse(await self.client.bank_list_contains(first.bank))
+        self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests WHERE state='overridden'").fetchone()[0], 2)
+
     async def test_maintenance_waits_for_inflight_acceptance_and_blocks_late_callbacks(self):
         self.service.admit_gate = asyncio.Event()
         first = self.enqueue()
@@ -344,7 +374,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             db.execute("ALTER TABLE erasure_refs DROP COLUMN checked_pass")
             db.execute("PRAGMA user_version=2")
         self.open()
-        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 6)
+        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 7)
         operation, listing = self.client.operation, self.client.list_operations
         reads, listings = [], 0
 

@@ -9,7 +9,7 @@
 <body>
   <main class="shell">
     <header class="page-header">
-      <h1><span class="brand-mark" aria-hidden="true">H</span>Hindsight Bridge</h1>
+      <h1><span class="brand-mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10M7 17h10M5 9v6m14-6v6"/><circle cx="5" cy="6" r="3"/><circle cx="19" cy="6" r="3"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="18" r="3"/></svg></span>Hindsight Bridge</h1>
       <div class="connection-status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="status-label">正在连接 AstrBot…</span></div>
     </header>
     <div id="startup" class="notice" role="status">正在连接 AstrBot…</div>
@@ -58,8 +58,9 @@
                 <label class="check-label"><input type="checkbox" name="types" value="experience" id="reference-experience">经历</label>
                 <label class="check-label"><input type="checkbox" name="types" value="observation" id="reference-observation">观察</label>
               </fieldset>
-              <label class="check-label"><input type="checkbox" name="exclude_assistant" id="reference-exclude">排除可确认的纯助手发言</label>
+              <label class="check-label"><input type="checkbox" name="exclude_assistant" id="reference-exclude">只参考我说的话（排除机器人回复）</label>
               <label class="check-label" for="reference-capture-assistant"><input type="checkbox" name="capture_assistant" id="reference-capture-assistant" checked>保存助手回复</label>
+              <label class="check-label" for="reference-quoted"><input type="checkbox" name="recall_on_quoted_or_link" id="reference-quoted">引用回复或带链接的私聊文字也查找已有记忆（只读，不保存新记忆）</label>
               <div class="form-grid reference-limits">
                 <label for="reference-budget">检索预算<select id="reference-budget" name="recall_budget"><option value="low">低</option><option value="mid" selected>中</option><option value="high">高</option></select></label>
                 <label for="reference-limit">每条消息最多参考（条）<input id="reference-limit" name="detail_limit" type="number" min="0" max="100" step="1" required inputmode="numeric"></label>
@@ -100,6 +101,7 @@
           <div id="scope-skip-row" class="recall-row" hidden><span>最近跳过</span><span id="scope-skip-status"></span></div>
           <p id="maintenance-state" class="operation-status" role="status" hidden></p>
           <button id="maintenance-view" type="button" hidden>查看暂停状态</button>
+          <button id="reflect-override" type="button" hidden>解除 Reflect 阻塞</button>
         </section>
         <footer class="user-actions"><button id="remove-account" type="button" class="danger-quiet">移除用户</button><button id="forget" type="button" class="danger-quiet">清空记忆</button></footer>
       </fieldset>
@@ -173,6 +175,15 @@
   <dialog id="remove-account-dialog" aria-labelledby="remove-account-heading"><div class="dialog-header"><h2 id="remove-account-heading">移除用户</h2></div><p id="remove-account-user"></p><p>移除访问权限，保留记忆。</p><div class="dialog-actions"><button id="cancel-remove-account" type="button">取消</button><button id="confirm-remove-account" type="button" class="danger">确认移除</button></div><p id="remove-account-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="forget-dialog" aria-labelledby="forget-heading"><div class="dialog-header"><h2 id="forget-heading">清空记忆</h2></div><p>删除此记忆库的全部内容，无法撤销。</p><p id="forget-user" class="forget-user"></p><p id="forget-message" class="operation-status"></p><label class="check-label" for="forget-agree"><input id="forget-agree" type="checkbox">确认清空</label><div class="dialog-actions"><button id="cancel-forget" type="button">取消</button><button id="confirm-forget" type="button" class="danger" disabled>确认清空</button></div><p id="forget-feedback" class="operation-status" role="status"></p></dialog>
 
+  <dialog id="reflect-override-dialog" aria-labelledby="reflect-override-heading">
+    <div class="dialog-header"><h2 id="reflect-override-heading">解除 Reflect 阻塞</h2><button type="button" data-close="reflect-override-dialog" aria-label="关闭">×</button></div>
+    <p>请先确认 Hindsight 已重启，或没有正在运行的 Reflect 请求。原请求结果仍未知，解除阻塞不会重放请求。</p>
+    <p>使用中的记忆库可再次运行 Reflect 或解除暂停；清空中的旧库仍须完成全部核查和删除。</p>
+    <label for="reflect-override-bank">记忆库<select id="reflect-override-bank" name="bank"></select></label>
+    <label class="check-label" for="reflect-override-confirm"><input id="reflect-override-confirm" type="checkbox">我已确认服务没有残留 Reflect 任务，并接受原请求结果未知。</label>
+    <div class="dialog-actions"><button type="button" data-close="reflect-override-dialog">取消</button><button id="reflect-override-submit" type="button" class="primary" disabled>解除阻塞</button></div>
+    <p id="reflect-override-feedback" class="operation-status" role="status" hidden></p>
+  </dialog>
   <dialog id="usage-dialog" aria-labelledby="usage-heading">
     <div class="dialog-header"><h2 id="usage-heading">使用记录</h2><button type="button" data-close="usage-dialog" aria-label="关闭">×</button></div>
     <label id="usage-picker" for="usage-turn" hidden>时间 · 会话 · 消息<select id="usage-turn"></select></label>
@@ -182,7 +193,7 @@
     <p id="usage-feedback" class="operation-status" role="status"></p>
   </dialog>
   <dialog id="deployment-dialog" aria-labelledby="deployment-heading"><div class="dialog-header"><h2 id="deployment-heading">重新部署</h2><button type="button" data-close="deployment-dialog" aria-label="关闭">×</button></div><p id="deployment-description"></p><div id="installation" class="command-output" hidden><textarea id="install-command" aria-label="部署命令" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-command" type="button">复制命令</button></div></div><div class="dialog-actions"><button id="generate-deployment" type="button">生成部署命令</button><button id="check-deployment" type="button" hidden>检查服务连接</button></div><p id="deployment-feedback" class="operation-status" role="status" hidden></p></dialog>
-  <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>删除这套配套服务的专属容器、全部记忆和专属数据卷，无法撤销。</p><label class="check-label" for="delete-memory-data"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="uninstall-dialog" aria-labelledby="uninstall-heading"><div class="dialog-header"><h2 id="uninstall-heading">卸载配套服务</h2><button type="button" data-close="uninstall-dialog" aria-label="关闭">×</button></div><p>将彻底删除这套记忆服务的容器、配置和全部记忆数据，无法恢复。</p><label class="check-label" for="delete-memory-data"><input id="delete-memory-data" type="checkbox">确认删除以上资源和数据</label><div class="actions"><button id="generate-uninstall" type="button" class="danger">生成卸载命令</button></div><div id="uninstallation" class="command-output" hidden><textarea id="uninstall-command" aria-label="卸载命令" rows="4" readonly spellcheck="false" autocomplete="off"></textarea><div class="actions"><button id="copy-uninstall" type="button">复制卸载命令</button></div></div><p id="uninstall-feedback" class="operation-status" role="status" hidden></p></dialog>
   <dialog id="backup-dialog" aria-labelledby="backup-heading">
     <div class="dialog-header"><h2 id="backup-heading">备份与恢复</h2><button type="button" data-close="backup-dialog" aria-label="关闭">×</button></div>
     <ol class="guide-steps" data-managed-backup hidden>
@@ -242,7 +253,7 @@
     </section>
     <p id="upgrade-result" class="operation-status" role="status" hidden></p>
   </dialog>
-  <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label for="maintenance-scope">记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>删除待发送和失败的记录，无法撤销。</p><label class="check-label" for="discard-pending"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
+  <dialog id="maintenance-dialog" aria-labelledby="maintenance-heading"><div class="dialog-header"><h2 id="maintenance-heading">暂停状态</h2><button type="button" data-close="maintenance-dialog" aria-label="关闭">×</button></div><label for="maintenance-scope">记忆库<select id="maintenance-scope"></select></label><p id="maintenance-detail" class="operation-status" role="status"></p><div class="actions"><button id="maintenance-retry" type="button" hidden>重试检查</button><button id="maintenance-reflect-override" type="button" hidden>解除 Reflect 阻塞</button><button id="maintenance-bank-check" type="button" hidden>核对记忆库</button><button id="maintenance-resume" type="button" hidden>解除读写暂停</button><button id="maintenance-forget" type="button" class="danger-quiet" hidden>清空记忆</button></div><section id="discard-records" class="discard-records" hidden><p>删除待发送和失败的记录，无法撤销。</p><label class="check-label" for="discard-pending"><input id="discard-pending" type="checkbox">确认放弃这些记录</label><button id="maintenance-discard" type="button" class="danger-quiet" disabled>放弃记录</button></section><p id="maintenance-feedback" class="operation-status" role="status" hidden></p></dialog>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

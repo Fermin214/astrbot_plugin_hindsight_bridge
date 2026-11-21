@@ -98,7 +98,7 @@ def message_shape(raw):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
     from lark_oapi.api.im.v1 import EventMessage
 
@@ -130,7 +130,8 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         inspect(login.bot_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw))
     if (
         not valid_time or raw.message_type != "text"
-        or raw.parent_id or raw.root_id or getattr(raw, "thread_id", None)
+        or any(value and (not allow_readonly or not identifier(value)) for value in (raw.parent_id, raw.root_id))
+        or getattr(raw, "thread_id", None)
         or raw.mentions or getattr(raw, "lark_agent_context", None) is not None
         or not isinstance(raw.content, str) or len(raw.content) > 64_000
     ):
@@ -145,6 +146,11 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     if not isinstance(original, str) or not original.strip() or len(original) > 8000:
         return None
     parts, host_text = event.get_messages(), event.get_message_str()
+    if allow_readonly and raw.parent_id and isinstance(parts, list) and parts:
+        from astrbot.api.message_components import Reply
+
+        if type(parts[0]) is Reply and parts[0].id == raw.parent_id:
+            parts = parts[1:]
     if (
         not isinstance(parts, list) or len(parts) != 1
         or type(parts[0]) is not plain_type or parts[0].text != original.strip()
@@ -163,5 +169,5 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     return Incoming(
         "lark", event.get_platform_id(), login.bot_id, user, mid,
-        occurred / 1000, original, received_at=received,
+        occurred / 1000, original, received_at=received, capture_allowed=not bool(raw.parent_id or raw.root_id),
     )

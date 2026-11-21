@@ -94,10 +94,13 @@ def main():
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
-        "core/source.py", "core/access.py", "core/onebot_source.py", "core/qq_source.py",
+        "core/panel_setup.py", "core/panel_upgrade.py", "core/panel_scopes.py",
+        "core/source.py", "core/scope_settings.py", "core/access.py", "core/onebot_source.py", "core/qq_source.py",
         "core/weixin_source.py", "core/telegram_source.py", "core/lark_source.py",
         "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py", "core/reference.py",
         "views/memory/index.html", "views/memory/app.js", "views/memory/style.css",
+        "views/memory/state.js", "views/memory/dom.js", "views/memory/setup.js",
+        "views/memory/memories.js", "views/memory/maintenance.js",
         ".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json",
         "deploy/compose.yaml", "deploy/.env.example", "deploy/init-env.py",
         "deploy/postgres/Dockerfile", "deploy/postgres/extensions.sql",
@@ -144,6 +147,13 @@ def main():
     assert account[0]["platform_instance_id"] == "your-qq-official-instance"
     assert account[0]["user_id"] == "your-openid-from-sid"
     distributed = set(working_tree_files(root, distribution=True))
+    for asset in sorted((root / "views/memory").glob("*.js")):
+        assert asset.relative_to(root).as_posix() in distributed, str(asset)
+        subprocess.run(["node", "--check", str(asset)], check=True)
+        for name in re.findall(r'\bfrom\s+[\'"]([^\'"]+)[\'"]', asset.read_text(encoding="utf-8")):
+            destination = (asset.parent / name).resolve()
+            assert name.startswith("./") and destination.is_relative_to(root / "views/memory"), name
+            assert destination.relative_to(root).as_posix() in distributed, name
     for path in root.rglob("*.py"):
         relative = path.relative_to(root)
         if not {".git", ".local"} & set(relative.parts):

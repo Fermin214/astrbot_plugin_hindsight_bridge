@@ -199,6 +199,77 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
+    async def test_quoted_readonly_turn_recalls_and_records_usage_without_any_capture(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        save_reference_options(queue, scope, **{
+            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+        })
+        event, request = self.turn("readonly")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        with patch.object(plugin, "freeze_user_capture") as freeze, \
+                patch.object(plugin, "track_assistant_capture") as track:
+            await plugin.add_memory(event, request)
+        freeze.assert_not_called()
+        track.assert_not_called()
+        self.assertEqual(len(request.extra_user_content_parts), 1)
+        self.assertNotIn(event, plugin.pending_assistant_captures)
+        self.assertTrue(queue.references.list(scope))
+        self.assertTrue(any(str(row.url.path).endswith("/recall") for row in self.requests))
+        self.assertFalse(any(str(row.url.path).endswith("/memories") and row.method == "POST" for row in self.requests))
+        for table in ("events", "outbox", "window", "replies"):
+            self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    async def test_status_is_short_when_healthy_and_keeps_diagnostics_after_an_error(self):
+        plugin = self.plugin
+        scope = plugin.outbox.scope(self.incoming)
+        plugin.status = "运行中"
+        plugin.client.stats = AsyncMock(return_value={"total_observations": 0, "pending_consolidation": 0})
+        event = Mock()
+        event.plain_result.side_effect = lambda text: text
+        with patch.object(plugin, "command_scope", return_value=scope):
+            healthy = [text async for text in plugin.memory_status(event)][0]
+            self.assertIn("模式：", healthy)
+            self.assertIn("最近记忆检索：", healthy)
+            self.assertNotIn("诊断编号：", healthy)
+            plugin.status = "recall_timeout"
+            failed = [text async for text in plugin.memory_status(event)][0]
+        for label in ("诊断编号：", "保存和查询暂停状态：", "连接暂停原因：", "最近保存错误：", "清空："):
+            self.assertIn(label, failed)
+        self.assertIn("recall_timeout", failed)
+
+    async def test_readonly_turn_requires_opt_in_and_discards_results_after_revocation(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        event, request = self.turn("readonly-disabled")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        with patch.object(plugin, "record_skip") as skipped:
+            await plugin.add_memory(event, request)
+        skipped.assert_called_once()
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertEqual(self.requests, [])
+        save_reference_options(queue, scope, **{
+            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+        })
+        event, request = self.turn("readonly-revoked")
+        self.incoming = replace(self.incoming, capture_allowed=False)
+        plugin.incoming[event] = self.incoming
+        read = plugin.client.recall
+
+        async def revoke(*args, **kwargs):
+            result = await read(*args, **kwargs)
+            self.enabled = False
+            return result
+
+        with patch.object(plugin.client, "recall", side_effect=revoke):
+            await plugin.add_memory(event, request)
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertEqual(queue.references.list(scope), [])
+        for table in ("events", "outbox", "window", "replies"):
+            self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
     async def test_skip_diagnostics_rank_identity_and_time_before_shape_and_ignore_other_senders(self):
         plugin = self.plugin
         queue = plugin.outbox
@@ -292,7 +363,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         for message_id in ("three", "four"):
             event, req = self.turn(message_id)
             await self.plugin.add_memory(event, req)
-            self.assertTrue(req.extra_user_content_parts[0].text.endswith("Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"))
+            self.assertTrue(req.extra_user_content_parts[0].text.endswith("记忆检索超时，历史记忆未载入（不影响新消息保存）。"))
         summary = self.plugin.recall_status(scope)
         self.assertEqual(summary["consecutive_failures"], 2)
         self.assertNotIn("hello", json.dumps(summary))
