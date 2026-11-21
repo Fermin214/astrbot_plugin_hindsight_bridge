@@ -14,6 +14,12 @@ export function createApp(view) {
     if (view.data.config.managed && view.data.managed_service?.installed && !status.recovering && !view.data.managed_service.ready) description = "服务已安装，请配置记忆处理模型和向量模型。";
     view.$("status-description").textContent = description;
     view.$("status-description").hidden = !description;
+    const setup = view.$("panel-setup");
+    const first = view.$(connected === true || view.data.config.configured ? "parameters-form" : "setup-fields");
+    if (setup.firstElementChild !== first) {
+      if (setup.moveBefore) setup.moveBefore(first, setup.firstElementChild);
+      else setup.prepend(first);
+    }
     const attention = !!status.recovering || !view.data.config.configured || connected !== true;
     view.$("service-alert").hidden = !attention;
     view.$("service-alert-message").textContent = attention ? description || view.$("status-label").textContent : "";
