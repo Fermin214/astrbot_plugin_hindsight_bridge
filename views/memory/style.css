@@ -14,6 +14,7 @@
   --button-hover: #1d4ed8;
   --tint: #eff6ff;
   --danger: #dc2626;
+  --danger-text: #b91c1c;
   --danger-bg: #fef2f2;
   --success: #16a34a;
   --focus: #2563eb;
@@ -35,6 +36,7 @@
   --button-hover: #1d4ed8;
   --tint: rgba(59, 130, 246, 0.16);
   --danger: #f87171;
+  --danger-text: #f87171;
   --danger-bg: rgba(248, 113, 113, 0.16);
   --success: #4ade80;
   --focus: #3b82f6;
@@ -67,9 +69,9 @@ textarea { resize: vertical; min-height: 96px; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 label { display: grid; gap: 6px; min-width: 0; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.danger { background: var(--surface); border-color: var(--control-line); color: var(--danger); }
+.danger { background: var(--surface); border-color: var(--control-line); color: var(--danger-text); }
 .danger:hover:enabled { background: var(--danger-bg); border-color: var(--danger); }
-.danger-quiet { color: var(--danger); border-color: transparent; background: transparent; }
+.danger-quiet { color: var(--danger-text); border-color: transparent; background: transparent; }
 .danger-quiet:hover:enabled { background: var(--danger-bg); border-color: var(--danger); }
 .primary { border-color: var(--button-bg); background: var(--button-bg); color: #ffffff; font-weight: 600; }
 .primary:hover:enabled { border-color: var(--button-hover); background: var(--button-hover); color: #ffffff; }
@@ -125,7 +127,7 @@ a { color: var(--accent); }
 .knowledge-page-title { font-weight: 600; overflow-wrap: anywhere; }
 .knowledge-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .page-metrics, .page-status { display: inline-block; margin: 6px 14px 0 0; font-size: 13px; color: var(--muted); }
-.page-metrics.error { color: var(--danger); }
+.page-metrics.error { color: var(--danger-text); }
 .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
 .stats > div { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; padding: 12px 14px; border-radius: 10px; background: var(--surface-subtle); }
 .stats strong { font-family: inherit; font-size: 22px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -156,7 +158,7 @@ a { color: var(--accent); }
 .operation-status:empty { display: none; }
 .notice { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 16px; margin-bottom: 22px; border-left: 3px solid var(--accent); border-radius: 4px; background: var(--tint); }
 .notice button { margin-left: auto; }
-.notice.error, .operation-status.error { color: var(--danger); }
+.notice.error, .operation-status.error { color: var(--danger-text); }
 .notice.error { border-color: var(--danger); background: var(--danger-bg); }
 .upgrade-notice { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 20px; margin-bottom: 26px; border: 1px solid #b28635; border-left-width: 5px; border-radius: 6px; background: var(--tint); }
 .upgrade-notice strong { font-size: 17px; }
@@ -177,7 +179,7 @@ dialog p + p { margin-top: 16px; }
 .discard-records button { margin-top: 18px; }
 .forget-user { padding: 12px; margin-top: 16px; border-radius: 6px; background: var(--danger-bg); font-weight: 600; }
 .feedback { position: fixed; z-index: 10; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; width: max-content; max-width: calc(100% - 32px); padding: 12px 18px; border: 1px solid var(--accent); border-radius: 7px; color: var(--accent); background: var(--surface); box-shadow: 0 5px 20px #0002; white-space: pre-wrap; }
-.feedback.error { border-color: var(--danger); color: var(--danger); }
+.feedback.error { border-color: var(--danger); color: var(--danger-text); }
 .feedback span { min-width: 0; }
 .feedback button { min-height: 36px; padding: 4px 10px; flex-shrink: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
@@ -246,6 +248,7 @@ button, input, select, textarea { transition: border-color 140ms ease, backgroun
     --button-hover: Highlight;
     --tint: Canvas;
     --danger: LinkText;
+    --danger-text: CanvasText;
     --danger-bg: Canvas;
     --success: CanvasText;
     --focus: Highlight;

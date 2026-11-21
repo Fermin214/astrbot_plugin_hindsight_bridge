@@ -146,6 +146,11 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     if not isinstance(original, str) or not original.strip() or len(original) > 8000:
         return None
     parts, host_text = event.get_messages(), event.get_message_str()
+    if allow_readonly and raw.parent_id and isinstance(parts, list) and parts:
+        from astrbot.api.message_components import Reply
+
+        if type(parts[0]) is Reply and parts[0].id == raw.parent_id:
+            parts = parts[1:]
     if (
         not isinstance(parts, list) or len(parts) != 1
         or type(parts[0]) is not plain_type or parts[0].text != original.strip()

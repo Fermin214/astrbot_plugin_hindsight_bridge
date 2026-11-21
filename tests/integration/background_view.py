@@ -59,6 +59,7 @@ window.AstrBotPluginView = {
   },
   apiPost: async (route, payload) => {
     window.fixtureCalls.push({route, payload});
+    if (window.fixtureSaveError) throw new Error('Synthetic save failure');
     if (!route.endsWith('/background') || 'bank' in payload) throw new Error('Unsafe payload');
     if (payload.revision !== window.fixtureScope.background.revision ||
         payload.scope_revision !== window.fixtureScope.background.scope_revision ||
@@ -144,6 +145,9 @@ async def main(port):
                 assert await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), name
                 await page.screenshot(path=str(OUTPUT / ("background-" + name + ".png")), full_page=True)
                 checks.append(name + "_knowledge_save_polling_draft_and_late_response")
+                await page.evaluate("window.fixtureSaveError = true")
+                await page.locator("#background-save").click()
+                await page.locator("#background-feedback").filter(has_text="Synthetic save failure").wait_for()
                 for theme in ("light", "dark"):
                     await page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
                     palette = await page.evaluate("""() => {
@@ -156,11 +160,19 @@ async def main(port):
                                     ("text", "text", "bg"), ("muted", "muted", "surface-subtle"),
                                     ("primary", "white", "button-bg"), ("primary_hover", "white", "button-hover"),
                                 )}
+                    error_colors = await page.locator("#background-feedback").evaluate("""node => {
+                        const hex = color => '#' + color.match(/\\d+/g).slice(0, 3)
+                            .map(channel => Number(channel).toString(16).padStart(2, '0')).join('');
+                        return {text: hex(getComputedStyle(node).color),
+                            background: hex(getComputedStyle(node.closest('.memory-feature')).backgroundColor)};
+                    }""")
+                    measured["inline_error"] = contrast(error_colors["text"], error_colors["background"])
                     assert all(value >= 4.5 for value in measured.values()), (name, theme, measured)
                     contrasts[name + "-" + theme] = measured
                     assert await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), (name, theme)
                     if theme == "dark":
                         await page.screenshot(path=str(OUTPUT / ("background-" + name + "-dark.png")), full_page=True)
+                checks.append(name + "_failed_save_error_text_contrast")
                 await page.emulate_media(reduced_motion="reduce", forced_colors="active")
                 await page.keyboard.press("Tab")
                 assert await page.evaluate("getComputedStyle(document.activeElement).outlineStyle !== 'none'")
