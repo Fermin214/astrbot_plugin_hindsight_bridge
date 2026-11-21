@@ -1,4 +1,4 @@
-"""Reproduce the old SQL permission failure and repair its owned data in Docker."""
+"""Verify a cold install and a repair of owned PostgreSQL data in Docker."""
 
 import argparse
 import hashlib
@@ -16,6 +16,21 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = "34b8b586f226e24834873bae3613c4946c7c45d3"
 LEGACY_IMAGE = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6"
+VECTOR_MINIMUM = "0.8.7"
+ARCHIVE_SOURCE = (
+    "deb [signed-by=/usr/local/share/keyrings/postgres.gpg.asc] "
+    "https://apt-archive.postgresql.org/pub/repos/apt trixie-pgdg-archive main"
+)
+INPUT_FILES = (
+    "core/installer.py",
+    "deploy/HINDSIGHT-LICENSE",
+    "deploy/managed_service.py",
+    "deploy/model_probe.py",
+    "deploy/model_transport.py",
+    "deploy/postgres/Dockerfile",
+    "deploy/postgres/extensions.sql",
+    "tests/integration/install_startup.py",
+)
 SPEC = importlib.util.spec_from_file_location("installer", ROOT / "core/installer.py")
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
@@ -48,7 +63,21 @@ def free_port():
         return listener.getsockname()[1]
 
 
-def verify_fresh(directory, environment):
+def extensions(compose):
+    rows = compose("exec", "-T", "memory-db", "psql", "-U", "hindsight", "-d", "hindsight",
+                   "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+                   "SELECT name, installed_version FROM pg_available_extensions "
+                   "WHERE name IN ('vector', 'pgroonga') AND installed_version = default_version;")
+    versions = dict(row.split("|") for row in rows.splitlines())
+    assert versions.keys() == {"vector", "pgroonga"}, versions
+    compose("exec", "-T", "memory-db", "dpkg", "--compare-versions", versions["vector"], "ge", VECTOR_MINIMUM)
+    assert compose("exec", "-T", "memory-db", "psql", "-U", "hindsight", "-d", "hindsight",
+                   "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+                   "SELECT '服务支持中文关键词检索' &@ '中文关键词';") == "t"
+    return versions
+
+
+def verify_fresh(directory, environment, created_images):
     identifier = secrets.token_hex(6)
     state = {"id": identifier, "database_password": secrets.token_hex(32), "api_key": secrets.token_hex(32),
              "management_key": secrets.token_hex(32), "api_port": free_port(), "management_port": free_port(),
@@ -71,27 +100,23 @@ def verify_fresh(directory, environment):
         assert "10-hindsight.sql" in logs, logs
         assert "PostgreSQL init process complete" in logs, logs
         assert output("docker", "inspect", "--format", "{{.Image}}", database) == image_id(installer.POSTGRES_IMAGE)
-        assert compose("exec", "-T", "memory-db", "psql", "-U", "hindsight", "-d", "hindsight", "-qAt", "-c",
-                       "SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pgroonga');") == "2"
-        return {"fresh_volume_initialization_completed": True, "fresh_volume_permission_errors": False}
+        return {"fresh_volume_initialization_completed": True, "fresh_volume_permission_errors": False,
+                "fresh_extensions": extensions(compose)}
     finally:
+        created_images[installer.POSTGRES_IMAGE] = image_id(installer.POSTGRES_IMAGE)
         if (installed / "identity").exists():
             with (directory / "fresh-cleanup.log").open("w") as log:
                 run("bash", "-c", installer.uninstallation(state)["command"], env=environment,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
 
 
-def verify(directory):
-    if image_id(LEGACY_IMAGE) or image_id(installer.POSTGRES_IMAGE):
-        raise RuntimeError("Cold-start verification requires an isolated Docker daemon without bridge database images")
+def verify_legacy(directory, environment, created_images):
     identifier = secrets.token_hex(6)
     state = {"id": identifier, "database_password": secrets.token_hex(32), "api_key": secrets.token_hex(32),
              "management_key": secrets.token_hex(32), "api_port": free_port(), "management_port": free_port(),
              "control_plane_port": free_port()}
     project = "astrbot-memory-" + identifier
-    environment = {**os.environ, "HINDSIGHT_INSTALL_ROOT": str(directory / "installations")}
     installed = directory / "installations" / project
-    created_images = {}
 
     def compose(*arguments):
         return output("docker", "compose", "--project-name", project, "--project-directory", str(installed), *arguments)
@@ -108,11 +133,17 @@ def verify(directory):
     try:
         with tempfile.TemporaryDirectory(prefix="bridge-startup-") as temporary:
             legacy = Path(temporary)
-            for name in ("Dockerfile", "extensions.sql"):
-                path = legacy / "deploy/postgres" / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(run("git", "show", BASELINE + ":deploy/postgres/" + name, capture_output=True).stdout)
-                path.chmod(0o600)
+            postgres = legacy / "deploy/postgres"
+            postgres.mkdir(parents=True)
+            dockerfile = output("git", "show", BASELINE + ":deploy/postgres/Dockerfile")
+            (postgres / "Dockerfile").write_text(dockerfile.replace(
+                "RUN apt-get update",
+                f"RUN printf '%s\\n' '{ARCHIVE_SOURCE}' > /etc/apt/sources.list.d/pgdg-archive.list \\\n"
+                "    && apt-get update",
+            ) + "\n")
+            init_sql = postgres / "extensions.sql"
+            init_sql.write_text(output("git", "show", BASELINE + ":deploy/postgres/extensions.sql") + "\n")
+            init_sql.chmod(0o600)
             for name in ("managed_service.py", "model_probe.py", "model_transport.py", "HINDSIGHT-LICENSE"):
                 (legacy / "deploy" / name).write_bytes(run("git", "show", BASELINE + ":deploy/" + name, capture_output=True).stdout)
             with (directory / "legacy-build.log").open("w") as log:
@@ -139,7 +170,9 @@ def verify(directory):
                     raise
                 time.sleep(2)
         assert output("docker", "exec", database, "stat", "-c", "%a", "/docker-entrypoint-initdb.d/10-hindsight.sql") == "600"
-        sql("CREATE TABLE bridge_install_sentinel (id integer PRIMARY KEY); INSERT INTO bridge_install_sentinel VALUES (44);")
+        assert sql("CREATE EXTENSION vector; SELECT extversion FROM pg_extension WHERE extname = 'vector';") == "0.8.6"
+        sql("CREATE TABLE bridge_install_sentinel (id integer PRIMARY KEY, embedding vector(3)); "
+            "INSERT INTO bridge_install_sentinel VALUES (44, '[1,2,3]');")
         credential_digest = hashlib.sha256((installed / ".env").read_bytes()).hexdigest()
         command = installer.installation(ROOT, state)["command"]
         install(command, "repaired-install")
@@ -147,8 +180,8 @@ def verify(directory):
         database = compose("ps", "-q", "memory-db")
         assert output("docker", "inspect", "--format", "{{.Image}}", database) == created_images[installer.POSTGRES_IMAGE]
         assert output("docker", "exec", database, "stat", "-c", "%a", "/docker-entrypoint-initdb.d/10-hindsight.sql") == "644"
-        assert sql("SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pgroonga');") == "2"
-        assert sql("SELECT id FROM bridge_install_sentinel;") == "44"
+        repaired_extensions = extensions(compose)
+        assert sql("SELECT id, embedding FROM bridge_install_sentinel;") == "44|[1,2,3]"
         api = compose("ps", "-q", "memory-api")
         status = json.loads(compose("exec", "-T", "memory-api", "python", "-c",
             "import json,os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8766/status',headers={'Authorization':'Bearer '+os.environ['ASTRBOT_MEMORY_MANAGEMENT_KEY']}); print(urllib.request.urlopen(r,timeout=5).read().decode())"))
@@ -156,17 +189,14 @@ def verify(directory):
         assert status["configuration_fingerprint"] == "" and not status["applying"]
         install(command, "repeated-install")
         assert compose("ps", "-q", "memory-api") == api
-        assert sql("SELECT id FROM bridge_install_sentinel;") == "44"
+        assert sql("SELECT id, embedding FROM bridge_install_sentinel;") == "44|[1,2,3]"
         assert hashlib.sha256((installed / ".env").read_bytes()).hexdigest() == credential_digest
-        result = {"baseline": BASELINE, "hindsight": "1.2.0", "strict_umask": "0077",
-                  "legacy_install_exit_code": legacy_exit,
-                  "old_permission_failure_reproduced": True, "repaired_sql_mode": "0644",
-                  "extensions": ["vector", "pgroonga"], "sentinel_preserved": True,
-                  "credentials_preserved": True, "unconfigured_retry_reuses_api_container": True,
-                  "management_identity_verified": True, "management_configuration_fingerprint_supported": True,
-                  "legacy_image_id": created_images[LEGACY_IMAGE], "repaired_image_id": created_images[installer.POSTGRES_IMAGE]}
-        result.update(verify_fresh(directory, environment))
-        (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        return {"baseline": BASELINE, "strict_umask": "0077", "legacy_install_exit_code": legacy_exit,
+                "old_permission_failure_reproduced": True, "repaired_sql_mode": "0644",
+                "legacy_vector": "0.8.6", "repaired_extensions": repaired_extensions, "sentinel_preserved": True,
+                "credentials_preserved": True, "unconfigured_retry_reuses_api_container": True,
+                "management_identity_verified": True, "management_configuration_fingerprint_supported": True,
+                "legacy_image_id": created_images[LEGACY_IMAGE]}
     finally:
         if installed.exists() and (installed / "identity").exists():
             database = compose("ps", "-a", "-q", "memory-db")
@@ -174,18 +204,44 @@ def verify(directory):
                 logged = run("docker", "logs", database, capture_output=True, text=True, check=False)
                 (directory / "final-database.log").write_text(logged.stdout + logged.stderr)
             install(installer.uninstallation(state)["command"], "cleanup")
-        # Shared names are removed only if this pristine-daemon run created them.
+
+
+def verify(directory, fresh_only):
+    image_names = (installer.POSTGRES_IMAGE,) if fresh_only else (installer.POSTGRES_IMAGE, LEGACY_IMAGE)
+    if any(image_id(name) for name in image_names):
+        raise RuntimeError("Cold-start verification requires an isolated Docker daemon without bridge database images")
+    inputs = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in INPUT_FILES}
+    checkout_revision = output("git", "rev-parse", "HEAD")
+    environment = {**os.environ, "HINDSIGHT_INSTALL_ROOT": str(directory / "installations")}
+    created_images = {}
+    builder = "bridge-install-" + secrets.token_hex(6)
+    run("docker", "buildx", "create", "--name", builder, "--driver", "docker-container",
+        "--driver-opt", "default-load=true", stdout=subprocess.DEVNULL)
+    try:
+        try:
+            result = verify_fresh(directory, {**environment, "BUILDX_BUILDER": builder}, created_images)
+        finally:
+            run("docker", "buildx", "rm", builder, stdout=subprocess.DEVNULL)
+        if not fresh_only:
+            result.update(verify_legacy(directory, environment, created_images))
+    finally:
         for name, identifier in created_images.items():
             if identifier and image_id(name) == identifier:
                 run("docker", "image", "rm", name, stdout=subprocess.DEVNULL)
+    if inputs != {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in INPUT_FILES}:
+        raise RuntimeError("Installation inputs changed during the check")
+    result.update(complete=True, checkout_revision=checkout_revision, input_sha256=inputs,
+                  database_image_id=created_images[installer.POSTGRES_IMAGE])
+    (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--fresh-only", action="store_true")
     args = parser.parse_args()
-    args.output.mkdir(parents=True, exist_ok=True, mode=0o700)
-    verify(args.output.resolve())
+    args.output.mkdir(parents=True, mode=0o700)
+    verify(args.output.resolve(), args.fresh_only)
     print("Owned installation startup checks passed.")
 
 
