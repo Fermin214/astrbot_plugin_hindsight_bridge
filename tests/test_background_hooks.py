@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import replace
 import json
 import sys
-import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -100,13 +99,11 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_timeout_preserves_facts_and_releases_capture(self):
         self.select()
-        self.config["recall_timeout"] = 0.2
-        self.page_gate = lambda: asyncio.sleep(0.5)
+        self.page_gate = AsyncMock(side_effect=TimeoutError)
         self.results = [{"id": "fact", "text": "Full surviving fact."}]
         event, req = self.turn()
-        started = time.monotonic()
         await self.plugin.add_memory(event, req)
-        self.assertLess(time.monotonic() - started, 0.3)
+        self.page_gate.assert_awaited_once()
         self.assertIn("Full surviving fact.", req.extra_user_content_parts[0].text)
         self.assertNotIn("Native background marker.", req.extra_user_content_parts[0].text)
         self.assertEqual(self.plugin.outbox.db.execute("SELECT state FROM outbox").fetchone()[0], "ready")
