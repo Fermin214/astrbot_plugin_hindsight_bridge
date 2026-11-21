@@ -84,8 +84,8 @@ class Fixture:
         assert abm is not None
         return self.host.create_event(abm)
 
-    def header(self, event):
-        return native_header(event, Plain, ["/"], adapter=self.host, binding=self.binding)
+    def header(self, event, *, allow_readonly=False):
+        return native_header(event, Plain, ["/"], adapter=self.host, binding=self.binding, allow_readonly=allow_readonly)
 
     async def close(self):
         if self.host.application.running:
@@ -135,6 +135,12 @@ async def main(output):
             ):
                 sample = await fixture.event(changes=changes)
                 assert fixture.header(sample) is None, label
+                readonly = fixture.header(sample, allow_readonly=True)
+                if label == "reply":
+                    assert readonly is not None and readonly.capture_allowed is False
+                    assert readonly.text == "synthetic text" and "quoted" not in readonly.text
+                else:
+                    assert readonly is None, label
                 if label in {"media", "reply"}:
                     reasons = []
                     assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
@@ -150,6 +156,15 @@ async def main(output):
                 {"type": "mention", "offset": 0, "length": 4},
             ):
                 assert fixture.header(await fixture.event(changes={"entities": [entity]})) is None
+            for text, entities in (
+                ("😀 read link", [{"type": "text_link", "offset": 3, "length": 4, "url": "https://example.invalid"}]),
+                ("@SyntheticBot remember", [{"type": "mention", "offset": 0, "length": 13}]),
+                ("@someone remember", [{"type": "mention", "offset": 0, "length": 8}]),
+            ):
+                sample = await fixture.event(text, changes={"entities": entities})
+                readonly = fixture.header(sample, allow_readonly=True)
+                assert readonly is not None and readonly.text == text and readonly.capture_allowed is False
+            passed.append("readonly_replies_links_and_mentions_keep_only_sender_text_and_reject_other_payloads")
             command = await fixture.event("/hindsight@SyntheticBot pause")
             assert fixture.header(command).text == "/hindsight pause"
             command.message_str = "hindsight pause"

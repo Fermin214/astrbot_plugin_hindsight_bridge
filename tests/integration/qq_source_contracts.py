@@ -106,9 +106,10 @@ class Fixture:
         assert event.bot is self.client
         return event
 
-    def header(self, event):
+    def header(self, event, *, allow_readonly=False):
         return native_header(
             event, Plain, ["/"], adapter=self.host, binding=self.binding,
+            allow_readonly=allow_readonly,
         )
 
 
@@ -139,7 +140,11 @@ async def transport_upgrade_contract(fixture, directory):
         with patch.object(time, "time", return_value=time.time() + 3):
             delayed = await fixture.event(data={"id": "transport-replay"})
             incoming = legacy_header(delayed, Plain, adapter=fixture.host, binding=binding)
-            assert asdict(incoming) == asdict(fixture.header(delayed))
+            candidate = asdict(fixture.header(delayed))
+            assert candidate.pop("capture_allowed") is True
+            previous = asdict(incoming)
+            previous.pop("capture_allowed", None)
+            assert previous == candidate
             capture = queue.capture(incoming, "transport-conversation")
             queue.release(capture.task_id)
         frozen = dict(queue.get(capture.task_id))
@@ -401,6 +406,10 @@ async def main():
     quote = await fixture.event(data={"message_reference": {"message_id": "quoted-id"}})
     assert [type(part).__name__ for part in quote.get_messages()] == ["Reply", "At", "Plain"]
     assert fixture.header(quote) is None
+    readonly = fixture.header(quote, allow_readonly=True)
+    assert readonly is not None and readonly.capture_allowed is False
+    assert readonly.text == quote.message_obj.raw_message.raw_data["content"]
+    assert fixture.header(attachment, allow_readonly=True) is None
     passed.append("actual_host_quote_conversion_rejected")
 
     quote_elements = await fixture.event(data={
@@ -422,6 +431,10 @@ async def main():
         }],
     })
     assert [type(part).__name__ for part in quote_only_elements.get_messages()][0] == "Reply"
+    readonly = fixture.header(quote_only_elements, allow_readonly=True)
+    assert readonly is not None and readonly.capture_allowed is False
+    assert "synthetic quoted body" not in readonly.text
+    assert fixture.header(quote_elements, allow_readonly=True) is None
     for sample, expected in ((attachment, "media_or_non_text"), (quote, "quoted_or_reply"),
                              (quote_elements, "quoted_or_reply"), (quote_only_elements, "quoted_or_reply")):
         reasons = []

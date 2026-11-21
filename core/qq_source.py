@@ -159,7 +159,7 @@ def message_shape(data):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
@@ -196,17 +196,41 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         inspect(login.appid, occurred if valid_time else None, received, lambda: message_shape(data))
     if not valid_time:
         return None
+    quoted = data.get("message_reference") is not None or data.get("message_type") == 103
+    if quoted:
+        if not allow_readonly:
+            return None
+        reference = data.get("message_reference")
+        if reference is not None and (
+            not isinstance(reference, Mapping) or set(reference) - {"message_id", "ignore_get_message_error"}
+            or not isinstance(reference.get("message_id"), str) or not reference["message_id"]
+        ):
+            return None
+        elements = data.get("msg_elements")
+        if elements is not None and not isinstance(elements, list):
+            return None
+        if elements:
+            if not isinstance(elements, list) or len(elements) != 1 or not isinstance(elements[0], Mapping):
+                return None
+            if set(elements[0]) - {"id", "message_id", "msg_idx", "message_type", "content", "attachments"}:
+                return None
+        elif data.get("message_type") == 103:
+            return None
     if (
-        set(data) - TEXT_FIELDS or type(data.get("message_type")) is not int or data["message_type"] != 0
-        or data.get("message_reference") is not None or not isinstance(original, str)
+        set(data) - TEXT_FIELDS or type(data.get("message_type")) is not int
+        or data["message_type"] not in ((0, 103) if quoted else (0,)) or not isinstance(original, str)
         or original != getattr(raw, "content", None) or not original.strip() or len(original) > 8000
     ):
         return None
-    for name in ("attachments", "msg_elements"):
+    for name in ("attachments",) if quoted else ("attachments", "msg_elements"):
         if name in data and data[name] is not None:
             if not isinstance(data[name], list) or data[name]:
                 return None
     components = event.get_messages()
+    if quoted and isinstance(components, list):
+        from astrbot.api.message_components import Reply
+
+        components = components[1:] if components and type(components[0]) is Reply else components
     if (
         not isinstance(components, list) or len(components) != 2
         or type(components[0]) is not at_type or components[0].qq != "qq_official"
@@ -228,4 +252,4 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     if not matching:
         return None
     return Incoming("qq_official", event.get_platform_id(), login.appid,
-                    user, mid, occurred, original, received_at=received)
+                    user, mid, occurred, original, received_at=received, capture_allowed=not quoted)

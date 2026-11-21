@@ -55,6 +55,7 @@ class AuthorizationTests(unittest.TestCase):
     def test_selection_requires_explicit_activation_and_old_config_does_not_reactivate(self):
         pair = [("onebot", "2001")]
         self.assertFalse(self.queue.accepts(self.incoming))
+
         with self.assertRaisesRegex(QueueError, "permissions_not_synced"):
             self.queue.capture(self.incoming, "conversation")
         self.queue.sync_permissions([])
@@ -74,6 +75,15 @@ class AuthorizationTests(unittest.TestCase):
         self.open()
         self.queue.sync_permissions(pair)
         self.assertFalse(self.queue.accepts(self.incoming))
+
+    def test_readonly_ingress_cannot_create_capture_rows(self):
+        self.authorize()
+        incoming = replace(self.incoming, capture_allowed=False)
+        self.assertTrue(self.queue.accepts(incoming))
+        with self.assertRaisesRegex(QueueError, "invalid_capture"):
+            self.queue.capture(incoming, "conversation")
+        for table in ("events", "outbox", "window", "replies"):
+            self.assertEqual(self.queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
 
     def test_first_authorization_reauthorization_and_clock_rollback_keep_monotonic_floor(self):
         self.authorize()

@@ -6,7 +6,8 @@ import math
 
 from .control import QueueError
 from .diagnostics import ConfigurationError
-from .identity import Scope, canonical, sha256
+from .identity import Scope, canonical
+from .scope_settings import BACKGROUND, READING, scope_key
 from .materials import DEFAULT_MEMORY_PROMPT, memory_item, render_memories, token_count
 from .reference import reference_options
 
@@ -84,7 +85,7 @@ def check_page(page, *, tokens, chars, page_tokens, tokenizer):
 
 
 def reference_key(connection, owner):
-    return "background:" + sha256(canonical([connection, owner]))
+    return scope_key(BACKGROUND, connection, owner)
 
 
 def reference(queue, scope):
@@ -182,9 +183,7 @@ class ReadGuard:
         return cls(
             plugin.outbox, plugin.client, dict(scope), plugin.permission_revision,
             cls.connection_state(plugin), reference(plugin.outbox, scope), manual,
-            plugin.outbox.control.setting("reading:" + sha256(canonical([
-                plugin.outbox.connection_id, scope["owner_id"],
-            ]))),
+            plugin.outbox.control.setting(scope_key(READING, plugin.outbox.connection_id, scope["owner_id"])),
             None if manual else reference_options(plugin.outbox, scope),
         )
 
@@ -214,9 +213,7 @@ class ReadGuard:
             ))
             and reference(self.queue, self.scope) == self.selection
             and (self.manual or reference_options(self.queue, self.scope) == self.settings)
-            and self.queue.control.setting("reading:" + sha256(canonical([
-                self.queue.connection_id, self.scope["owner_id"],
-            ]))) == self.reading_setting
+            and self.queue.control.setting(scope_key(READING, self.queue.connection_id, self.scope["owner_id"])) == self.reading_setting
         )
 
 

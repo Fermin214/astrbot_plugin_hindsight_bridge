@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .identity import Scope, canonical, sha256
+from .scope_settings import forget_settings
 
 
 class QueueError(ValueError):
@@ -45,7 +46,7 @@ class Control:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if required and version == 0:
                 raise QueueError("recovery_required:control_uninitialized")
-            if version not in (0, 1, 2, 3, 4, 5, 6):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
                 raise QueueError("unsupported_control_version")
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -103,9 +104,9 @@ class Control:
                 CREATE TABLE IF NOT EXISTS reflection_requests(
                     request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL,
-                    state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')),
+                    state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown','overridden')),
                     created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '',
-                    UNIQUE(connection_id,bank)
+                    overridden_at REAL, overridden_by TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS maintenance(
                     connection_id TEXT NOT NULL, bank TEXT NOT NULL,
@@ -150,7 +151,28 @@ class Control:
                 "ON erasure_refs(forget_id,kind,checked_pass,ref)"
             )
             with self.transaction():
-                self.db.execute("PRAGMA user_version=6")
+                if version < 7:
+                    self.db.execute("""
+                        CREATE TABLE reflection_requests_v7(
+                            request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
+                            owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL,
+                            state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown','overridden')),
+                            created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '',
+                            overridden_at REAL, overridden_by TEXT NOT NULL DEFAULT ''
+                        )
+                    """)
+                    columns = {row["name"] for row in self.db.execute("PRAGMA table_info(reflection_requests)")}
+                    copied = ["request_id", "connection_id", "owner_id", "bank", "generation", "state", "created_at", "error_code"]
+                    copied.extend(name for name in ("overridden_at", "overridden_by") if name in columns)
+                    names = ",".join(copied)
+                    self.db.execute(f"INSERT INTO reflection_requests_v7({names}) SELECT {names} FROM reflection_requests")
+                    self.db.execute("DROP TABLE reflection_requests")
+                    self.db.execute("ALTER TABLE reflection_requests_v7 RENAME TO reflection_requests")
+                self.db.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS reflection_requests_active
+                    ON reflection_requests(connection_id,bank) WHERE state IN ('prepared','dispatched','unknown')
+                """)
+                self.db.execute("PRAGMA user_version=7")
                 self.db.execute("DELETE FROM reflection_requests WHERE state='prepared'")
                 self.db.execute("UPDATE reflection_requests SET state='unknown',error_code='reflect_execution_unknown' WHERE state='dispatched'")
                 if version < 4:
@@ -338,61 +360,7 @@ class Control:
                 "WHERE connection_id=? AND owner_id=?",
                 (bank, generation, lower, stamp, received, received, connection, owner_id),
             )
-            # Keep a monotonic tombstone so an old page selection cannot return.
-            key = "background:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("background_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 2, "revision": revision + 1, "enabled": False,
-                    "page_id": "", "mental_model_id": "", "pages": [],
-                    "invalidated": bool(previous.get("page_id") or previous.get("pages") or previous.get("invalidated")),
-                }), key))
-            key = "reading:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("reading_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 1, "revision": revision + 1, "mode": "automatic", "invalidated": True,
-                }), key))
-            key = "reflect:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    previous = json.loads(previous)
-                    revision = previous["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, KeyError, TypeError):
-                    raise QueueError("reflect_settings_invalid") from None
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (canonical({
-                    "format": 1, "revision": revision + 1, "enabled": False,
-                    "timeout": 12, "invalidated": True,
-                }), key))
-            key = "reference:" + sha256(canonical([connection, owner_id]))
-            previous = self.setting(key)
-            if previous:
-                try:
-                    revision = json.loads(previous)["revision"]
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError
-                except (ValueError, TypeError, KeyError, RecursionError):
-                    revision = int(self.setting("revision"))
-                self.db.execute("UPDATE settings SET value=? WHERE key=?", (
-                    canonical({"revision": revision + 1}), key,
-                ))
+            forget_settings(self, connection, owner_id)
             self.bump()
         return self.db.execute(
             "SELECT * FROM erasures WHERE forget_id=?", (fid,)
@@ -567,9 +535,23 @@ class Control:
     def reflection_pending(self, connection, *, bank=None, owner_id=None):
         return self.db.execute(
             "SELECT * FROM reflection_requests WHERE connection_id=? "
+            "AND state IN ('prepared','dispatched','unknown') "
             "AND (? IS NULL OR bank=?) AND (? IS NULL OR owner_id=?) ORDER BY created_at",
             (connection, bank, bank, owner_id, owner_id),
         ).fetchall()
+
+    def override_unknown_reflections(self, connection, bank, *, actor):
+        if not isinstance(actor, str) or not actor.strip():
+            raise QueueError("reflect_override_actor_required")
+        with self.transaction():
+            changed = self.db.execute(
+                "UPDATE reflection_requests SET state='overridden',overridden_at=?,overridden_by=? "
+                "WHERE connection_id=? AND bank=? AND state='unknown'",
+                (time.time(), actor, connection, bank),
+            ).rowcount
+            if changed:
+                self.bump()
+        return changed
 
     def record_request(
         self, row, owner_id, *, dispatched=False, accepted=False, cancel=False

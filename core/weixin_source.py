@@ -109,7 +109,7 @@ def message_shape(raw, items):
     return "unsupported_message"
 
 
-def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
+def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
     if login is None or not event.is_private_chat() or event.get_group_id():
         return None
@@ -142,7 +142,8 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         inspect(login.account_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw, items))
     if (
         not valid_time or raw.get("delete_time_ms") not in (None, 0) or set(raw) - MESSAGE_FIELDS
-        or any(value is not None and (type(value) is not int or value != 0)
+        or any(value is not None and (type(value) is not int or not 0 <= value < 2**64
+                                     or value != 0 and not allow_readonly)
                for value in (raw.get("root_id"), raw.get("parent_id")))
     ):
         return None
@@ -150,10 +151,12 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
     if not isinstance(items, list) or not items or len(items) > 8000 or not isinstance(parts, list):
         return None
     texts, length = [], 0
+    quoted = bool(raw.get("root_id") or raw.get("parent_id"))
     for item in items:
         if (
             not isinstance(item, Mapping) or set(item) - (ITEM_FIELDS | NON_TEXT_FIELDS | EMPTY_LIST_FIELDS)
-            or any(item.get(name) is not None for name in NON_TEXT_FIELDS)
+            or any(item.get(name) is not None for name in NON_TEXT_FIELDS - {"ref_msg"})
+            or item.get("ref_msg") is not None and (not allow_readonly or not isinstance(item["ref_msg"], Mapping))
             or any(type(value) is not list or value
                    for name in EMPTY_LIST_FIELDS if (value := item.get(name)) is not None)
             or type(item.get("type")) is not int or item["type"] != 1
@@ -161,6 +164,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
             or not valid_update(item.get("update_time_ms"), item.get("create_time_ms"), finished)
         ):
             return None
+        quoted = quoted or item.get("ref_msg") is not None
         text_item = item.get("text_item")
         if not isinstance(text_item, Mapping) or set(text_item) != {"text"}:
             return None
@@ -192,5 +196,5 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None):
         return None
     return Incoming(
         "weixin_oc", event.get_platform_id(), login.account_id, user, str(mid),
-        occurred / 1000, original, received_at=received,
+        occurred / 1000, original, received_at=received, capture_allowed=not quoted,
     )

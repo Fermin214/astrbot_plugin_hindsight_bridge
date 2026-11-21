@@ -57,7 +57,7 @@ def recall_description(value):
 
 def recall_notice(code):
     if code in {"recall_timeout", "auth_timeout", "read_timeout", "write_timeout", "pool_timeout", "timeout"}:
-        return "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"
+        return "记忆检索超时，历史记忆未载入（不影响新消息保存）。"
     if code in {"connection_error", "connect_timeout", "http_401", "http_403", "server_auth_not_enforced"}:
         return "Hindsight 连接失败，记忆暂未载入。"
     return "Hindsight 本轮记忆准备失败，记忆暂未载入。"

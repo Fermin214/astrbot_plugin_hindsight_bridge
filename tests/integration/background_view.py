@@ -59,6 +59,7 @@ window.AstrBotPluginView = {
   },
   apiPost: async (route, payload) => {
     window.fixtureCalls.push({route, payload});
+    if (window.fixtureSaveError) throw new Error('Synthetic save failure');
     if (!route.endsWith('/background') || 'bank' in payload) throw new Error('Unsafe payload');
     if (payload.revision !== window.fixtureScope.background.revision ||
         payload.scope_revision !== window.fixtureScope.background.scope_revision ||
@@ -89,6 +90,7 @@ class Handler(SimpleHTTPRequestHandler):
 async def main(port):
     OUTPUT.mkdir(parents=True, exist_ok=True)
     checks = []
+    contrasts = {}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         try:
@@ -98,10 +100,13 @@ async def main(port):
                 ("desktop-sandbox", {"width": 1280, "height": 900}, True),
                 ("phone-sandbox", {"width": 390, "height": 844}, True),
             ):
-                page = await browser.new_page(viewport=size)
+                page = await browser.new_page(viewport=size, has_touch=size["width"] < 640)
                 await page.clock.install()
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
+                page.on("requestfailed", lambda request: errors.append(request.url))
+                page.on("response", lambda response: errors.append(f"{response.status} {response.url}")
+                        if response.status >= 400 else None)
                 await page.add_init_script(SDK)
                 await page.goto(f"http://127.0.0.1:{port}/index.html" + ("?sandbox=1" if sandboxed else ""))
                 await page.locator('#background-page option[value="kp-fixture"]').wait_for(state="attached")
@@ -140,15 +145,61 @@ async def main(port):
                 assert await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), name
                 await page.screenshot(path=str(OUTPUT / ("background-" + name + ".png")), full_page=True)
                 checks.append(name + "_knowledge_save_polling_draft_and_late_response")
+                await page.evaluate("window.fixtureSaveError = true")
+                await page.locator("#background-save").click()
+                await page.locator("#background-feedback").filter(has_text="Synthetic save failure").wait_for()
+                for theme in ("light", "dark"):
+                    await page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+                    palette = await page.evaluate("""() => {
+                        const style = getComputedStyle(document.documentElement);
+                        return Object.fromEntries(['text', 'bg', 'muted', 'surface-subtle', 'button-bg', 'button-hover']
+                            .map(key => [key, style.getPropertyValue('--' + key).trim()]));
+                    }""")
+                    measured = {label: contrast(palette[foreground] if foreground != "white" else "#ffffff", palette[background])
+                                for label, foreground, background in (
+                                    ("text", "text", "bg"), ("muted", "muted", "surface-subtle"),
+                                    ("primary", "white", "button-bg"), ("primary_hover", "white", "button-hover"),
+                                )}
+                    error_colors = await page.locator("#background-feedback").evaluate("""node => {
+                        const hex = color => '#' + color.match(/\\d+/g).slice(0, 3)
+                            .map(channel => Number(channel).toString(16).padStart(2, '0')).join('');
+                        return {text: hex(getComputedStyle(node).color),
+                            background: hex(getComputedStyle(node.closest('.memory-feature')).backgroundColor)};
+                    }""")
+                    measured["inline_error"] = contrast(error_colors["text"], error_colors["background"])
+                    assert all(value >= 4.5 for value in measured.values()), (name, theme, measured)
+                    contrasts[name + "-" + theme] = measured
+                    assert await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), (name, theme)
+                    if theme == "dark":
+                        await page.screenshot(path=str(OUTPUT / ("background-" + name + "-dark.png")), full_page=True)
+                checks.append(name + "_failed_save_error_text_contrast")
+                await page.emulate_media(reduced_motion="reduce", forced_colors="active")
+                await page.keyboard.press("Tab")
+                assert await page.evaluate("getComputedStyle(document.activeElement).outlineStyle !== 'none'")
+                assert await page.locator("#background-save").evaluate("node => getComputedStyle(node).transitionDuration === '0s'")
+                assert not errors, errors
+                checks.append(name + "_themes_contrast_focus_and_reduced_motion")
                 await page.close()
         finally:
             await browser.close()
     (OUTPUT / "report.json").write_text(json.dumps({
         "browser": "Chromium", "sdk_and_backend": "mock", "real_astrbot_dashboard": False,
-        "assets_sha256": {name: hashlib.sha256((VIEW / name).read_bytes()).hexdigest()
-                          for name in ("index.html", "app.js", "style.css")},
+        "assets_sha256": {asset.name: hashlib.sha256(asset.read_bytes()).hexdigest()
+                          for asset in sorted(VIEW.iterdir()) if asset.suffix in {".html", ".js", ".css"}},
+        "contrast": contrasts,
         "passed": checks, "complete": True,
     }, indent=2))
+
+
+def contrast(foreground, background):
+    def luminance(value):
+        channels = [int(value[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+                  for channel in channels]
+        return sum(channel * weight for channel, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+    brighter, darker = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (brighter + 0.05) / (darker + 0.05)
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

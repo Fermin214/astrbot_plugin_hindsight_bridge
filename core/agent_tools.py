@@ -13,6 +13,7 @@ from .client import HindsightError
 from .control import QueueError
 from .diagnostics import recall_timeout
 from .identity import Scope, canonical, sha256
+from .scope_settings import READING, scope_key
 from . import reading
 from . import reflection
 from .source import local_runner
@@ -44,7 +45,7 @@ NOTICE_BYTES = 128
 
 
 def options_key(queue, scope):
-    return "reading:" + sha256(canonical([queue.connection_id, scope["owner_id"]]))
+    return scope_key(READING, queue.connection_id, scope["owner_id"])
 
 
 def read_options(queue, scope):
@@ -499,7 +500,7 @@ class MemoryTools:
     def notice(self, scope):
         value = self.public(scope)
         if value["observed_available"]:
-            return "Hindsight 细节记忆由按需工具读取；本轮尚未调用，不能据此判断没有相关记忆。"
+            return "细节记忆已设为按需读取，模型尚未主动查询。"
         return "Hindsight 按需工具未提供，请管理员检查模型工具支持、会话工具列表和回退模型/子代理交接设置，或切回自动召回。"
 
     def record(self, turn, state, code="", *, kind=""):

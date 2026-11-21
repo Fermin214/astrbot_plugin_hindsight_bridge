@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.locking import exclusive_lock
+from core.scope_settings import PREFIXES
 
 
 def connect(path):
@@ -60,7 +61,7 @@ def preserves_settings(previous, incoming, same_revision):
             continue
         if same_revision or key.startswith(migration_prefix):
             return False
-        if key.startswith(("background:", "reading:", "reflect:", "reference:")):
+        if key.startswith(PREFIXES):
             try:
                 old_revision = json.loads(value)["revision"]
                 new_revision = json.loads(incoming[key])["revision"]
@@ -79,7 +80,7 @@ def control_conflict(previous, incoming, incoming_settings, same_revision):
         db.execute("ATTACH DATABASE ? AS incoming", (incoming.resolve().as_uri() + "?mode=ro",))
         old_format = db.execute("PRAGMA main.user_version").fetchone()[0]
         new_format = db.execute("PRAGMA incoming.user_version").fetchone()[0]
-        if new_format < old_format or new_format > 6:
+        if new_format < old_format or new_format > 7:
             return "control_format"
         if not preserves_settings(settings(db), incoming_settings, same_revision):
             return "settings"
@@ -124,9 +125,25 @@ def control_conflict(previous, incoming, incoming_settings, same_revision):
                     "AND new.enabled IS old.enabled AND new.accept_from IS old.accept_from)",
         ):
             return "authorizations"
+        reflection_progress = "new.state IS old.state"
+        if new_format >= 7:
+            reflection_progress = (
+                "(old.state='unknown' AND new.state='unknown' AND new.overridden_at IS NULL AND new.overridden_by='')"
+            )
+            if not same_revision:
+                reflection_progress += (
+                    " OR (old.state='unknown' AND new.state='overridden' "
+                    "AND typeof(new.overridden_at) IN ('real','integer') "
+                    "AND typeof(new.overridden_by)='text' AND trim(new.overridden_by)<>'')"
+                )
+            if old_format >= 7:
+                reflection_progress += (
+                    " OR (old.state='overridden' AND new.state='overridden' "
+                    "AND new.overridden_at IS old.overridden_at AND new.overridden_by IS old.overridden_by)"
+                )
         if not preserves_rows(
-            db, "reflection_requests", "request_id connection_id owner_id bank generation state created_at",
-            required="old.state='unknown'",
+            db, "reflection_requests", "request_id connection_id owner_id bank generation created_at error_code",
+            required="old.state IN ('unknown','overridden')", forward=reflection_progress,
         ):
             return "reflection_requests"
         if not preserves_rows(

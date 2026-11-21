@@ -110,6 +110,18 @@ class QQSourceTests(unittest.TestCase):
     adapter_type = Adapter
     host_type = "qq_official"
 
+    def test_readonly_still_rejects_media_unknown_fields_and_invalid_quote_metadata(self):
+        for updates in (
+            {"message_reference": {}},
+            {"message_reference": {"message_id": "quoted"}, "attachments": [{"url": "https://example.invalid"}]},
+            {"message_reference": {"message_id": "quoted"}, "unknown_extension": {}},
+            {"message_reference": {"message_id": "quoted"}, "msg_elements": {}},
+            {"message_type": 103, "msg_elements": [{"unknown": "payload"}]},
+        ):
+            with self.subTest(updates=updates):
+                self.assertIsNone(qq.header(self.event(**updates), Plain, (), self.adapter, self.binding,
+                                           allow_readonly=True))
+
     def setUp(self):
         self.clock = patch.object(time, "time", return_value=100.25)
         self.clock.start()

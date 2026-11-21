@@ -7,6 +7,7 @@ import uuid
 from .client import RECALL_BUDGETS
 from .control import QueueError
 from .identity import canonical, sha256
+from .scope_settings import REFERENCE, scope_key
 from .materials import DEFAULT_MEMORY_PROMPT, token_count
 
 
@@ -18,7 +19,7 @@ UNSET = object()
 
 
 def _options_key(connection, owner):
-    return "reference:" + sha256(canonical([connection, owner]))
+    return scope_key(REFERENCE, connection, owner)
 
 
 def _binding(control_id, connection, owner, source, bank, generation, authorization_revision):
@@ -60,13 +61,15 @@ def _valid_history_limit(limit):
     return type(limit) is int and 0 <= limit <= HISTORY_LIMIT_MAX
 
 
-def _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant):
+def _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant,
+              recall_on_quoted_or_link):
     if (
         not isinstance(prompt, str) or not isinstance(types, list) or len(types) > len(REFERENCE_TYPES)
         or any(kind not in REFERENCE_TYPES for kind in types) or len(set(types)) != len(types)
         or type(exclude_assistant) is not bool or type(detail_limit) is not int
         or not 0 <= detail_limit <= DETAIL_LIMIT_MAX or not _valid_history_limit(history_limit)
         or recall_budget not in RECALL_BUDGETS or type(capture_assistant) is not bool
+        or type(recall_on_quoted_or_link) is not bool
     ):
         raise QueueError("reference_settings_invalid")
 
@@ -78,6 +81,7 @@ def _options(stored):
         "history_limit": stored.get("history_limit", 30),
         "recall_budget": stored.get("recall_budget", "mid"),
         "capture_assistant": stored.get("capture_assistant", True),
+        "recall_on_quoted_or_link": stored.get("recall_on_quoted_or_link", False),
     }
     _validate(**result)
     return {"revision": stored["revision"], **result}
@@ -95,7 +99,8 @@ def reference_options(queue, scope):
 
 
 def save_reference_options(queue, scope, *, revision, prompt, types, exclude_assistant,
-                           detail_limit, history_limit, recall_budget=UNSET, capture_assistant=UNSET):
+                           detail_limit, history_limit, recall_budget=UNSET, capture_assistant=UNSET,
+                           recall_on_quoted_or_link=UNSET):
     control = queue.control
     with control.transaction():
         binding = _scope_binding(queue, scope)
@@ -108,13 +113,17 @@ def save_reference_options(queue, scope, *, revision, prompt, types, exclude_ass
             recall_budget = previous["recall_budget"]
         if capture_assistant is UNSET:
             capture_assistant = previous["capture_assistant"]
-        _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant)
+        if recall_on_quoted_or_link is UNSET:
+            recall_on_quoted_or_link = previous["recall_on_quoted_or_link"]
+        _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant,
+                  recall_on_quoted_or_link)
         if token_count(prompt) > PROMPT_TOKEN_LIMIT:
             raise QueueError("reference_prompt_too_long")
         options = {
             "revision": revision + 1, "prompt": prompt, "types": types, "exclude_assistant": exclude_assistant,
             "detail_limit": detail_limit, "history_limit": history_limit,
             "recall_budget": recall_budget, "capture_assistant": capture_assistant,
+            "recall_on_quoted_or_link": recall_on_quoted_or_link,
         }
         control.db.execute(
             "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -191,7 +200,7 @@ class ReferenceHistory:
         limits = {}
         with control.transaction():
             for key, value in control.db.execute(
-                "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
+                "SELECT key,value FROM settings WHERE key GLOB ?", (REFERENCE + "*",)
             ).fetchall():
                 previous_revision = int(revision)
                 try:

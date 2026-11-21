@@ -9,6 +9,7 @@ from reading_e2e import results
 
 async def verify(acceptance, page, frame, bank):
     acceptance.report["tool_schema_mode"] = acceptance.settings.get("tool_schema_mode", "full")
+    acceptance.report["upgrade_baseline"] = acceptance.settings.get("baseline_revision", "43ab66ebd57ca0716cfd9c46d37f4b1147d1260b")
     scope = await acceptance.scope()
     identifier = scope["scope_id"]
     assert scope["reflect"]["enabled"] is False and scope["reading"]["mode"] == "automatic"
@@ -37,8 +38,11 @@ async def verify(acceptance, page, frame, bank):
     assert current["reflect"]["enabled"] and current["reflect"]["timeout"] == 8
     assert current["reading"]["mode"] == "automatic"
     await page.set_viewport_size({"width": 390, "height": 844})
+    try:
+        await until(lambda: frame.locator("body").evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), timeout=10)
+    finally:
+        await page.screenshot(path=str(ROOT / "reflect-phone.png"), full_page=True)
     assert await frame.locator("body").evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-    await page.screenshot(path=str(ROOT / "reflect-phone.png"), full_page=True)
     await page.set_viewport_size({"width": 1280, "height": 900})
     acceptance.passed("native_reflect_panel_defaults_off_saves_independent_settings_and_fits_phone")
 
@@ -161,12 +165,56 @@ async def verify(acceptance, page, frame, bank):
     lost = results(await chat("HB-REFLECT-LOST"))
     assert not any(item.get("kind") == "reflect" for item in lost)
     assert (await acceptance.scope())["reflect"]["unknown"] == 1
+
+    async def override(label):
+        await acceptance.control("restart_hindsight")
+        await acceptance.backend_ready()
+        await page.reload()
+        await acceptance.dismiss_host_notice(page)
+        await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+        await frame.locator("#reflect-override").click()
+        await frame.locator("#reflect-override-bank").select_option(new_bank)
+        assert await frame.locator("#reflect-override-submit").is_disabled()
+        await page.set_viewport_size({"width": 390, "height": 844})
+        try:
+            await until(lambda: frame.locator("body").evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), timeout=10)
+        finally:
+            await page.screenshot(path=str(ROOT / ("reflect-override-" + label + "-phone.png")), full_page=True)
+        assert await frame.locator("body").evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        await frame.locator("#reflect-override-confirm").check()
+        await frame.locator("#reflect-override-submit").click()
+        await frame.locator("#reflect-override-dialog").wait_for(state="hidden", timeout=15000)
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await until(lambda: no_pending(acceptance), timeout=15)
+        rows = database(ROOT / "control-volume/control.sqlite3", "SELECT * FROM reflection_requests WHERE bank=?", (new_bank,))
+        assert all(row["state"] == "overridden" and row["overridden_at"] and row["overridden_by"] for row in rows)
+        return rows
+
+    await acceptance.action(identifier, "maintenance_begin")
+    pending = await acceptance.action(identifier, "maintenance_status")
+    assert not pending["maintenance"]["ready"]
+    await override("active")
+    pending = await acceptance.action(identifier, "maintenance_status")
+    assert pending["maintenance"]["ready"]
+    await acceptance.action(identifier, "maintenance_resume")
+    assert (await acceptance.scope())["mode"] == "readonly"
+    await asyncio.sleep(1.1)
+    repeated = results(await chat("HB-REFLECT-AFTER-OVERRIDE"))
+    assert any(item.get("kind") == "reflect" for item in repeated)
+    assert not (await acceptance.scope())["reflect"]["pending"]
+    acceptance.passed("native_active_bank_override_preserves_audit_resumes_maintenance_and_allows_new_reflect")
+
+    await acceptance.control("drop_reflect_response")
+    lost = results(await chat("HB-REFLECT-LOST-AGAIN"))
+    assert not any(item.get("kind") == "reflect" for item in lost)
+    assert (await acceptance.scope())["reflect"]["unknown"] == 1
     prepared = await acceptance.action(identifier, "forget_prepare")
     await acceptance.action(identifier, "forget_confirm", confirmation=prepared["confirmation"])
     await acceptance.install("baseline-install.zip")
     old = await acceptance.bootstrap()
     assert "unsupported_control_version" in json.dumps(old)
-    assert database(ROOT / "control-volume/control.sqlite3", "SELECT COUNT(*) count FROM reflection_requests WHERE bank=?", (new_bank,))[0]["count"] == 1
+    rows = database(ROOT / "control-volume/control.sqlite3", "SELECT state FROM reflection_requests WHERE bank=?", (new_bank,))
+    assert sorted(row["state"] for row in rows) == ["overridden", "unknown"]
     await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
     assert (await acceptance.scope())["reflect"]["unknown"] == 1
@@ -174,8 +222,25 @@ async def verify(acceptance, page, frame, bank):
     rows = database(ROOT / "control-volume/control.sqlite3", "SELECT phase FROM erasures WHERE old_bank=?", (new_bank,))
     assert rows[0]["phase"] != "verified"
     await acceptance.bot.chat(BOB, "The other owner recovers normally after the Reflect connection loss.")
-    acceptance.report["reflect_unknown_recovery"] = "requires an independently verifiable native execution endpoint; not exposed by the supported versions"
     acceptance.passed("lost_reflect_response_persists_a_barrier_through_downgrade_and_reload_without_claiming_erasure_or_blocking_other_owners")
+    audit = await override("old")
+
+    async def old_bank_erased():
+        rows = database(ROOT / "control-volume/control.sqlite3", "SELECT phase,cleanup_step FROM erasures WHERE old_bank=?", (new_bank,))
+        return rows and rows[0]["phase"] == "verified" and rows[0]["cleanup_step"] == 7
+
+    await until(old_bank_erased, timeout=90)
+    async with acceptance.session.get(acceptance.settings["hindsight_url"] + "/v1/default/banks/" + new_bank + "/config",
+                                      headers={"Authorization": "Bearer " + acceptance.settings["memory_key"]}) as response:
+        assert response.status == 404
+    assert database(ROOT / "control-volume/control.sqlite3", "SELECT * FROM reflection_requests WHERE bank=?", (new_bank,)) == audit
+    acceptance.report["reflect_unknown_recovery"] = {
+        "control_format": 7, "precondition": "native Hindsight restarted before each override",
+        "active_bank": "maintenance resumed and new native Reflect completed",
+        "old_bank": "normal erasure verified all seven cleanup steps and native Bank returned 404",
+        "audit_records_retained": len(audit),
+    }
+    acceptance.passed("native_old_bank_override_retains_audit_and_completes_all_original_cleanup_checks")
 
 
 async def no_pending(acceptance):

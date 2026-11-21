@@ -32,7 +32,7 @@ class Fixture:
         self.host.bot_open_id = bot
         self.host._user_name_cache["ou_fixtureuser"] = ("Synthetic user", time.time() + 3600)
 
-    async def event(self, *, text="  synthetic text  ", changes=None, mid="om_fixture", offset=0):
+    async def event(self, *, text="  synthetic text  ", changes=None, mid="om_fixture", offset=0, reply=None):
         from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
         payload = P2ImMessageReceiveV1({
@@ -47,7 +47,7 @@ class Fixture:
                 },
             },
         })
-        with patch.object(self.host, "_build_reply_from_parent_id", AsyncMock(return_value=None)):
+        with patch.object(self.host, "_build_reply_from_parent_id", AsyncMock(return_value=(reply, "text") if reply else None)):
             await self.host.convert_msg(payload)
         return self.queue.get_nowait()
 
@@ -68,7 +68,7 @@ async def main(output):
         raise RuntimeError("ASTRBOT_ROOT must be a dedicated empty test directory")
     from astrbot.core.config.default import VERSION
     from astrbot.api.event import AstrMessageEvent
-    from astrbot.core.message.components import Plain
+    from astrbot.core.message.components import Plain, Reply
     from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
     from plugins.astrbot_plugin_hindsight_bridge.core.source import (
         inspect_header, native_header, native_login, prepare_bot_identity,
@@ -105,6 +105,19 @@ async def main(output):
         assert header(command) is None
         passed.append(mode + "_command_prefix_requires_exact_original_text")
 
+        quoted = await fixture.event(changes={"parent_id": "om_parent"},
+                                     reply=Reply(id="om_parent", chain=[Plain("referenced content")]))
+        assert [type(part) for part in quoted.get_messages()] == [Reply, Plain]
+        assert header(quoted) is None
+        readonly = native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True)
+        assert readonly and readonly.capture_allowed is False and readonly.text == "  synthetic text  "
+        quoted.get_messages()[0].id = "om_foreign"
+        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True) is None
+        quoted.get_messages()[0].id = "om_parent"
+        quoted.get_messages().insert(1, Reply(id="om_parent"))
+        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True) is None
+        passed.append(mode + "_native_reply_component_reads_only_sender_text_and_checks_parent_identity")
+
         for field, value in (
             ("chat_type", "group"), ("chat_type", "unknown"),
             ("message_type", "post"), ("message_type", "image"),
@@ -122,6 +135,12 @@ async def main(output):
             sample = await fixture.event()
             setattr(sample.message_obj.raw_message, field, value)
             assert header(sample) is None, (mode, field, type(value))
+            readonly = native_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True)
+            if field in {"parent_id", "root_id"}:
+                assert readonly is not None and readonly.capture_allowed is False
+                assert readonly.text == "  synthetic text  "
+            else:
+                assert readonly is None, (mode, field)
             expected = {
                 "message_type": "media_or_non_text", "parent_id": "quoted_or_reply",
                 "root_id": "quoted_or_reply", "thread_id": "quoted_or_reply",

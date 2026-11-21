@@ -515,6 +515,60 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("timezone", self.config)
         self.assertEqual(self.config["allowed_accounts"], [])
 
+    def polling_resources(self):
+        queue = SimpleNamespace(recovering=False, list_scopes=lambda: [], connection_error=lambda: "http_401",
+                                pause_connection=Mock())
+        client = SimpleNamespace(url=self.config["api_url"], api_key=self.config["api_key"],
+                                 request=AsyncMock(return_value={"api_version": "1.2.0"}), ensure_auth=AsyncMock())
+        self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
+        self.plugin.outbox, self.plugin.client = queue, client
+        return queue, client
+
+    async def test_save_access_finishes_while_bootstrap_auth_waits(self):
+        queue, client = self.polling_resources()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def auth(**kwargs):
+            entered.set()
+            await release.wait()
+
+        client.ensure_auth.side_effect = auth
+        polling = asyncio.create_task(self.panel.bootstrap())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.panel.body = AsyncMock(return_value={"control_plane_url": "https://memory.example.org"})
+            saved = await asyncio.wait_for(self.panel.save_access(), 1)
+            self.assertTrue(saved["saved"])
+        finally:
+            release.set()
+        with self.assertRaisesRegex(module.PanelError, "配置已变化"):
+            await polling
+        queue.pause_connection.assert_not_called()
+        client.request.assert_not_awaited()
+
+    async def test_late_version_cannot_replace_new_connection_cache(self):
+        _, old_client = self.polling_resources()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def version(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return {"api_version": "1.1.0"}
+
+        old_client.request.side_effect = version
+        self.panel.user_scopes = AsyncMock(return_value=[])
+        polling = asyncio.create_task(self.panel.bootstrap())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.polling_resources()
+            actual = await self.panel.service_status()
+            self.assertEqual(actual["version"], "1.2.0")
+        finally:
+            release.set()
+        with self.assertRaisesRegex(module.PanelError, "配置已变化"):
+            await polling
+        self.assertIs(self.panel.version_cache[2], actual)
+
     async def test_settings_save_uses_native_astrbot_account_template_format(self):
         await self.save(allowed_accounts=[{"platform_instance_id": "qq", "user_id": "123"}])
         self.assertEqual(self.config["allowed_accounts"], [{
@@ -1041,6 +1095,45 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         maintenance.resume.assert_awaited_once_with("scope-1", management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "inactive", "ready": False})
         queue.can_recall.assert_not_called()
+
+    async def test_reflect_override_checks_confirmation_revision_owner_and_bank(self):
+        _, queue, _ = self.management_resources()
+        erasure = {"old_bank": "old-bank", "phase": "pending"}
+        queue.control.erasures = Mock(return_value=[erasure])
+        queue.control.reflection_pending = Mock(return_value=[
+            {"bank": "bank-1", "state": "unknown"}, {"bank": "old-bank", "state": "unknown"},
+            {"bank": "foreign-bank", "state": "unknown"},
+        ])
+        queue.control.override_unknown_reflections = Mock(return_value=1)
+        revision = self.panel.config_revision()
+        for values in (
+            {"confirm_override": False}, {"confirm_override": 1}, {"config_revision": "stale"}, {"config_revision": None},
+            {"bank": "foreign-bank"}, {"bank": ["bank-1"]},
+        ):
+            with self.subTest(values=values), self.assertRaises(module.PanelError):
+                await self.action("reflect_override", **{
+                    "bank": "bank-1", "confirm_override": True, "config_revision": revision, **values,
+                })
+        queue.control.override_unknown_reflections.assert_not_called()
+        with self.assertRaises(module.PanelError):
+            await self.action("reflect_override", bank="bank-1", confirm_override=True)
+        for bank in ("bank-1", "old-bank"):
+            result = await self.action("reflect_override", bank=bank, confirm_override=True, config_revision=revision)
+            self.assertEqual(result["overridden"], 1)
+            queue.control.override_unknown_reflections.assert_called_with("connection-1", bank, actor="admin")
+            queue.control.erasures.assert_called_with("connection-1", owner_id="owner-1")
+            queue.control.reflection_pending.assert_called_with("connection-1", owner_id="owner-1")
+            self.assertTrue(self.plugin.worker.wake.is_set())
+            self.assertEqual(erasure["phase"], "pending")
+        queue.forget.assert_not_called()
+        queue.control.reflection_pending.return_value = [{"bank": "bank-1", "state": "dispatched"}]
+        with self.assertRaises(module.PanelError):
+            await self.action("reflect_override", bank="bank-1", confirm_override=True, config_revision=revision)
+        self.assertEqual(queue.control.override_unknown_reflections.call_count, 2)
+        self.panel.body = AsyncMock(return_value={"action": "reflect_override"})
+        request = SimpleNamespace(method="POST", username="")
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}), self.assertRaises(module.PanelError):
+            await self.panel.action("scope-1")
 
     async def test_maintenance_defaults_to_drain_and_requires_boolean_discard(self):
         _, _, maintenance = self.management_resources()

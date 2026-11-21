@@ -6,6 +6,7 @@ import re
 import time
 
 from ..deploy.model_transport import LEGACY_ENDPOINT, transport_environment
+from .installer import DEFAULT_MANAGED_VERSION, UPGRADE_PATHS
 
 
 class PanelError(ValueError):
@@ -105,8 +106,10 @@ class ManagedConnections:
     async def wait_for_configuration(self, job, state, status):
         panel = self.panel
         if status.get("configuration_fingerprint") is None:
-            if status["ready"] and await panel.managed_backend_version(state) == "1.1.0":
-                raise PanelError("请从「服务管理」升级 Hindsight 1.1.0。")
+            if status["ready"]:
+                version = await panel.managed_backend_version(state)
+                if UPGRADE_PATHS.get(version) == DEFAULT_MANAGED_VERSION:
+                    raise PanelError(f"请从「服务管理」升级 Hindsight {version}。")
             raise PanelError("配套组件不支持接入结果核对，请先重新部署配套服务文件，再保存并连接。")
         deadline = time.monotonic() + 360
         while status.get("applying"):

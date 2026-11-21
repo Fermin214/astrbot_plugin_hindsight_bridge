@@ -42,7 +42,10 @@ from .core.panel import MemoryPanel, PanelError
 from .core.reading import chat_records
 from .core.reference import reference_options
 from .core.reflection import Reflection
-from .core.source import inspect_header, local_runner, native_login, platform_details, prepare_bot_identity
+from .core.source import (
+    PLATFORMS, inspect_header, local_runner, native_login, pin_client_login, platform_details,
+    platform_record, prepare_bot_identity,
+)
 from .core.worker import Worker
 
 
@@ -95,7 +98,7 @@ class HindsightBridge(Star):
             "server_auth_not_enforced": "后端未启用认证，请配置服务 API Key",
             "connection_error": "无法连接记忆服务，请检查 API 地址、网络和容器服务名",
             "connect_timeout": "连接记忆服务超时，请检查 API 地址、网络和服务状态",
-            "read_timeout": "等待记忆服务响应超时，请检查服务负载；记忆检索超时可增加「记忆检索最长等待时间」",
+            "read_timeout": "等待记忆服务响应超时，请检查服务负载；记忆检索超时可增加「检索超时」",
             "write_timeout": "向记忆服务发送请求超时，请检查网络连接",
             "pool_timeout": "等待可用连接超时，请检查服务负载后重试",
             "auth_timeout": "连接认证检查超时，请检查服务状态后重试",
@@ -106,7 +109,7 @@ class HindsightBridge(Star):
             "invalid_background_max_tokens": "知识页长度上限须设为 64 到 8192 token，请修改插件配置",
             "recall_content_unavailable": "检索结果无法放入当前记忆长度限制，请检查记忆内容与字符上限",
             "timeout": "记忆服务响应超时",
-            "recall_timeout": "查找记忆超时，可增加「记忆检索最长等待时间」或检查服务负载",
+            "recall_timeout": "查找记忆超时，可增加「检索超时」或检查服务负载",
             "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
             "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
@@ -116,8 +119,8 @@ class HindsightBridge(Star):
             "scope_not_active": "请先用 /hindsight on 开启记忆",
             "scope_not_available": "这个用户的记忆正在恢复或设置已变化，请稍后重试",
             "bank_missing": "找不到原记忆库，记忆功能已暂停；请管理员恢复原库并恢复原记忆模式，或清空旧记忆后重新开始",
-            "maintenance_active": "新记录和记忆查询已暂停；请管理员在插件页查看进度，完成操作后点击「恢复原记忆模式」",
-            "maintenance_pending": "还有记录未处理完；请管理员在插件页查看保存进度，等待处理完成，或放弃尚未发送和保存失败的记录",
+            "maintenance_active": "保存和记忆查询已暂停。请管理员在插件页查看进度，完成操作后点击「解除读写暂停」",
+            "maintenance_pending": "还有记录未处理完。请在插件页查看进度，等待完成，或放弃未发送及保存失败的记录",
             "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后检查暂停进度。需要清空全部旧记忆时，可使用清空操作重新开始",
             "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
@@ -139,15 +142,15 @@ class HindsightBridge(Star):
             "invalid_background_response": "知识页响应无法识别，请检查 Hindsight 版本后重试",
             "background_response_too_large": "知识页响应过大，请在官方面板准备较短的知识页后重新选择",
             "background_index_too_large": "知识页目录超过读取限制，请联系管理员从官方面板整理目录",
-            "background_settings_invalid": "知识页选择或使用开关无法读取，请管理员检查最新控制库；不要恢复旧控制快照",
+            "background_settings_invalid": "知识页配置读取异常，请管理员检查控制数据目录（勿用旧备份覆盖）",
             "background_changed": "知识页选择、使用开关或账号范围已变化，请刷新后重试",
             "background_scope_changed": "身份或记忆库已变化，知识页选择已失效，请重新选择",
             "background_missing": "找不到所选知识页，请在官方面板确认后回到插件页重新选择",
             "background_empty": "知识页还没有正文，请等待官方生成完成；一直为空时请管理员检查已有记忆和标签筛选",
-            "background_timeout": "读取知识页超时，请检查记忆服务，或调整知识页读取与记忆检索的等待时间",
+            "background_timeout": "读取知识页超时，请检查记忆服务，或增加「知识页超时」和「检索超时」",
             "background_too_large": "知识页太长，超出使用上限；请缩短官方页面，或增加知识页长度上限及共享 token、字符上限；记忆检索继续执行",
             "background_view_too_large": "知识页超过私聊查看上限，请联系管理员从官方面板查看完整内容",
-            "reading_settings_invalid": "记忆读取方式无法读取，请检查最新控制库",
+            "reading_settings_invalid": "记忆读取设置异常，请检查控制数据目录",
             "reading_changed": "记忆读取方式、账号或模型已变化，请重新发起查询",
             "reference_settings_invalid": "记忆参考设置无效，请检查提示、类别和数量",
             "reference_changed": "记忆参考设置已变化，请刷新后重试",
@@ -160,14 +163,14 @@ class HindsightBridge(Star):
             "tool_result_too_large": "读取结果超过工具输出上限，请缩小查询范围或通过官方面板查看",
             "history_response_too_large": "知识页历史超过传输上限，正文仍可单独读取；完整历史请通过官方面板查看",
             "tool_read_failed": "按需读取失败，请检查服务后重试，或使用官方面板查看",
-            "reflect_settings_invalid": "Reflect 设置无法读取，请检查最新控制库",
+            "reflect_settings_invalid": "Reflect 设置异常，请检查控制数据目录",
             "reflect_changed": "Reflect 设置或记忆范围已变化，请刷新后重试",
-            "reflect_timeout": "Reflect 等待超时，已发送的原生请求仍会继续核对；不要重复调用",
+            "reflect_timeout": "Reflect 等待超时，服务可能仍在处理。请等待结果，不要重复发送",
             "reflect_busy": "已有 Reflect 请求尚未结束，请稍后查看状态；不要重复发送",
-            "reflect_execution_unknown": "Reflect 请求的执行结果不明，相关旧记忆库不能完成清空；需要 Hindsight 提供可核验的请求完成凭据",
-            "reflect_transport_timeout": "Reflect 连接超时，无法确认服务端请求是否结束；相关旧记忆库的清空会保持暂停",
+            "reflect_execution_unknown": "上次 Reflect 请求未确认结束，相关记忆操作已暂停。请管理员确认 Hindsight 已重启或没有残留请求后，在插件页解除 Reflect 阻塞",
+            "reflect_transport_timeout": "Reflect 连接超时，暂时无法确认请求是否结束。旧记忆库的清空会保持暂停",
             "reflect_no_answer": "Reflect 没有返回答案，可调整问题或使用 Recall 查找事实",
-            "reflect_response_too_large": "Reflect 原生响应超过传输上限，可缩小问题范围；请求终点不明时不能完成相关旧记忆库的清空",
+            "reflect_response_too_large": "Reflect 回答过长，请缩小问题范围。请求状态不明时，旧记忆库的清空会保持暂停",
             "invalid_reflect_response": "Reflect 响应无法识别，请检查 Hindsight 版本及接口响应",
             "bank_not_created": "记忆库尚未建立，请先在读写记忆模式下保存一条普通聊天",
             "invalid_query_budget": "查询问题过长，请缩短后重试",
@@ -292,21 +295,15 @@ class HindsightBridge(Star):
                 login = evidence.get("login")
                 observed = native_login(adapter)
                 if observed is not None:
-                    logical = platform_details(adapter.meta().name)["logical_type"]
-                    if logical == "weixin_oc":
-                        bot = observed.account_id
-                    elif logical in {"telegram", "lark"}:
-                        bot = observed.bot_id
-                    else:
-                        bot = observed.appid
-                    if self.outbox.access.observe_bot(instance, logical, bot):
+                    contract = PLATFORMS[adapter.meta().name]
+                    if self.outbox.access.observe_bot(instance, contract.logical_type, contract.bot_id(observed)):
                         self.outbox.sync_permissions(accounts)
                         self.confirmations.clear()
                         self.permission_revision += 1
                 if login is not None and not login.matches(observed):
                     if (
                         observed is not None and observed.client is login.client
-                        and evidence.get("host_type") in {"qq_official", "qq_official_webhook"}
+                        and pin_client_login(evidence.get("host_type"))
                     ):
                         evidence["invalid_login"] = True
                     evidence["bot_id"] = ""
@@ -354,15 +351,14 @@ class HindsightBridge(Star):
                     bot = ""
                 previous = self.source_accounts.get(instance, {})
                 login = native_login(adapter)
-                record = next((row for row in self.context.get_config().get("platform", [])
-                               if str(row.get("id")) == instance), {})
+                record = platform_record(self.context, instance)
                 previous_login = previous.get("login")
-                unresolved_qq_login = (
-                    record.get("type") in {"qq_official", "qq_official_webhook"}
+                retained_login = (
+                    pin_client_login(record.get("type"))
                     and previous_login is not None
                     and (client is None or previous_login.client is client)
                 )
-                invalid = unresolved_qq_login and (
+                invalid = retained_login and (
                     previous.get("invalid_login", False)
                     or login is not None and not previous_login.matches(login)
                 )
@@ -370,7 +366,7 @@ class HindsightBridge(Star):
                     bot = ""
                 self.source_accounts[instance] = {
                     "adapter": adapter, "client": client, "bot_id": bot,
-                    "login": previous_login if unresolved_qq_login and (invalid or login is None) else login,
+                    "login": previous_login if retained_login and (invalid or login is None) else login,
                     "invalid_login": invalid, "host_type": record.get("type", ""),
                 }
                 logical_type = platform_details(record.get("type", ""))["logical_type"]
@@ -382,16 +378,16 @@ class HindsightBridge(Star):
             self.refresh_permissions()
 
     def allowed(self, event):
-        return self.authorized_source(event) is not None
+        return self.authorized_source(event, allow_readonly=True) is not None
 
-    def authorized_source(self, event):
+    def authorized_source(self, event, *, allow_readonly=False):
         if self.stopping or self.outbox is None:
             return None
         try:
             accounts = pairs(self.config.get("allowed_accounts", []))
         except ValueError:
             return None
-        incoming = self.source_header(event)
+        incoming = self.source_header(event, allow_readonly=allow_readonly)
         if (
             incoming is not None
             and (incoming.platform_instance_id, incoming.user_id) in accounts
@@ -404,7 +400,7 @@ class HindsightBridge(Star):
             return incoming
         return None
 
-    def source_header(self, event, *, inspect=None):
+    def source_header(self, event, *, inspect=None, allow_readonly=False):
         getter = getattr(self.context, "get_platform_inst", None)
         adapter = getter(event.get_platform_id()) if getter else None
         if getter and adapter is None:
@@ -412,6 +408,7 @@ class HindsightBridge(Star):
         return inspect_header(
             event, Plain, self.context.get_config().get("wake_prefix", []),
             adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()), inspect=inspect,
+            allow_readonly=allow_readonly,
         )
 
     def excluded_prefix(self, text):
@@ -419,7 +416,16 @@ class HindsightBridge(Star):
         return any(text.lstrip().startswith(prefix) for prefix in prefixes if prefix)
 
     def snapshot(self, event):
-        incoming = self.authorized_source(event)
+        incoming = self.authorized_source(event, allow_readonly=True)
+        if incoming is not None and not incoming.capture_allowed:
+            scope = self.outbox.scope_owner(incoming.scope(self.outbox.deployment_id).id)
+            try:
+                enabled = bool(scope and reference_options(self.outbox, scope)["recall_on_quoted_or_link"])
+            except (QueueError, sqlite3.Error):
+                self.warning("reference_settings_invalid")
+                return None
+            if not enabled:
+                return None
         return incoming if incoming is not None and not self.excluded_prefix(incoming.text) else None
 
     def record_skip(self, event, queue):
@@ -510,7 +516,7 @@ class HindsightBridge(Star):
         queue = self.outbox
         if queue is not None and not self.stopping and event not in self.incoming:
             if event.get_platform_name() == "aiocqhttp":
-                header = self.source_header(event)
+                header = self.source_header(event, allow_readonly=True)
                 if (
                     header and (header.platform_instance_id, header.user_id) in (self.permissions or ())
                     and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
@@ -934,6 +940,9 @@ class HindsightBridge(Star):
             if not self.outbox.can_recall(scope):
                 self.record_recall(scope, "skipped", started)
                 return
+            if not incoming.capture_allowed and not reference_options(self.outbox, scope)["recall_on_quoted_or_link"]:
+                self.record_skip(event, self.outbox)
+                return
             if incoming.timestamp < scope["accept_from"] or not self.outbox.accepts(incoming):
                 self.record_recall(scope, "skipped", started, "message_before_accept_from")
                 return
@@ -959,7 +968,7 @@ class HindsightBridge(Star):
                 or self.permission_revision != permission_revision
             ):
                 return
-            if scope["mode"] == "active":
+            if scope["mode"] == "active" and incoming.capture_allowed:
                 capture_assistant = self.captures_assistant(scope)
                 capture = self.freeze_user_capture(incoming, scope, conversation, rows, capture_assistant=capture_assistant)
                 if not capture.created:
@@ -1112,23 +1121,18 @@ class HindsightBridge(Star):
     @hindsight.command("help")
     async def memory_help(self, event: AstrMessageEvent):
         yield event.plain_result(
-            "Hindsight 记忆：正常聊天即可保存和查找长期记忆，无需逐条操作。\n"
-            "/hindsight status：连接、模式和保存进度\n"
-            "/hindsight view [页码]：查看本人记忆，每页 10 条\n"
-            "/hindsight show 记忆ID：查看详情和来源\n"
-            "/hindsight recall 问题：查找相关记忆\n"
-            "/hindsight background [序号]：查看本人已选知识页（Knowledge Page）\n"
-            "可在插件页选择一份 Hindsight 知识页供聊天参考，例如项目目标与约束；默认关闭。\n"
-            "/hindsight export：导出记忆和来源（JSON）\n"
-            "修改记忆：联系管理员，在插件页暂停保存和查询后到 Hindsight 官方面板操作\n"
-            "/hindsight on：保存新聊天，并自动使用已有记忆\n"
-            "/hindsight readonly：继续使用已有记忆，不保存新聊天\n"
-            "/hindsight pause：暂停保存和自动检索，已有记忆与手动查看保留\n"
-            "/hindsight retry：重试保存失败的记录\n"
-            "/hindsight cancel 任务编号：取消上传，已形成的记忆保留\n"
-            "/hindsight forget：清空本人全部记忆，需再次确认\n"
-            "修改前暂停保存和查询，Hindsight 已接收的记录继续处理，普通聊天继续。\n"
-            "自动记录你的原话和机器人保存到会话历史的最终回复。"
+            "正常聊天即可保存和查找长期记忆。命令前缀：/hindsight\n"
+            "status：查看连接、模式和保存进度\n"
+            "view [页码]：查看本人记忆，每页 10 条\n"
+            "show 记忆ID：查看详情和来源\n"
+            "recall 问题：查找记忆；background [序号]：查看已选知识页\n"
+            "export：导出记忆和来源（JSON）\n"
+            "on：读写记忆；readonly：只读记忆\n"
+            "pause：停止保存和自动检索，仍可手动查看\n"
+            "retry：重试失败记录；cancel 任务编号：取消上传，已形成的记忆保留\n"
+            "forget：清空本人全部记忆，需再次确认，无法撤销\n"
+            "知识页和聊天参考在插件页设置。修改记忆前请管理员暂停保存和查询，"
+            "等待已接收的记录处理完后再到 Hindsight 官方面板操作。普通聊天继续。"
         )
 
     @hindsight.command("view")
@@ -1381,25 +1385,34 @@ class HindsightBridge(Star):
                 for r in summary["tasks"]
             ) or "无"
             skipped = self.skip_status(scope["platform_instance_id"], scope["user_id"])
-            skip_line = f"最近跳过：{skipped['message']}\n" if skipped else ""
-            yield event.plain_result(
-                f"Hindsight：{connection}\n{runner}；模式：{modes[scope['mode']]}\n"
-                f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
-                f"诊断编号：{scope['principal_id']} / {scope['generation']}\n"
-                f"等待发送 {waiting}，发送与保存确认中 {tracking}，失败 {counts.get('failed', 0)}，"
-                f"需核对 {counts.get('reconcile_required', 0)}，完成 {counts.get('done', 0)}\n"
-                f"最早记录已等待：{summary['oldest_seconds']} 秒；任务编号与进度：{tasks}\n"
-                f"观察（Observations）：{stats.get('total_observations', '未知')}；"
-                f"待整合：{stats.get('pending_consolidation', '未知')}\n"
-                f"清空：{cleanup}\n"
-                f"保存和查询暂停状态：{maintenance}\n"
-                f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
-                f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
-                f"最近记录状态：{self.status}\n"
-                f"最近记忆检索：{recall_description(self.recall_status(scope))}\n"
-                f"{skip_line}"
-                "常用操作：/hindsight help"
-            )
+            lines = [
+                f"Hindsight：{connection}", f"模式：{modes[scope['mode']]}",
+                f"已保存 {counts.get('done', 0)}，待保存 {waiting + tracking}，失败 {counts.get('failed', 0)}",
+                f"最近记忆检索：{recall_description(self.recall_status(scope))}",
+            ]
+            if (connection != "可用，认证已启用" or self.outbox.recovering or maintenance != "无"
+                    or self.outbox.connection_error() or summary["last_error"] or waiting or tracking
+                    or counts.get("failed") or counts.get("reconcile_required")
+                    or any(row["phase"] != "verified" for row in erasures) or self.status != "运行中"):
+                lines.append(
+                    f"{runner}\n"
+                    f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
+                    f"诊断编号：{scope['principal_id']} / {scope['generation']}\n"
+                    f"等待发送 {waiting}，发送与保存确认中 {tracking}，失败 {counts.get('failed', 0)}，"
+                    f"需核对 {counts.get('reconcile_required', 0)}，完成 {counts.get('done', 0)}\n"
+                    f"最早记录已等待：{summary['oldest_seconds']} 秒；任务编号与进度：{tasks}\n"
+                    f"观察（Observations）：{stats.get('total_observations', '未知')}；"
+                    f"待整合：{stats.get('pending_consolidation', '未知')}\n"
+                    f"清空：{cleanup}\n"
+                    f"保存和查询暂停状态：{maintenance}\n"
+                    f"连接暂停原因：{self.diagnostic(self.outbox.connection_error())}\n"
+                    f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
+                    f"最近记录状态：{self.status}"
+                )
+            if skipped:
+                lines.append(f"最近跳过：{skipped['message']}")
+            lines.append("常用操作：/hindsight help")
+            yield event.plain_result("\n".join(lines))
 
     @hindsight.command("recall")
     async def memory_recall(self, event: AstrMessageEvent, query: str):
