@@ -94,6 +94,7 @@ def main():
         "LICENSE", "NOTICE.md", "main.py", "requirements.txt",
         "core/__init__.py", "scripts/backup.py",
         "core/panel.py", "core/providers.py", "core/installer.py", "core/diagnostics.py",
+        "core/panel_setup.py", "core/panel_upgrade.py", "core/panel_scopes.py",
         "core/source.py", "core/scope_settings.py", "core/access.py", "core/onebot_source.py", "core/qq_source.py",
         "core/weixin_source.py", "core/telegram_source.py", "core/lark_source.py",
         "core/background.py", "core/settings.py", "core/reading.py", "core/agent_tools.py", "core/reflection.py", "core/reference.py",
