@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 HINDSIGHT_VERSION = "1.2.0"
 SUPPORTED_VERSIONS = ("1.1.0", HINDSIGHT_VERSION)
-POSTGRES_IMAGE = "astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2"
+POSTGRES_IMAGE = "astrbot-hindsight-postgres:17-pgroonga4.0.8-r3"
 
 
 def local_installation_supported():
@@ -29,7 +29,7 @@ COMPOSE = """\
 services:
   memory-db:
     build: ./postgres
-    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2
+    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-r3
     restart: unless-stopped
     environment:
       POSTGRES_USER: hindsight
@@ -38,7 +38,7 @@ services:
     volumes:
       - memory_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U hindsight -d hindsight"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -222,8 +222,13 @@ for port in $host_ports; do
   fi
 done
 REDEPLOY_BEFORE
-UPGRADE_BEFORE
 printf '正在安装记忆服务。首次安装需要下载镜像和构建数据库，请保持终端打开。\n'
+(cd "$stage" && docker compose --project-name "$project" config --quiet)
+if ! docker image inspect POSTGRES_IMAGE_VALUE >/dev/null 2>&1; then
+  (cd "$stage" && docker compose --project-name "$project" build memory-db) ||
+    fail '数据库镜像构建失败，请检查构建日志，确认软件源可用且 pgvector 版本不低于 0.8.7；原服务与数据保留。'
+fi
+UPGRADE_BEFORE
 service_changed=0
 if [ -f "$target/identity" ]; then
   for file in managed_service.py model_probe.py model_transport.py; do
@@ -240,13 +245,16 @@ chmod 755 "$target/service"
 chmod 644 "$target/service/managed_service.py" "$target/service/model_probe.py" "$target/service/model_transport.py"
 chmod 644 "$target/postgres/Dockerfile" "$target/postgres/extensions.sql"
 cd "$target"
-docker compose --project-name "$project" config --quiet
-if ! docker image inspect POSTGRES_IMAGE_VALUE >/dev/null 2>&1; then
-  docker compose --project-name "$project" build memory-db || fail '数据库镜像构建失败，请检查镜像下载和构建日志后重新执行安装命令；原数据保留。'
-fi
 docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 180 memory-db || fail '数据库启动失败，请检查数据库日志后重新执行安装命令；原数据保留。'
-extensions="$(docker compose --project-name "$project" exec -T memory-db psql -U hindsight -d hindsight -v ON_ERROR_STOP=1 -qAt -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgroonga; SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pgroonga');" < /dev/null)" || fail '数据库扩展初始化失败，请检查数据库日志与镜像后重新执行安装命令；原数据保留。'
-[ "$extensions" = 2 ] || fail '数据库扩展不完整，请检查 vector 与 pgroonga 安装结果后重新执行安装命令；原数据保留。'
+extensions="$(docker compose --project-name "$project" exec -T memory-db psql -U hindsight -d hindsight -v ON_ERROR_STOP=1 -qAt -c "
+  CREATE EXTENSION IF NOT EXISTS vector;
+  ALTER EXTENSION vector UPDATE;
+  CREATE EXTENSION IF NOT EXISTS pgroonga;
+  SELECT count(*) FROM pg_available_extensions
+    WHERE (name = 'vector' AND installed_version = default_version)
+       OR (name = 'pgroonga' AND installed_version IS NOT NULL);
+" < /dev/null)" || fail '数据库扩展安装或更新失败，请检查数据库日志与镜像后重新执行安装命令；原数据保留。'
+[ "$extensions" = 2 ] || fail '数据库扩展检查失败，请检查 vector 版本与 pgroonga 安装结果后重新执行安装命令；原数据保留。'
 docker compose --project-name "$project" up -d --no-build --wait --wait-timeout 600 || fail '配套组件启动超时或失败，请检查容器日志、网络和端口后重新执行安装命令；原配置与数据保留。'
 if [ "$service_changed" = 1 ]; then
   docker compose --project-name "$project" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 600 memory-api || fail '配套管理组件更新失败，请检查容器日志后重新执行安装命令；原配置与数据保留。'
