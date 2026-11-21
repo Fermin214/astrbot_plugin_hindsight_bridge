@@ -23,7 +23,7 @@ ALICE, BOB, OUTSIDER = 123001, 123002, 123003
 BOT = 990001
 SUCCESS = "Hindsight 长期记忆：插件已根据本轮对话自动检索"
 EMPTY = "Hindsight 检索完成，本轮未匹配到相关记忆。"
-TIMEOUT = "Hindsight 记忆检索超时，已有记忆未载入。检索与新聊天保存分开执行，不能据此判断保存失败；保存结果以插件的保存进度为准。"
+TIMEOUT = "记忆检索超时，历史记忆未载入（不影响新消息保存）。"
 FAILED = "Hindsight 连接失败，记忆暂未载入。"
 
 

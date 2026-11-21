@@ -123,11 +123,11 @@ class PanelUpgrade:
                     row["phase"] != "verified" or row["cleanup_step"] != 7
                     for row in queue.control.erasures(queue.connection_id)
                 ):
-                    raise PanelError("仍有在途请求或旧记忆清理未完成；请等待处理完成后重新检查。")
+                    raise PanelError("还有正在处理的请求或旧记忆清理未完成，请稍等片刻再检查。")
 
             async def inspect_banks(*, allow_running=False):
                 if queue.in_flight or not await maintenance.check(force=True):
-                    raise PanelError("仍有在途请求或旧记忆清理未完成；请等待处理完成后重新检查。")
+                    raise PanelError("还有正在处理的请求或旧记忆清理未完成，请稍等片刻再检查。")
                 banks = []
                 for row in unique.values():
                     checked = await maintenance.status(row["scope_id"], management=queue.management(row["scope_id"]))
