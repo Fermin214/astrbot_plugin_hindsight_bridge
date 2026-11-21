@@ -1,83 +1,67 @@
 # 贡献指南
 
-安装与日常操作见 [安装指南](docs/INSTALL.md) 和 [使用指南](docs/USAGE.md)。消息采集、队列、用户隔离和数据格式见 [实现说明](docs/ARCHITECTURE.md)。
+用户向的安装与使用说明分别见 [安装指南](docs/INSTALL.md) 和 [使用指南](docs/USAGE.md)；模块职责、身份模型与存储结构见 [实现说明](docs/ARCHITECTURE.md)。
 
-## 阅读路线
+## 代码导航
 
-| 流程 | 数据流 | 验证入口 |
+| 模块 / 路径 | 职责 | 对应测试入口 |
 | --- | --- | --- |
-| 私聊记录 | `observe_incoming` 核对来源。`add_memory` 冻结用户材料，由 `Outbox.capture`、`Worker`、`HindsightClient` 投递。`remember_assistant` 和 `persist_history` 从宿主持久历史补录主回复。 | `python tools/run-feedback-e2e.py --scope assistant-capture --output /tmp/bridge-capture` |
-| 遗忘与恢复 | 私聊命令或面板提交控制事务。队列重放新代次，清理旧 Bank 和任务。恢复业务快照时读取独立控制库。 | `python tools/run-feedback-e2e.py --scope recovery --output /tmp/bridge-recovery` |
-| 配套部署 | `core/panel.py` 提供管理 API。启动命令来自 `core/installer.py`。`core/managed_connections.py` 持久化接入进度，配套容器验证并应用模型配置。 | `python tools/run-managed-e2e.py --scenario connection --output /tmp/bridge-connection` |
+| `core/*_source.py` / `core/materials.py` | 平台来源校验、用户原文冻结、持久化 history 关联 | `python tools/run-feedback-e2e.py --scope assistant-capture --output /tmp/bridge-capture` |
+| `core/outbox.py` / `core/control.py` | 队列、去重、控制库事务、遗忘与快照恢复 | `python tools/run-feedback-e2e.py --scope recovery --output /tmp/bridge-recovery` |
+| `core/panel*.py` / `views/memory/*` | 管理面板前端（ES Modules）与后台管理 API | `node --test tests/test_memory_view.mjs` |
+| `core/installer.py` / `core/managed_connections.py` | 配套 Docker 安装命令、接入状态机与模型探测 | `python tools/run-managed-e2e.py --scenario connection --output /tmp/bridge-connection` |
 
-| 名称 | 含义 |
-| --- | --- |
-| `Scope.id`、`scope_id`、`source_id` | 同一个平台来源标识。业务库使用 `scope_id`，控制库映射使用 `source_id`。 |
-| `principal_id`、`owner_id` | 逻辑用户和该用户在部署、Agent、记忆空间中的归属。队列按 `owner_id` 排他投递。 |
-| Bank、代次 | Hindsight 记忆库及其版本。清空记忆推进代次，作废旧 Bank 与旧待保存材料。 |
-| `background`、`reading`、`reflection` | 随请求附带的知识页、按需读取工具和原生 Reflect 执行。配置键及接口沿用这些名称。 |
+核心概念速查：
+- **`scope_id` / `source_id`**：同一个平台来源标识，业务库用 `scope_id`，控制库映射用 `source_id`。
+- **`principal_id` / `owner_id`**：逻辑用户及归属标识，队列按 `owner_id` 串行投递。
+- **Bank 与代次（generation）**：用户在 Hindsight 的独立记忆库及版本；每次「清空记忆」推进代次并作废旧 Bank 与未完成队列。
+- **`background` / `reading` / `reflection`**：知识页选择、按需读取方式和 Reflect 设置。
 
-面板资产在 `views/memory/`。兼容范围、恢复和配套管理分别见 [兼容范围](docs/SUPPORT.md)、[备份与恢复](docs/DATA-MAINTENANCE.md)、[安装与管理设计](docs/SETUP-DESIGN.md)。
+兼容边界、恢复流程与面板规范分别见 [兼容范围](docs/SUPPORT.md)、[备份与恢复](docs/DATA-MAINTENANCE.md) 和 [安装与管理设计](docs/SETUP-DESIGN.md)。
 
-## 提交要求
+## 开发与提交要求
 
-保持 AstrBot 与 Hindsight 的公开接口边界，不修改宿主全局设置或其他插件。格式或身份规则变化需附迁移步骤。
-
-新代码默认不写解释性注释，禁止用注释为捷径找理由，保留宿主使用的命令帮助、机器指令和极少数可说明具体丢数风险的例外。
-
-提交前确认安装包包含全部运行模块、页面资产和部署材料，相关检查通过；涉及安装、升级或数据恢复的修改须验证对应使用流程。
+- **保持宿主与上游边界**：只调用 AstrBot 和 Hindsight 的公开接口，不修改宿主全局配置或其他插件；持久化格式或身份规则改动必须提供向下兼容或迁移路径。
+- **精简注释**：新代码原则上不加解释性注释（不要用注释解释绕路或补丁），仅保留用户命令帮助、指令说明或不可逆丢数风险的必要提示。
+- **发布完整性**：合入 `main` 时若稳定版已有 tag 且运行文件有变化，须同步提升 `metadata.yaml` 版本号并更新 `CHANGELOG.md` 首条标题；同时确保 `python tools/check-package.py` 通过（包含模块、静态页资产、文档链接与锚点校验）。
 
 ## 按改动选验证
 
-| 改动 | 需要观察的结果 |
+提交和验收遵循“改什么测什么”，避免无效全量重跑；同时重点覆盖状态交界处的竞态：
+
+| 改动范围 | 必须验证的场景 |
 | --- | --- |
-| 服务管理、安装或面板操作 | 先写清谁拥有资源。用空卷走一遍受影响的安装方式，在 AstrBot 面板完成操作。改镜像时同时覆盖无本地镜像的新装和带旧数据卷的重新部署。连接已有服务时核对只改了 Bridge 配置或对应 Bank。 |
-| 身份、权限、遗忘或异步写入 | 让旧请求暂停，切换账号、连接或 Bank 代次，再放行旧请求。核对最终写入、聊天注入、清理结果和状态显示的归属，包含迟到的拒绝事件。同账号切换传输方式还要验证能读回原有记忆。 |
-| 助手正文、知识页、工具或参考记录 | 让子 Agent 先完成，核对主请求的实际材料、持久回复和面板快照。过滤与限额同用时，加一条本应排除、却足以占满预算的内容，确认允许保留的内容仍能交付。改选页另测已选页全部失效。 |
-| 宿主命令或消息分类 | 使用宿主识别的完整输入验证命令前缀、尾随参数和平台载荷。查看状态前后比对原诊断，确认查询不会改写结果。 |
-| 草稿、轮询或保存 | 在宿主页面编辑后触发轮询、切页再返回，确认未保存内容仍在。切换服务后确认旧草稿消失。保存后重开核对实际值。 |
-| 备份、恢复或跨系统文件操作 | 用旧业务库配新控制库，并试同目标并发替换。涉及文件占用时取 Windows 结果。测试超时分支时控制事件或直接触发超时。 |
+| 安装、升级、服务管理或面板操作 | 走一遍空卷新装或受影响入口；更新镜像时同时验证无本地镜像的新装与带旧数据卷的重装；连接已有服务时确认未越权改动服务配置 |
+| 身份、授权、遗忘或异步写入 | 在请求发出与返回之间切换账号、更换连接或执行清空，再放行旧请求，确认最终写入、召回与迟到拒绝均归属正确（含同账号切换传输方式） |
+| 助手正文、知识页、工具或参考记录 | 让子 Agent 抢先完成，对照主请求实际交付内容、持久回复与使用记录；筛选与限额组合测试时加入足以占满预算的排除条目；验证选页全失效时的逐一清理 |
+| 命令与消息分类 | 使用宿主识别的完整命令输入（含前缀与尾随参数）验证，并确认只读状态查询不会篡改原诊断状态 |
+| 表单草稿、轮询与保存 | 在页面修改但未保存时触发后台轮询和切页，确认草稿保留；切换服务后确认旧草稿清零；保存并重载后核对持久化结果 |
+| 备份、恢复或跨系统文件操作 | 用旧业务库配对最新控制库恢复，测试同一目标并发替换与（如涉及）Windows 文件占用与超时分支 |
 
-验收只给实际观察到的范围记通过。共享浏览器验收入口核对完成标记、通过项和候选包摘要。CI 在进入 `main` 的 PR 上检查发布版本。若基线的稳定版本已有标签，插件运行文件变动须提高版本号，且变更记录首条版本须与元数据一致。文档、测试和开发工具可独立合入。案例和依据见[开发复盘](docs/REGRESSION-HISTORY.md)。
+整理 PR 时对照检查标题、版本号与变更记录，写明受影响的用户入口、界面变化和升级注意事项。相关历史返工教训见 [开发复盘](docs/REGRESSION-HISTORY.md)。
 
-调整配套依赖时，先核对官方常规软件源、最低兼容版本和安全公告。数据库主版本按数据兼容边界固定。旧包归档用于重建历史验收环境。发布候选包须用原样生成的命令验收。若需要临时替换镜像或软件源，修复进入候选包后重验受影响路径。
+## 自动化测试与 CI
 
-整理 PR 时，一并核对标题、插件版本和变更记录。说明用户在哪里操作、会看到什么变化、升级会如何处理旧数据。版本与文案更新后，按改动范围复用已通过的行为证据。
+本地与 CI 按变更文件自动选择检查范围（纯文档变更仅运行基础语法、元数据、打包与文档链接检查）：
 
-## 后端兼容验证
-
-CI 面向项目回归与社区兼容，按新增提交涉及的文件选择检查；手动运行通用检查时覆盖全部范围。语法、元数据、分发包和文档链接始终检查。Python 行为与回归测试变化运行完整回归；仅页面逻辑变化运行页面测试；文档和独立验收脚本变化不触发业务回归。
-
-| 检查 | 用途 | 触发范围 |
+| 检查项 | 覆盖范围 | 触发条件 |
 | --- | --- | --- |
-| `check` | 回归、页面、语法及分发边界 | 按代码类型选择回归，基础检查始终执行 |
-| `windows` | Windows 回归、分发包安装与宿主重载 | 每次插件检查 |
-| `astrbot-smoke` | 官方宿主中的安装、重载、消息、临时内容、升级与卸载 | 插件入口、核心模块、配置结构、运行依赖及宿主检查代码 |
-| `hindsight-model-contracts` | 两版 Hindsight SDK 的聊天、嵌入及重排协议兼容 | 供应商适配、协议转换、模型探测、运行依赖及后端版本配置 |
-| `managed-install` | 冷构建、数据库扩展版本、旧卷重新部署 | 安装器、配套服务启动文件、数据库镜像及对应验收脚本改动。每周在默认分支单独检查冷构建。 |
+| `check` | Python 回归 / 前端单测 / JS 语法 / 元数据与打包链接 | 基础检查始终执行，回归按改动文件选择 |
+| `windows` | Windows 原生单元测试、分发包安装与宿主重载 | 每次插件检查 |
+| `astrbot-smoke` | 真实 AstrBot 宿主安装、重载、钩子、知识页与卸载 | 核心源码、配置、宿主脚本或工作流改动 |
+| `hindsight-model-contracts` | Hindsight 1.1.0 / 1.2.0 镜像下的模型协议兼容性（`tools/check-model-protocols.py`） | 供应商适配、协议转换、运行依赖或 `compose.yaml` 改动 |
+| `managed-install` | 无预置镜像冷构建、pgvector 扩展与旧卷重装 | 安装器、数据库镜像、部署模板改动（及每周主分支定时巡检） |
 
-模型协议检查使用固定 Hindsight 1.1.0 / 1.2.0 镜像运行 `tools/check-model-protocols.py`，模型响应来自本地协议夹具，不启动完整服务或调用外部模型。
+本地常用专项验收工具（需 Docker 与对应镜像；工具会在结束时清理自身创建的容器与卷，证据目录需手动保留或清理）：
+- `python tests/run.py`：本地 Python 单元测试。
+- `node --test tests/test_memory_view.mjs`：管理面板前端逻辑单元测试。
+- `python tools/check-package.py`：元信息、语法、资源引用及 Markdown 链接/锚点检查。
+- `python tests/integration/install_startup.py --output <目录>`：冷构建与数据库扩展初始化检查（加 `--fresh-only` 仅测冷构建空卷）。
+- `python tools/run-backend-compat.py --output <目录>`：双版 AstrBot + PostgreSQL 升级、任务中断与删除路径校验（支持 `--baseline`、`--scope deletion`、`--scope maintenance`）。
+- `python tools/run-feedback-e2e.py --output <目录>`：真实 AstrBot/Hindsight/Dashboard 联调（支持 `--astrbot-version`、`--hindsight-version` 及 `--scope single-page | multi-page | multi-page-recovery | read-tools`）。
+- `python tools/run-parameters-e2e.py --mode existing|managed --output <目录>`：面板参数到实际聊天的端到端校验（支持 `--scope references | advanced`）。
+- `python tools/build-test-package.py --distribution --revision <提交> --output <目录>`：构建带文件摘要的分发验收包。
 
-专项宿主验收按改动在独立环境执行。代码、配置和相关环境未变化时复用已有证据。失败后修复受影响部分并重验。`python tests/integration/install_startup.py --output /tmp/新的测试目录` 在没有配套数据库镜像的 Docker 环境检查新装、旧扩展升级、重新部署和安装重试。加 `--fresh-only` 只验证冷构建和空卷初始化。新装使用独立的 Buildx 构建器（需 0.14 或以上），结果记录实际数据库扩展版本和验收文件摘要。
+若使用真机/浏览器端到端验收（`run-live-e2e.py`），结束后会自动清理临时浏览器容器；若进程异常中断遗留镜像，可在 Linux 运行 `python tools/run-live-e2e.py --sweep-browsers` 回收。
 
-`python tools/run-backend-compat.py --output /tmp/新的测试目录` 使用独立配套服务、PostgreSQL 和两版 AstrBot，验证旧库升级、知识页、模型配置失败恢复、在途任务重启和 Bank 删除。需要 Docker 权限、本地已准备的官方镜像与测试依赖；模型与平台端为合成数据，不证明真实账号投递或模型质量。可用 `--baseline` 指定包含旧版安装材料的提交；`--scope deletion` 只验证新版删除路径，`--scope maintenance` 验证原生整合任务替代、解除保存和查询暂停、双宿主和删除，报告会标明范围。删除检查在专属库停止 Worker 后构造非空图与实体后台任务队列，记录各表前后计数，避免被后台排空掩盖缺陷。工具结束后清理自己创建的资源，证据与数据库备份保留在指定目录，请妥善保管。
-
-## 修改与反馈
-
-`python tools/run-feedback-e2e.py --output /tmp/新的测试目录` 使用独立的真实 AstrBot/Hindsight、原生 Dashboard 与合成平台/模型验证知识页反馈、0.2.6 升级、外部控制目录拒绝、停机迁移和旧业务快照恢复。支持 `--astrbot-version 4.29.1|4.29.4` 与 `--hindsight-version 1.1.0|1.2.0`，不调用外部模型，不使用真实 QQ 账号。需要 Docker、本地官方镜像及测试依赖；结束后清理自身容器和数据卷，证据保留在指定目录。
-
-添加 `--scope single-page` 验证 0.2.7 升级后的单页引用与默认值、独立页面预算、共享 token/字符边界、可配置读取子限时及原生页面长度与索引提示。页面包装与最终临时聊天请求一并取证，覆盖整页使用和整页跳过。
-
-`--scope multi-page` 验证 0.2.8 单页升级、多页添加与排序、共享预算、逐页反馈、重载、按序号查看及完整遗忘；`--scope multi-page-recovery` 专门验证多篇原生页删除后的逐个移除，以及机器人身份查询耗时 300ms 时保存和排序 8 篇页面。只修改选页恢复或身份检查时使用后者，复用既有预算和聊天注入证据。
-
-`--scope read-tools` 验证有序知识页版本升级后的按需工具：原生 Agent 搜索、整行续读、版本变化、事实 Recall、来源和最近历史、同消息额度、按用户隔离、停用、实际保存材料、宿主会话与 Docker 日志、重载及完整遗忘。使用合成工具模型和 OneBot 平台端，不改变已有部署。
-
-运行 `python tools/run-parameters-e2e.py --mode existing --scope references --output /tmp/新的测试目录` 验证聊天参考。此场景对照真实 AstrBot 请求、工具输出和面板复制的快照，覆盖提示与筛选、保留轮数、写失败、重启及降级期间的遗忘。
-
-Linux 与 Windows 的分发验收使用 `python tools/build-test-package.py --distribution --revision <提交> --output <目录>`。清单包含提交和每个分发文件的摘要。同包重装验证安装与重载。历史版本升级验证数据迁移，并记录历史包来源。
-
-`python tools/run-parameters-e2e.py --mode existing --astrbot-version 4.29.4 --hindsight-version 1.2.0 --output /tmp/新的测试目录` 验证面板参数到实际聊天的完整流程；`--mode managed` 使用独立配套安装。只涉及高级参数、队列或排除规则时，添加 `--scope advanced`，复用其他场景的已有证据。按变更选择接入方式、范围和版本，不以固定矩阵重复执行。
-
-提交问题时提供版本、复现步骤、预期、实际结果和脱敏日志。不要提交账号凭据、真实聊天记录、运行数据库或本地环境文件。
-
-恢复业务快照不得覆盖更新的独立控制记录。
+提交 Issue 请附版本、复现步骤、预期/实际结果和脱敏日志，注意切勿提交真实账号凭据、聊天原文或运行数据库。

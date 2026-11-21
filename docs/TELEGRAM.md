@@ -1,29 +1,28 @@
 # Telegram
 
-通过 AstrBot 原生 `telegram` 适配器接入 Bot 私聊。BotFather 创建 Bot，Token、轮询、代理和发送由 AstrBot 管理；Bridge 只处理原生事件与对应的记忆库。
+通过 AstrBot 原生 `telegram` 适配器接入 Bot 私聊。BotFather 建号、Token、轮询、代理和消息收发由 AstrBot 管理，Bridge 负责私聊文字的保存、召回和隔离。
 
 ## 连接与使用
 
-1. 在 AstrBot 平台管理添加 Telegram Bot，填写测试 Bot Token 和宿主所需网络配置。
-2. 用测试用户主动开始私聊，发送 `/sid`。
-3. 在 Bridge 的「用户与记忆」中选择平台实例，填写 `/sid` 返回的数字用户 UID。
-4. 确认机器人身份，再启用读写记忆。
+1. 在 AstrBot 平台管理添加 Telegram Bot，填好 Bot Token 与网络代理设置。
+2. 用自己的账号主动向机器人发送 `/sid`。
+3. 打开 Bridge **用户与记忆**，点击 **+ 添加用户**，选择对应实例并填入 `/sid` 返回的数字 UID（不要填 `@username`）。
+4. **确认机器人身份**，将模式设为 **读写记忆**。
 
-使用数字 UID，不使用 `@username`。机器人身份也使用初始化后的数字 Bot ID；用户名变更不改变记忆库。重新连接同一 Bot 可以恢复原范围，更换 Bot 后必须重新确认身份。
+Telegram 侧采用数字 User ID 与数字 Bot ID 作为稳定标识，修改 `@username` 不影响记忆归属。重新连接同一 Bot 可直接沿用原记忆库；更换 Bot Token 需要重新确认身份并启用新的记忆库。
 
 ## 消息范围
 
-接受普通私聊的纯文字，以及不改变可见正文的加粗、斜体、代码等格式实体。命令后缀由宿主处理，例如 `/hindsight@MyBot status` 按 `/hindsight status` 执行；命令不自动记录。
+- **自动记录**：普通私聊纯文字，以及不改变可见文本的加粗、斜体、行内代码等格式实体，和对应的最终助手回复。
+- **不自动记录**：命令（如 `/hindsight@MyBot status` 会按宿主去后缀后执行但不存入记忆）、含 `mention` / `text_link` / `text_mention` 实体的消息、引用、转发、编辑消息、图片/语音等媒体及其 caption、群组、频道、callback 与 business 会话。
 
-含 `mention`、`text_link` 或 `text_mention` 实体的消息不自动记录。宿主可能把这些消息转换为提及组件或追加链接文字。引用、转发、编辑、媒体、caption、群组、频道、callback、business 与其他扩展会话也不自动记录。
+> 若在聊天参考中开启了 **引用回复或带链接的私聊也检索**，引用回复及含链接/`@` 提及的文字会读取已有记忆和知识页，但不会保存为新记忆。
 
-来源核对原始 `Update.message`、事件携带的 Bot 客户端、发送者、私聊 chat、消息 ID 和带时区的 `date`。chat 必须与用户 ID 一致；同一个 chat 内的消息 ID 连同用户 Scope 参与去重。不同 Bot、用户、实例和平台使用独立记忆库。
-
-断线重建客户端后，旧事件仍绑定原来的客户端，不能改用新 Bot 身份。权限确认前积压的消息和已执行的状态命令继续受公共时间边界与防重记录约束。
+来源校验核对原生 `Update.message`、事件绑定的 Bot 客户端、发送者、私聊 chat（需与 User ID 一致）、消息 ID 与带时区的 `date`。Bot 断线重建客户端后，旧客户端遗留的排队事件会被拒绝，避免写错记忆库。
 
 ## 开发验证
 
-使用实际 AstrBot 适配器与 python-telegram-bot 对象，通过合成 `getMe` 响应初始化 Bot：
+来源与适配器契约验证（使用实际 AstrBot 适配器与 `python-telegram-bot` 对象及合成 `getMe` 响应）：
 
 ```bash
 PYTHONPATH=/path/to/AstrBot \
@@ -33,9 +32,9 @@ ASTRBOT_TEST_VERSION=4.29.4 \
   --output /tmp/telegram-contracts.json
 ```
 
-`ASTRBOT_ROOT` 必须是独立空目录。报告记录 AstrBot、SDK 与代码摘要，区分合成登录响应和真实平台登录；检查不调用记忆服务或模型。
+`ASTRBOT_ROOT` 需使用独立空目录。
 
-原生安装、升级、请求钩子、临时参考、知识页和重连路径复用宿主冒烟流程：
+宿主冒烟验证（使用真实 AstrBot 管理器、合成 Telegram 载荷与本地记忆夹具）：
 
 ```bash
 python3 tools/build-test-package.py --distribution --output /tmp/bridge-telegram-package
@@ -48,4 +47,4 @@ ASTRBOT_DISABLE_METRICS=1 \
 /path/to/venv/bin/python tests/integration/astrbot_smoke.py
 ```
 
-此流程使用真实 AstrBot 管理器与会话历史、合成 Telegram HTTP/消息数据和本机 HTTP 记忆服务夹具。真实 Bot 收发与 Hindsight 业务闭环见[平台接入验证](PLATFORM-ACCEPTANCE.md)。
+真实 Bot 收发与完整业务联调见 [平台接入验证](PLATFORM-ACCEPTANCE.md)。

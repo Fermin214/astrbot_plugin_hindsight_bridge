@@ -1,73 +1,67 @@
 # 部署 Hindsight 记忆服务
 
-Hindsight 负责保存、整理和查找记忆，AstrBot 插件通过 API 连接它。普通安装使用 **Hindsight Bridge 插件详情 → 记忆管理 → 设置**，步骤见 [安装指南](../docs/INSTALL.md)。
+Hindsight 负责记忆的存储、整理与检索，Bridge 通过 API 连接它。大多数 Linux 用户直接使用 **Hindsight Bridge 插件详情 → 记忆管理 → 插件设置** 中的一键安装向导即可，详细步骤见 [安装指南](../docs/INSTALL.md)。
 
-在 **插件设置** 中生成安装命令，在运行 AstrBot 的 Linux 主机终端执行一次。随后回到设置，选择记忆处理、向量和可选重排模型，点击 **保存并连接**，完成后添加使用者并确认机器人身份。主机需已安装 Docker Engine 和 Compose v2，执行账号需能使用 Docker。
+如果在插件里走配套安装：在 **插件设置** 生成安装命令并在运行 AstrBot 的 Linux 主机执行，回到设置页选择模型后点击 **保存并连接**，最后去 **用户与记忆** 添加使用者并确认身份（宿主机需已装好 Docker Engine 与 Compose v2，且执行用户拥有 Docker 权限）。
 
-下文提供可选的 **手工 Linux 初次部署方式**。完成后，在插件设置中选择「连接已有服务」，填写服务 **API 地址**和 **API 密钥**。手工部署的模型和服务运维由原有配置管理。
+下文除了说明配套部署的端口、网络和登录密钥外，也提供一套独立的 **手工 Linux Docker 部署模板**（手工部署完成后，在插件设置选择「连接已有服务」并填入地址与密钥即可）。
 
-向导生成的配套服务文件位于执行账号的 `~/.local/share/astrbot-memory-<id>/`，`<id>` 为服务编号，准确路径由安装命令显示。设置 `HINDSIGHT_INSTALL_ROOT` 可改变安装根目录；重新部署和卸载必须使用同一根目录。配套部署使用独立的 Compose 项目和数据卷。
+## 配套部署目录与网络
 
-| AstrBot 运行方式 | 插件 API 地址 | 模型配置接口 | 官方页面的服务器入口 |
+安装向导生成的文件存放在执行用户的 `~/.local/share/astrbot-memory-<id>/`（`<id>` 为服务编号，也可通过环境变量 `HINDSIGHT_INSTALL_ROOT` 指定其他根目录；重装或卸载时必须沿用同一根目录）。
+
+安装器会自动识别 AstrBot 的容器网络并调整配套服务的连接方式：
+
+| AstrBot 运行方式 | 插件 API 地址 | 模型配置接口 | 官方 Control Plane 服务器本地入口 |
 | --- | --- | --- | --- |
-| Linux 原生 | 主机环回 `8888` | 主机环回 `8889` | 主机环回 `9999` |
-| Docker 自定义 bridge | 同网络 `memory-服务编号:8888` | 同网络 `memory-服务编号:8766` | 主机环回 `9999` |
-| Docker 默认 bridge | 网桥网关的 `8888` | 网桥网关的 `8889` | 主机环回 `9999` |
-| Docker host | 主机环回 `8888` | 主机环回 `8889` | 主机环回 `9999` |
+| Linux 原生 | 主机回环 `8888` | 主机回环 `8889` | 主机回环 `9999` |
+| Docker 自定义 bridge | 同网络 `memory-<id>:8888` | 同网络 `memory-<id>:8766` | 主机回环 `9999` |
+| Docker 默认 bridge | 网桥网关 `8888` | 网桥网关 `8889` | 主机回环 `9999` |
+| Docker host | 主机回环 `8888` | 主机回环 `8889` | 主机回环 `9999` |
 
-安装器自动识别 AstrBot 网络，只调整配套服务。自定义 bridge 优先使用同网络名称；默认 bridge 使用网桥网关端口，host 使用主机回环端口；容器重建后沿用相同连接地址。需要指定桥接网络时，先设置 `export HINDSIGHT_ASTRBOT_NETWORK=网络名`，网络必须已连接 AstrBot。
+若需要指定加入某个已连接的 Docker 桥接网络，可在执行安装命令前先运行 `export HINDSIGHT_ASTRBOT_NETWORK=网络名`。容器重建后连接地址会保持不变。
 
-数据库保持在专属内部网络；API 与模型管理接口要求密钥。自定义桥接网络中的容器可以访问服务端口；默认 bridge 的 API 与模型管理端口绑定网桥网关，其他主机发布端口绑定 `127.0.0.1`。模型服务地址需从配套服务容器中可达。
+数据库运行在内部隔离网络中不对外暴露端口；API、模型管理接口和网页管理面板均受独立密钥保护。注意：**Hindsight 所调用的模型服务地址必须能从配套服务容器内部访问到**。
 
-API 地址供 AstrBot 连接服务；“官方管理地址”供管理员浏览器访问。容器名称与 `8766` 接口用于插件通信，不能作为浏览器管理地址。两种部署方式都需要 HTTPS 域名反向代理或 SSH 隧道，才能从管理员电脑打开服务器面板；浏览器里的 `127.0.0.1` 指管理员自己的电脑。面板在模型配置成功后随 Hindsight 启动，安装结束后先完成模型设置。
-
-配套重新部署沿用数据库、模型配置和已有凭据。安装器提示配置不一致时，从 **插件设置 → 服务管理 → 重新部署** 重新生成命令。
-
-端口被其他进程占用时，先释放端口。需要更换端口时，由管理员调整安装状态中的 `api_port`、`management_port`、`control_plane_port` 后重新生成命令；默认值分别为 `8888`、`8889`、`9999`。已有安装的 `.env` 中，对应的 `ASTRBOT_MEMORY_API_PORT`、`ASTRBOT_MEMORY_MANAGEMENT_PORT`、`ASTRBOT_MEMORY_CP_PORT` 也需同步修改。安装器不会自动换端口。
-
-下文的端口、服务名和数据卷名称适用于手工部署模板；管理配套服务时应使用其安装目录中的配置。
+默认端口为 `8888`（API）、`8889`（模型管理）、`9999`（网页管理面板）。如果宿主机端口冲突，安装器不会自动改端口，需由管理员调整安装状态中的 `api_port`、`management_port`、`control_plane_port`（及已有 `.env` 里的 `ASTRBOT_MEMORY_API_PORT`、`ASTRBOT_MEMORY_MANAGEMENT_PORT`、`ASTRBOT_MEMORY_CP_PORT`），再从 **插件设置 → 配套服务运维 → 重新部署** 生成命令。重新部署会保留已有数据库、模型设置和凭据。
 
 ### 安装目录与登录密钥
 
-配套服务的网页登录密钥自动生成，保存在安装目录的 `.env`，重新部署时沿用。目录权限为 `0700`，`.env` 权限为 `0600`。在安装时使用的同一服务器账号下执行：
+配套部署的网页登录密钥保存在安装目录的 `.env`（目录权限 `0700`，`.env` 权限 `0600`），用安装时同一用户执行以下命令即可读出（`<id>` 替换为安装输出中的服务编号）：
 
 ```bash
 sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/share}/astrbot-memory-<id>/.env" | tr -d '\047\042'
 ```
 
-把 `<id>` 替换为安装输出中的服务编号；默认文件路径示例为 `~/.local/share/astrbot-memory-<id>/.env`。自定义过安装目录时，按安装输出替换路径。插件页也提供按服务编号生成的读取命令，这条命令需在服务器执行。将输出的密钥填入官方网页登录框。
-
-手工部署的密钥也在其 `deploy/.env` 中，可在该目录执行：
+如果是按本文下方手工部署的，则在 `deploy/` 目录执行：
 
 ```bash
 sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' .env | tr -d '\047\042'
 ```
 
-连接已有服务时，向管理员获取网页登录密钥。`HINDSIGHT_CP_ACCESS_KEY` 用于网页登录，`HINDSIGHT_API_TENANT_API_KEY` 用于服务 API，`ASTRBOT_MEMORY_MANAGEMENT_KEY` 用于模型配置接口。官方管理地址 `control_plane_url` 填写浏览器中的面板首页地址。
+密钥分工：`HINDSIGHT_CP_ACCESS_KEY` 用于浏览器登录官方面板，仅由管理员掌握；`HINDSIGHT_API_TENANT_API_KEY` 用于服务端 API 鉴权；`ASTRBOT_MEMORY_MANAGEMENT_KEY` 用于配套模型配置接口。
 
-## 准备条件
+---
 
-- 一台安装了 Docker Engine 和 Compose v2 的 Linux 主机。
-- Git 和 Python 3，用于下载部署文件和生成初始配置。
-- 一个供 Hindsight 整理记忆使用的对话模型服务：API Key、接口地址和模型名。
-- 一个向量模型服务：API Key、接口地址、模型名和输出维数。仓库模板使用百炼 `text-embedding-v4`，维数为 `1024`。
+## 手工部署准备条件
 
-手工部署将这些模型配置填写到 Hindsight 的 `.env` 中。使用配套安装器时，服务安装完成后再在设置中选择模型；插件后台读取所选 AstrBot 供应商的地址和 Key，检查模型连接后应用到配套服务，无需重复填写。
+手工部署包含 **Hindsight 1.2.0 Slim** 与 **PostgreSQL 17**（含 pgvector 与 PGroonga 扩展），通过远端 API 调用模型，不需要本地显卡：
 
-服务包含 Hindsight **1.2.0 Slim** 与 PostgreSQL **17**，数据库构建包含 pgvector 和 PGroonga。模型通过远程接口调用，模板不需要本地显卡；API 调用费用按所用模型服务计费。
+- 一台装有 Docker Engine 和 Compose v2 的 Linux 主机
+- Git 和 Python 3（仅用于下载模板和生成 `.env`）
+- 一个对话模型服务（接口地址、API Key、模型名）
+- 一个向量模型服务（接口地址、API Key、模型名与输出维数；模板默认以阿里云百炼 `text-embedding-v4` / `1024` 维为例）
 
-已有 1.1.0 服务可继续连接。配套服务可在插件页的升级入口完成暂停与保存进度检查、备份确认、升级命令生成与结果核对，步骤见 [配套服务升级](../docs/DATA-MAINTENANCE.md#升级-hindsight-服务)。
+> 如果已经有自行部署的 Hindsight 1.1.0，也可以直接连接使用；配套服务从 1.1.0 升至 1.2.0 的流程见 [配套服务升级](../docs/DATA-MAINTENANCE.md#升级-hindsight-服务)。
 
 ## 一、下载部署文件
-
-在安装 Docker 的主机上打开终端，执行：
 
 ```bash
 git clone https://github.com/Fermin214/astrbot_plugin_hindsight_bridge.git
 cd astrbot_plugin_hindsight_bridge/deploy
 ```
 
-后面的命令都在这个 `deploy` 目录中执行。
+后续命令均在 `deploy` 目录执行。
 
 ## 二、生成配置
 
@@ -75,49 +69,39 @@ cd astrbot_plugin_hindsight_bridge/deploy
 python3 init-env.py
 ```
 
-脚本会生成权限为 `0600` 的 `.env` 文件，并分别生成数据库密码、服务 API Key 和管理面板登录 Key。再次执行会提示使用已有 `.env`，凭据、Worker 身份和端口继续沿用；需要修改时直接编辑该文件。
+脚本会生成权限为 `0600` 的 `.env` 文件以及随机密码和密钥（再次运行会沿用已有 `.env`，不会覆盖现有凭据与端口）。编辑 `.env`（带点号的隐藏文件）填入你的模型信息：
 
-用文本编辑器打开 `deploy/.env`；文件名以点开头，Linux 文件管理器可能需要打开“显示隐藏文件”才能看到。
+### 对话模型
 
-### 填写对话模型
-
-在 `.env` 中找到以下项目，按自己的模型服务修改：
-
-| 配置名 | 填什么 |
+| 配置名 | 说明 |
 | --- | --- |
-| `HINDSIGHT_API_LLM_PROVIDER` | 服务类型。模板填 `deepseek`；OpenAI 兼容接口可填 `openai` |
-| `HINDSIGHT_API_LLM_BASE_URL` | 模型服务提供的接口地址 |
-| `HINDSIGHT_API_LLM_MODEL` | 账号可用的准确模型名 |
-| `HINDSIGHT_API_LLM_API_KEY` | 这个模型服务的 API Key |
+| `HINDSIGHT_API_LLM_PROVIDER` | 接口类型，模板默认为 `deepseek`；OpenAI 兼容接口填 `openai` |
+| `HINDSIGHT_API_LLM_BASE_URL` | 模型 API 地址 |
+| `HINDSIGHT_API_LLM_MODEL` | 模型名称 |
+| `HINDSIGHT_API_LLM_API_KEY` | 模型 API Key |
 
-### 填写向量模型
+### 向量模型
 
-使用模板中的百炼向量服务时，填写 `HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY`，其余向量项目如下：
+如使用模板默认的百炼向量服务，只需填写 `HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY`：
 
-| 配置名 | 模板值 |
+| 配置名 | 模板默认值 |
 | --- | --- |
-| `HINDSIGHT_API_EMBEDDINGS_PROVIDER` | `openai`，表示使用兼容接口 |
+| `HINDSIGHT_API_EMBEDDINGS_PROVIDER` | `openai` |
 | `HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | `HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL` | `text-embedding-v4` |
 | `HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS` | `1024` |
 | `HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE` | `10` |
 
-使用其他服务时，地址、Key、模型名和维数一起改为该服务提供的值。已有记忆后更换向量模型或维数，需要迁移已有向量数据。
+换成其他向量模型时同步修改上述地址、模型名和维数（注意记忆库一旦开始写入，更换向量模型或维数需同步迁移已有向量数据）。重排模型默认使用 `HINDSIGHT_API_RERANKER_PROVIDER=rrf`，无需额外配置。
 
-默认 `HINDSIGHT_API_RERANKER_PROVIDER=rrf`，无需额外配置第三个模型。
-
-### 自动生成的值
-
-这些值由脚本生成，首次部署保留即可：
+### 自动生成的关键变量
 
 | 配置名 | 用途 |
 | --- | --- |
-| `POSTGRES_PASSWORD` | 数据库密码 |
-| `HINDSIGHT_API_TENANT_API_KEY` | **稍后复制到 AstrBot 插件里的 API Key** |
-| `HINDSIGHT_CP_ACCESS_KEY` | 浏览器打开 Hindsight 管理面板时使用的登录 Key |
-| `HINDSIGHT_API_WORKER_ID` | 后台任务身份，重建容器时沿用 |
-
-保存 `.env`。密码和 Key 只写在自己的配置中。
+| `POSTGRES_PASSWORD` | PostgreSQL 数据库密码 |
+| `HINDSIGHT_API_TENANT_API_KEY` | **稍后填入 AstrBot 插件的 API 密钥** |
+| `HINDSIGHT_CP_ACCESS_KEY` | 浏览器打开官方 Control Plane 的登录密钥 |
+| `HINDSIGHT_API_WORKER_ID` | 后台任务标识，重建容器时需保留 |
 
 ## 三、启动记忆服务
 
@@ -125,26 +109,23 @@ python3 init-env.py
 docker compose up -d --build --wait
 ```
 
-首次启动会下载镜像并构建数据库组件。命令成功结束后，服务已经启动；失败时查看：
+首次启动会构建带扩展的数据库镜像并拉起服务。启动失败可通过以下命令排查：
 
 ```bash
 docker compose logs --tail 100 hindsight db
 ```
 
-API 默认使用主机的 `8888` 端口，网页管理面板使用 `9999`。二者默认只允许从这台主机访问，数据库不对外开放端口。
-
-如果启动提示端口已占用，修改 `.env` 中的 `HINDSIGHT_API_PORT` 或 `HINDSIGHT_UI_PORT`，再执行启动命令。这两个变量只改变主机映射，容器内的 API 和 CP 仍分别使用 `8888`、`9999`。保留已有密码、Key、Worker 和数据卷。
+默认将 `8888`（API）和 `9999`（网页管理）绑定在主机 `127.0.0.1`。如端口已被占用，可修改 `.env` 中的 `HINDSIGHT_API_PORT` 或 `HINDSIGHT_UI_PORT` 后重新执行启动命令。
 
 ## 让 AstrBot 容器连接 Hindsight
 
-**只有 AstrBot 也运行在 Docker 容器中时需要这一步。** 两者在同一 Docker 主机时，把 AstrBot 加入记忆服务的网络。
+**只有 AstrBot 同样跑在 Docker 容器中时才需要这一步。** 把 AstrBot 加入模板创建的 `astrbot_hindsight` 网络：
 
-找到用于启动 AstrBot 的 Compose 文件，在已有配置中合入以下内容：
+在 AstrBot 的 Compose 配置中合并以下片段（`astrbot` 换成实际服务名；如改过 `HINDSIGHT_CLIENT_NETWORK` 则对应调整 `name`）：
 
 ```yaml
 services:
   astrbot:
-    # 在已有服务配置中增加 networks，其他设置继续沿用。
     networks:
       - default
       - hindsight
@@ -155,52 +136,31 @@ networks:
     name: astrbot_hindsight
 ```
 
-这里的 `astrbot` 要与自己的服务名一致。已有 `networks` 时，在原列表中增加 `hindsight`，保留原有网络；顶层 `networks` 中也增加对应定义。`.env` 改过 `HINDSIGHT_CLIENT_NETWORK` 时，`name` 使用修改后的名称。
+在 AstrBot Compose 文件所在目录执行 `docker compose up -d` 重建网络后，插件里的 API 地址填写 `http://hindsight:8888`（宿主机原生运行 AstrBot 时填 `http://127.0.0.1:8888`）。
 
-在 **AstrBot 的 Compose 文件所在目录**执行：
+## 四、回到 AstrBot 连接插件
 
-```bash
-docker compose up -d
-```
-
-插件 API 地址填写 `http://hindsight:8888`。AstrBot 直接运行在主机上时，不需要修改网络，填写 `http://127.0.0.1:8888`；改过主机 API 端口时替换相应端口。
-
-## 四、回到 AstrBot 安装插件
-
-准备好以下内容：
-
-| 要填到插件里的值 | 从哪里取得 |
-| --- | --- |
-| Hindsight API 地址 | 同网络容器填 `http://hindsight:8888`；主机原生 AstrBot 填 `http://127.0.0.1:8888` |
-| Hindsight API Key | `.env` 中 `HINDSIGHT_API_TENANT_API_KEY=` 后面的值 |
-
-按 [安装指南](../docs/INSTALL.md) 在 AstrBot 中从链接安装并填写配置。
-
-AstrBot 位于另一台主机时，需要给它提供可访问的 HTTPS API 地址，具体网络入口由服务管理员配置。
+在 **插件设置 → Hindsight 服务连接** 选择 **连接已有服务**，填入 API 地址与 `.env` 里的 `HINDSIGHT_API_TENANT_API_KEY`，测试并保存即可（如果 AstrBot 位于另一台机器，请为 API 端口配置可达的 HTTPS 入口）。
 
 ## 五、打开官方 Control Plane
 
-官方管理页面使用与服务同版的原生 Control Plane，提供浏览、搜索、更正、删除、导入和导出。在 **插件设置 → 连接与访问** 中复制官方管理地址，在 **用户与记忆** 中复制 Bank ID，登录后找到对应 Bank。Bank 是每个用户的记忆库，首次保存聊天时自动创建，无需在官方页面另建。
+在 **插件设置 → Hindsight 服务连接** 复制 **Hindsight 管理地址** 用浏览器打开，登录密钥填 `.env` 中的 `HINDSIGHT_CP_ACCESS_KEY`。在 **用户与记忆** 顶部复制用户的 **Bank ID** 即可查找和管理对应记忆（Bank 在首次保存聊天时自动创建；日常编辑直接在官方面板进行，彻底清空整库则使用插件里的 **清空记忆**，详见 [记忆库恢复](../docs/DATA-MAINTENANCE.md#在官方面板修改记忆)）。
 
-普通内容管理直接在官方面板完成，无需暂停插件或服务。完整清空使用插件的 **清空记忆**，同步作废来源材料和待保存记录。整库删除后的处理见 [记忆库恢复](../docs/DATA-MAINTENANCE.md#在官方面板修改记忆)。
-
-官方页面在服务器上的入口为 `http://127.0.0.1:9999`。配套安装和手工 Compose 都提供此入口；改过网页主机端口时使用修改后的值。管理员电脑上的浏览器不能直接通过这个地址访问服务器，需要下面的 SSH 隧道或 HTTPS 反向代理。登录使用 `.env` 中的 `HINDSIGHT_CP_ACCESS_KEY`，获取命令见 [安装目录与登录密钥](#安装目录与登录密钥)。
+由于服务上的网页面板默认监听在 `127.0.0.1:9999`，从自己的电脑浏览器访问需通过下面两种方式之一（API 地址保持不变）：
 
 ### 无域名：SSH 隧道
 
-服务部署在远程 Linux 主机时，在管理员电脑的终端执行；Linux 原生 AstrBot 与 Docker AstrBot 使用相同步骤，不需要域名：
+在自己的电脑终端执行并保持开启（`9999` 被占用时把第一个端口改成如 `19999`，管理地址同步填 `http://127.0.0.1:19999`）：
 
 ```bash
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:9999:127.0.0.1:9999 your-user@your-server
 ```
 
-把 `your-user@your-server` 换成服务器登录信息，保持终端打开，在自己电脑访问 `http://127.0.0.1:9999`。此时电脑的本地端口经隧道连接服务器面板；关闭终端后隧道断开。网页登录密钥仍从服务器安装目录的 `.env` 读取。
+随后在插件「Hindsight 管理地址」填入 `http://127.0.0.1:9999`。
 
-命令中第一个 `9999` 是管理员电脑的端口，最后一个是服务器 CP 主机端口。电脑的 `9999` 已占用时，第一个改为 `19999`，浏览器地址也改为 `http://127.0.0.1:19999`；服务器使用其他端口时修改最后一个值。将实际浏览器地址填入 `control_plane_url`，不改动插件的 API 地址。
+### 有域名：独立 HTTPS 反向代理
 
-### 有域名：独立 HTTPS 入口
-
-反向代理与 Hindsight 位于同一台 Linux 主机时，为官方面板分配独立域名，例如 `memory.example.com`。保留 CP 的环回绑定，反向代理接入服务器 `127.0.0.1:9999`，公开入口使用 HTTPS。Caddy 可使用如下独立站点：
+在同主机为 `127.0.0.1:9999` 分配一个独立的域名根路径（不要挂在 AstrBot 的子路径下），例如使用 Caddy：
 
 ```caddyfile
 memory.example.com {
@@ -208,27 +168,19 @@ memory.example.com {
 }
 ```
 
-将域名解析到服务器，按所用反向代理配置证书和 HTTPS，官方管理地址填写 `https://memory.example.com`，登录仍使用 `HINDSIGHT_CP_ACCESS_KEY`。AstrBot 使用自己的独立入口。反向代理若运行在容器内，它的 `127.0.0.1` 指向代理容器，需要单独配置可到达官方页面的网络或主机访问方式。
-
-只代理官方页面的网页端口，API 与模型配置接口继续用于内部通信。官方页面通过容器内 `HINDSIGHT_CP_DATAPLANE_API_URL` 和服务 API Key 访问记忆服务，浏览器无需填写这个 Key。使用独立域名的根路径，例如 `https://memory.example.com`，不要放在 AstrBot 的子路径下。
+配置好 HTTPS 证书后，管理地址填写 `https://memory.example.com`。只需反代网页端口 `9999`（官方页面在容器内部已通过 `HINDSIGHT_CP_DATAPLANE_API_URL` 连接 API，浏览器端无需再填 API 密钥）。如果反向代理本身跑在 Docker 容器里，请确保它能路由到宿主机的 `9999` 端口。
 
 ## 服务状态与日志
 
-以下命令在本指南的 `deploy` 目录执行：
+在 `deploy` 目录常用运维命令：
 
 | 操作 | 命令 |
 | --- | --- |
-| 查看服务状态 | `docker compose ps` |
+| 查看运行状态 | `docker compose ps` |
 | 查看最近日志 | `docker compose logs --tail 100 hindsight db` |
 
-手工模板的数据库保存在 Docker 数据卷 `astrbot-hindsight_postgres_data` 中；自行改过 Compose 项目名时，卷名前缀也会变化。
-
-插件自身数据的保存与恢复见 [备份与恢复](../docs/DATA-MAINTENANCE.md)。该文档的服务备份和升级步骤仅适用于插件配套部署。
-
-模板设置 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0`，持续保留后台操作记录，供任务重试和数据恢复使用。磁盘空间管理通过数据库备份和管理工具进行，不直接删除数据卷。
+手工模板的数据库存放在 Docker 卷 `astrbot-hindsight_postgres_data`（模板默认设置 `HINDSIGHT_API_OPERATION_RETENTION_DAYS=0` 以保留后台操作记录用于恢复核对）。插件自身的备份恢复见 [备份与恢复](../docs/DATA-MAINTENANCE.md)。
 
 ## 卸载边界
 
-配套安装在 **插件设置 → 服务管理 → 卸载服务** 生成专属卸载命令。它核对安装身份、目录和 Compose 资源标签，删除该安装所属的容器、数据卷、专属网络和安装目录。
-
-手工部署与其他已有 Hindsight 依其自身的容器或服务管理方式维护与清理。
+使用面板配套安装时，可在 **插件设置 → 配套服务运维 → 卸载** 生成专属卸载命令，在原主机执行后会核对安装编号与目录，清除专属容器、数据卷、专用网络及安装目录。手工部署的服务请直接通过 `docker compose down` 按需清理。

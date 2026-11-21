@@ -4,99 +4,76 @@
 
 ## 版本与平台
 
-| 项目 | 适用范围 |
+| 项目 | 支持范围 |
 | --- | --- |
 | AstrBot | **4.29.1 及以上**，使用内置执行器 `local` |
-| Hindsight | 自托管 **1.1.0 / 1.2.0**，启用 API Key 认证，官方管理面板与服务版本一致 |
-| QQ 接入 | OneBot v11（`aiocqhttp`）、官方 WS（`qq_official`）、官方 Webhook（`qq_official_webhook`） |
-| 微信接入 | 原生 ClawBot（`weixin_oc`），配置与消息范围见 [微信接入](WEIXIN.md) |
-| Telegram 接入 | 原生 Bot（`telegram`），配置与实体限制见 [Telegram 接入](TELEGRAM.md) |
-| 飞书接入 | 原生 `lark`，支持长连接和 Webhook，配置与消息范围见 [飞书接入](FEISHU.md) |
-| 对话类型 | OneBot、微信 ClawBot、Telegram Bot、飞书私聊纯文字；官方 QQ 机器人 C2C 私聊纯文字，不含频道私信、群聊或主动推送 |
-| 部署方式 | Linux Docker Engine 支持配套安装。Windows 11 x64 使用已有服务入口连接本机或远程 Hindsight，部署与恢复见 [Windows 原生部署](WINDOWS.md) |
-| 管理访问 | 官方面板使用独立 HTTPS 地址；无域名时通过 SSH 隧道访问 |
+| Hindsight | 自托管 **1.1.0** 或 **1.2.0**，需启用 API Key 认证 |
+| QQ 接入 | OneBot v11（`aiocqhttp`）、QQ 官方 WebSocket（`qq_official`）、QQ 官方 Webhook（`qq_official_webhook`） |
+| 微信接入 | 原生 ClawBot（`weixin_oc`），详见 [微信接入](WEIXIN.md) |
+| Telegram 接入 | 原生 Bot（`telegram`），详见 [Telegram 接入](TELEGRAM.md) |
+| 飞书接入 | 原生 `lark`（支持长连接和 Webhook），详见 [飞书接入](FEISHU.md) |
+| 支持的会话类型 | 上述各平台的普通私聊纯文字；不包含群聊、频道私信或主动推送 |
+| 部署方式 | Linux Docker Engine 支持配套一键部署；Windows 11 x64（及任意系统）通过已有服务入口接入，详见 [Windows 原生部署](WINDOWS.md) |
+| 官方页面访问 | Hindsight Control Plane 需独立 HTTPS 反向代理或 SSH 隧道 |
 
-### QQ 官方入口
+### QQ 官方入口说明
 
-两种入口均由 AstrBot 管理登录、事件接收和消息发送。AppID、AppSecret、事件订阅和 Webhook 回调地址在 AstrBot 与 QQ 开放平台配置；Bridge 使用已有机器人实例和私聊 `/sid` 返回的用户 OpenID。
+WebSocket 与 Webhook 两种方式的登录、验签和收发均由 AstrBot 原生管理，插件共用同一套用户授权与记忆库规则：
 
-| 项目 | 官方 WS | 官方 Webhook |
-| --- | --- | --- |
-| 宿主类型 | `qq_official` | `qq_official_webhook` |
-| 私聊文字与跨会话回忆 | 支持 | 支持 |
-| 正常、只读与停用记忆 | 支持 | 支持 |
-| 普通、流式和工具调用后的最终回复 | 支持 | 支持 |
-| 记忆查看、搜索和 JSON 导出 | 支持 | 支持 |
-| 同实例切换连接方式 | 保留已有记忆与授权 | 保留已有记忆与授权 |
+- 在同实例、同 AppID 和同用户 OpenID 下切换 WS 与 Webhook，原有记忆和授权自动沿用。
+- 更换平台实例或 AppID 后需要重新确认机器人身份，记忆将分开保存。
 
-官方 QQ 联调使用 AstrBot 4.29.4、qq-botpy 1.2.1；AstrBot 4.29.1 已完成宿主接口兼容检查。Hindsight 1.2.0 安装、1.1.0 旧库升级、知识页、暂停/遗忘和重载已在 AstrBot 4.29.1 / 4.29.4 与 PostgreSQL 17 环境完成兼容验证；该组宿主验证使用合成平台消息，真实 QQ 账号验收使用 Hindsight 1.1.0。
+对于 OneBot，建议为每个机器人单独建一个平台实例。如果多个机器人同时连到一个反向 WebSocket 入口且未指定目标，宿主无法唯一区分当前账号，插件会暂停该实例的记忆存取直到区分明确。
 
-切换连接方式时，保持原平台实例、AppID 和使用者 OpenID。更换实例或机器人账号后，记忆按新账号分别保存，需在用户与记忆中确认机器人身份。
+## 安装与管理方式
 
-OneBot 建议为每个机器人建立独立的平台实例。多个机器人连到同一个反向 WebSocket 入口时，宿主无法唯一确认登录账号，Bridge 会暂停该实例的记忆访问。QQ 官方入口复用同一客户端换登录时，重载 AstrBot 平台实例可恢复身份核对。
-
-列表与详情提供内容预览，完整内容可通过 JSON 或官方 Control Plane 导出。QQ 文件发送受平台权限和文件大小限制。连接与发送问题的处理见 [安装指南](INSTALL.md#官方机器人没有回复)。
-
-## 安装与管理
-
-插件详情中的「记忆管理」分为「用户与记忆」与「插件设置」：配置连接、添加使用者、调整记忆模式、查看保存进度和处理错误。查看、更正、删除及导入导出记忆，使用独立的 Hindsight 官方面板。
-
-配套安装需要 Linux Docker Engine 和 Compose v2，会安装记忆服务和官方管理面板。已有 Hindsight 可直接填写 API 地址与连接密钥。WSL2 与 Docker Desktop 使用已有服务入口。官方面板的地址和登录密钥与 API 连接分开配置，远程访问示例见 [部署说明](../deploy/README.md)。
+- **配套部署**（Linux Docker Engine + Compose v2）：由插件生成安装命令部署专属 Hindsight、PostgreSQL 与匹配版本的 Control Plane，并在面板里直接复用 AstrBot 的模型供应商。
+- **连接已有服务**（Windows / WSL2 / Docker Desktop / 独立集群）：填写 Hindsight 的 API 地址、API 密钥和浏览器管理地址即可接入，模型、升级与数据库维护由原服务自行负责。
 
 ### 模型供应商复用
 
-| 用途 | 支持范围 |
+配套部署支持直接复用以下类型的 AstrBot 供应商：
+
+| 用途 | 支持的接口类型 |
 | --- | --- |
-| 对话 | OpenAI Chat Completions、OpenAI Responses、Azure OpenAI Chat Completions、Anthropic Messages、Gemini API |
-| 嵌入 | OpenAI Embeddings、DashScope Text Embedding、Gemini Embedding、Ollama Embed |
-| 重排 | DashScope Rerank、Cohere Rerank 及兼容接口、Hugging Face TEI；可不选 |
+| 对话（记忆处理） | OpenAI Chat Completions、OpenAI Responses、Azure OpenAI Chat Completions、Anthropic Messages、Gemini API |
+| 嵌入（向量） | OpenAI Embeddings、DashScope Text Embedding、Gemini Embedding、Ollama Embed |
+| 重排（可选） | DashScope Rerank、Cohere Rerank 及兼容接口、Hugging Face TEI |
 
-配套服务可使用 AstrBot 已配置的模型，无需重复填写地址和密钥。
+保存时会自动复用供应商的接口地址、代理、请求头与兼容参数，并探测实际向量维数。多模态嵌入、带用户名密码的代理地址或参数与记忆处理冲突的供应商暂不支持，列表里会直接写出原因。
 
-可沿用供应商的 HTTP(S) 地址、代理、额外请求头和请求参数。与记忆处理冲突的参数会在保存时提示修改。
+## 哪些内容会被记录
 
-选择嵌入模型时会检查实际向量维数。多模态嵌入、未适配的供应商和含用户名密码的代理地址暂不支持，模型列表会说明原因。
-
-连接已有 Hindsight 时，模型由已有服务自身管理。连接步骤见 [安装指南](INSTALL.md)。
-
-## 哪些内容会自动记忆
-
-| 内容 | 处理方式 |
+| 消息类型 | 处理方式 |
 | --- | --- |
-| 启用账号发来的普通私聊文字 | 自动记录 |
-| AstrBot 保存到会话历史中的机器人最终文字回复 | 自动记录，并区分机器人与用户的陈述 |
-| 切换或新建会话后的聊天 | 使用同一用户已有的记忆 |
-| 安装前、暂停期间的聊天记录 | 不自动导入或补录 |
-| 群聊、图片、语音、引用、转发 | 不自动记录 |
-| 以 `/` 开头的命令 | 不自动记录 |
-| 工具输出、思考过程、未保存的回复草稿 | 不作为对话正文记录 |
-| 聊天消息的编辑与撤回 | 不自动同步为记忆修改或删除 |
+| 已启用用户的普通私聊纯文字 | 自动记录 |
+| AstrBot 写入会话历史的机器人最终纯文字回复 | 自动记录，并区分用户与助手角色 |
+| 新建或切换会话后的私聊 | 共享同一用户的长期记忆 |
+| 安装前、暂停或只读期间的聊天 | 不记录，也不事后补录 |
+| 群聊、图片、语音、视频、文件、转发 | 不自动记录 |
+| 以 `/` 开头的命令（及自定义排除前缀） | 不自动记录 |
+| 工具输出、思考过程、未保存草稿 | 不作为对话正文记录 |
+| 消息的编辑与撤回 | 不同步修改或删除已生成记忆 |
 
-聊天参考中的可选只读召回支持 OneBot、QQ 官方 WebSocket/Webhook、微信 ClawBot、Telegram、飞书的文字引用回复，以及 Telegram 的文字链接和 @ 提及。开启后只读取已有记忆，不保存这些用户消息及其助手回复；使用记录照常保留。群聊、纯媒体、媒体混合消息、转发、未知扩展及身份不符的消息不进入该流程，也不拉取引用原文。
+对于**引用回复**（支持全部五个逻辑平台）及 **Telegram 的带链接/@ 提及文字**，可在面板「聊天参考与保存」里按用户开启只读召回：开启后这些消息可以读取已有记忆、知识页和按需工具，但**消息本身和该轮助手回复都不保存为新记忆**。
 
-## 其他执行器与平台
+## 其他执行器
 
-Dify、Coze、百炼、DeerFlow 等执行器，以及其他聊天平台和 AstrBot WebChat，没有适配自动记录与记忆注入。
+Dify、Coze、百炼、DeerFlow 等外部执行器，以及 AstrBot WebChat 和其他未列出平台，暂未接入自动记录与记忆召回。
 
-QQ 文件导出使用 AstrBot 的文件发送功能。AstrBot 和 OneBot 程序分开运行时，需要配置文件回调地址或共享路径，见 [导出文件失败的处理](INSTALL.md#导出-json-文件失败)。
+使用 `/hindsight export` 导出文件时，若 AstrBot 与 OneBot 运行在不同容器，需配好 `callback_api_base` 或共享路径，见 [导出文件失败的处理](INSTALL.md#导出-json-文件失败)。
 
-## 数量与长度
+## 默认额度与限制
 
-| 项目 | 限制 |
+| 项目 | 默认值与上限 |
 | --- | --- |
-| 单条新对话文字 | 最多 8,000 个字符 |
-| 每次自动提供给模型的记忆 | 默认最多 4,000 个字符，查询默认等待 10 秒，可设为 0.2 到 30 秒 |
-| 本地尚未完成的记录 | 默认最多 10,000 条，请求正文总量最多 64 MiB |
-| 单次 JSON 导出 | 最多 10,000 条记忆、8 MiB |
-
-自动查询超时后继续普通聊天。队列达到上限时，暂时停止接收新记录，已入队的内容继续处理；错误提示可从 `/hindsight status` 查看。
-
-## 记忆管理
-
-内容管理直接使用官方 Control Plane，打开面板不改变模式。完整清空使用插件入口同步作废来源和旧待办。步骤见 [使用指南](USAGE.md#在官方面板修改记忆)。
-
-删除整个记忆库后，该用户的记忆功能会暂停。需要恢复原库，或清空旧记忆重新开始，具体操作见 [备份与恢复](DATA-MAINTENANCE.md#异常提示)。
+| 单条对话材料 | 最多 8,000 个字符 |
+| 单次带入模型的记忆 | 默认 1,200 token / 4,000 字符（检索超时默认 10 秒，可在面板调至 0.2–30 秒） |
+| 本地待保存队列 | 默认最多 10,000 条、正文总量 64 MiB（超出后暂停收新，排空后恢复） |
+| 单次 `/hindsight export` | 最多 10,000 条记忆、文件上限 8 MiB |
 
 ## 相关文档
 
-消息来源校验、机器人回复关联、发送接口限制和数据格式见 [实现说明](ARCHITECTURE.md)。备份与恢复操作见 [备份与恢复](DATA-MAINTENANCE.md)。
+- 浏览、修改或整库清除记忆的操作方法见 [使用指南](USAGE.md#在官方面板修改记忆)。
+- 控制库备份、故障恢复与异常排查见 [备份与恢复](DATA-MAINTENANCE.md#异常提示)。
+- 底层架构、来源校验与数据格式见 [实现说明](ARCHITECTURE.md)。
