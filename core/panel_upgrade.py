@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import socket
 import time
+
 from .client import HindsightError
 from .identity import sha256
 from .installer import SUPPORTED_VERSIONS, UPGRADE_PATHS
@@ -11,11 +12,16 @@ from .managed_connections import PanelError
 
 class PanelUpgrade:
     async def service_status(self, *, force=True):
-        plugin, state = self.plugin, self.upgrade_state()
-        client = plugin.client
+        return await self._read_service_status(self.poll_snapshot(), force=force)
+
+    async def _read_service_status(self, snapshot, *, force):
+        plugin, state = self.plugin, self.upgrade_state(snapshot.setup)
+        client = snapshot.client
         local_installation = self.supports_installation()
         pending, paused = self.upgrade_progress(state)
-        managed = (local_installation or pending or paused) and self.managed_connection(state) and (
+        managed = (local_installation or pending or paused) and self.managed_connection(
+            state, api_url=snapshot.api_url, api_key=snapshot.api_key
+        ) and (
             not client or self.connection_url(state["api_url"]) == client.url
         )
         ignored = state.get("ignored_upgrades", {})
@@ -32,7 +38,7 @@ class PanelUpgrade:
                 or not callable(getattr(client, "request", None))):
             return result
         identity = (
-            client.url, sha256(client.api_key), self.config_revision(),
+            client, snapshot.outbox, client.url, sha256(client.api_key), snapshot.revision,
             local_installation, pending, paused,
         )
         if not force and self.version_cache and self.version_cache[0] == identity and self.version_cache[1] > time.monotonic():
@@ -40,6 +46,7 @@ class PanelUpgrade:
         try:
             async with plugin.using_resources(), asyncio.timeout(3):
                 await client.ensure_auth()
+                self.check_snapshot(snapshot)
                 response = await client.request("GET", "/v1/version", timeout=2.5)
             version = response.get("api_version") if isinstance(response, dict) else None
             if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
@@ -48,8 +55,7 @@ class PanelUpgrade:
                           upgrade_available=local_installation and managed and UPGRADE_PATHS.get(version) == self.target_version)
         except (HindsightError, TimeoutError, PanelError):
             result["message"] = "暂时无法核对服务版本，请检查连接后重试。"
-        if plugin.client is not client or plugin.stopping:
-            return {"version": None, "target": self.target_version, "upgrade_available": False}
+        self.check_snapshot(snapshot)
         self.version_cache = (identity, time.monotonic() + 30, result)
         return result
 

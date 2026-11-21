@@ -515,6 +515,60 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("timezone", self.config)
         self.assertEqual(self.config["allowed_accounts"], [])
 
+    def polling_resources(self):
+        queue = SimpleNamespace(recovering=False, list_scopes=lambda: [], connection_error=lambda: "http_401",
+                                pause_connection=Mock())
+        client = SimpleNamespace(url=self.config["api_url"], api_key=self.config["api_key"],
+                                 request=AsyncMock(return_value={"api_version": "1.2.0"}), ensure_auth=AsyncMock())
+        self.plugin.worker = SimpleNamespace(wake=asyncio.Event())
+        self.plugin.outbox, self.plugin.client = queue, client
+        return queue, client
+
+    async def test_save_access_finishes_while_bootstrap_auth_waits(self):
+        queue, client = self.polling_resources()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def auth(**kwargs):
+            entered.set()
+            await release.wait()
+
+        client.ensure_auth.side_effect = auth
+        polling = asyncio.create_task(self.panel.bootstrap())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.panel.body = AsyncMock(return_value={"control_plane_url": "https://memory.example.org"})
+            saved = await asyncio.wait_for(self.panel.save_access(), 1)
+            self.assertTrue(saved["saved"])
+        finally:
+            release.set()
+        with self.assertRaisesRegex(module.PanelError, "配置已变化"):
+            await polling
+        queue.pause_connection.assert_not_called()
+        client.request.assert_not_awaited()
+
+    async def test_late_version_cannot_replace_new_connection_cache(self):
+        _, old_client = self.polling_resources()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def version(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return {"api_version": "1.1.0"}
+
+        old_client.request.side_effect = version
+        self.panel.user_scopes = AsyncMock(return_value=[])
+        polling = asyncio.create_task(self.panel.bootstrap())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.polling_resources()
+            actual = await self.panel.service_status()
+            self.assertEqual(actual["version"], "1.2.0")
+        finally:
+            release.set()
+        with self.assertRaisesRegex(module.PanelError, "配置已变化"):
+            await polling
+        self.assertIs(self.panel.version_cache[2], actual)
+
     async def test_settings_save_uses_native_astrbot_account_template_format(self):
         await self.save(allowed_accounts=[{"platform_instance_id": "qq", "user_id": "123"}])
         self.assertEqual(self.config["allowed_accounts"], [{

@@ -1,6 +1,8 @@
 """AstrBot plugin-view connection, account and maintenance management."""
 
 import asyncio
+from contextlib import nullcontext
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -24,6 +26,16 @@ from .panel_upgrade import PanelUpgrade
 from .panel_scopes import PanelScopes
 
 NAME = "astrbot_plugin_hindsight_bridge"
+
+
+@dataclass(frozen=True, repr=False)
+class PanelSnapshot:
+    client: HindsightClient | None
+    outbox: object
+    revision: str
+    setup: dict
+    api_url: str
+    api_key: str
 
 
 class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
@@ -242,9 +254,9 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
                         state.pop(name)
         return state
 
-    def config_revision(self):
+    def config_revision(self, setup=None):
         """Opaque fingerprint of the plugin configuration and setup metadata."""
-        state = dict(self.state())
+        state = dict(self.state() if setup is None else setup)
         state.pop("connection_job", None)
         return sha256(json.dumps(
             {"config": dict(self.plugin.config), "setup": state},
@@ -322,33 +334,51 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             return ""
 
     async def bootstrap(self):
-        if self.model_task and not self.model_task.done():
-            return await self._bootstrap()
-        async with self.lock:
-            return await self._bootstrap()
+        snapshot = self.poll_snapshot()
+        async with self.plugin.using_resources() if snapshot.outbox else nullcontext():
+            return await self._bootstrap(snapshot)
 
-    async def _bootstrap(self):
+    def poll_snapshot(self):
+        self.ensure_open()
+        plugin = self.plugin
+        if plugin.stopping:
+            raise PanelError("连接正在切换，请稍后刷新。")
+        setup = self.state()
+        return PanelSnapshot(plugin.client, plugin.outbox, self.config_revision(setup), setup,
+                             plugin.config.get("api_url", ""), plugin.config.get("api_key", ""))
+
+    def check_snapshot(self, snapshot):
+        self.ensure_open()
+        plugin = self.plugin
+        if (plugin.stopping or plugin.client is not snapshot.client or plugin.outbox is not snapshot.outbox
+                or self.config_revision() != snapshot.revision):
+            raise PanelError("连接或配置已变化，请刷新页面。")
+
+    async def _bootstrap(self, snapshot):
         plugin, config = self.plugin, self.plugin.config
+        client, queue, state = snapshot.client, snapshot.outbox, snapshot.setup
         connected, connection_message = None, ""
-        if plugin.client and plugin.outbox and not plugin.stopping:
+        if client and queue:
             try:
-                async with plugin.using_resources(), asyncio.timeout(3):
-                    await plugin.client.ensure_auth(force=bool(
-                        plugin.outbox.connection_error()
-                        or getattr(plugin.client, "connection", {}).get("connected") is False
+                async with asyncio.timeout(3):
+                    await client.ensure_auth(force=bool(
+                        queue.connection_error()
+                        or getattr(client, "connection", {}).get("connected") is False
                     ))
-                    self.connection_ready(plugin.client.url, plugin.client.api_key)
-                connected = getattr(plugin.client, "connection", {}).get("connected", True)
+                    self.check_snapshot(snapshot)
+                    self.connection_ready(client.url, client.api_key)
+                connected = getattr(client, "connection", {}).get("connected", True)
             except HindsightError as exc:
                 connected = False
                 connection_message = self.error_message(plugin.error_code(exc))
             except TimeoutError:
                 connected = False
                 connection_message = self.error_message("auth_timeout")
+        self.check_snapshot(snapshot)
         scopes = await self.user_scopes()
-        state = self.state()
+        self.check_snapshot(snapshot)
         local_installation = local_installation_supported()
-        managed = local_installation and self.managed_connection(state)
+        managed = local_installation and self.managed_connection(state, api_url=snapshot.api_url, api_key=snapshot.api_key)
         installation_state = state if local_installation else {}
         key_command = ""
         if managed:
@@ -364,18 +394,20 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
                 managed_status = await self.managed_request(state)
             except PanelError:
                 managed_status = {"installed": False, "configured": False, "ready": False}
+            self.check_snapshot(snapshot)
         missing = missing_connection(config)
         configured = not missing
-        backend = await self.service_status(force=True)
-        if plugin.client and plugin.outbox and not plugin.stopping:
-            evidence = getattr(plugin.client, "connection", {})
+        backend = await self._read_service_status(snapshot, force=True)
+        self.check_snapshot(snapshot)
+        if client and queue:
+            evidence = getattr(client, "connection", {})
             connected = evidence.get("connected", connected)
             if connected is False:
                 connection_message = self.error_message(evidence.get("code") or "connection_error")
             elif connected is True:
                 connection_message = ""
         return {
-            "config_revision": self.config_revision(),
+            "config_revision": snapshot.revision,
             "capabilities": {
                 "managed_installation": local_installation,
             },
