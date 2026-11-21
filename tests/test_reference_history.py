@@ -32,6 +32,32 @@ class ReferenceIsolation(unittest.TestCase):
     def scope(self, user):
         return self.queue.scope(Incoming("aiocqhttp", "qq", "bot", user, "message", 1, "hello"))
 
+    def test_legacy_options_default_and_legacy_saves_preserve_new_user_settings(self):
+        options = reference_options(self.queue, self.alice)
+        self.assertEqual((options["recall_budget"], options["capture_assistant"]), ("mid", True))
+        saved = save_reference_options(self.queue, self.alice, **{
+            **options, "recall_budget": "high", "capture_assistant": False,
+        })
+        legacy = {key: value for key, value in saved.items() if key not in {"recall_budget", "capture_assistant"}}
+        saved = save_reference_options(self.queue, self.alice, **{**legacy, "exclude_assistant": True})
+        self.assertEqual((saved["recall_budget"], saved["capture_assistant"], saved["exclude_assistant"]),
+                         ("high", False, True))
+        self.assertEqual(reference_options(self.queue, self.alice), saved)
+        self.assertEqual(reference_options(self.queue, self.bob), options)
+        for invalid in ({"recall_budget": "medium"}, {"recall_budget": []}, {"capture_assistant": 0}):
+            with self.assertRaisesRegex(QueueError, "reference_settings_invalid"):
+                save_reference_options(self.queue, self.alice, **{**saved, **invalid})
+        key, value = self.queue.control.db.execute(
+            "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
+        ).fetchone()
+        legacy = {name: value for name, value in json.loads(value).items()
+                  if name not in {"recall_budget", "capture_assistant"}}
+        with self.queue.control.db:
+            self.queue.control.db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(legacy), key))
+        restored = reference_options(self.queue, self.alice)
+        self.assertEqual((restored["recall_budget"], restored["capture_assistant"], restored["exclude_assistant"]),
+                         ("mid", True, True))
+
     def test_revoked_binding_cannot_read_or_append_to_either_users_turns(self):
         alice_id = self.queue.references.start(self.alice, "chat", "one", self.payload)
         bob_id = self.queue.references.start(self.bob, "chat", "one", self.payload)

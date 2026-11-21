@@ -181,13 +181,16 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     async def test_overlapping_reads_share_final_ids_and_skip_past_duplicates(self):
         scope = self.scope()
         options = reference_options(self.plugin.outbox, scope)
-        save_reference_options(self.plugin.outbox, scope, **{**options, "detail_limit": 3, "types": ["world"]})
+        save_reference_options(self.plugin.outbox, scope, **{
+            **options, "detail_limit": 3, "types": ["world"], "recall_budget": "high",
+        })
         event, context = await self.ready()
         turn = self.tools.tool_turns[event]
         turn.snapshot_id = "test-record"
 
         def rows(bank, query, *args, **kwargs):
             self.assertEqual(kwargs["types"], ["world"])
+            self.assertEqual(kwargs["budget"], "high")
             return [{"id": identity, "text": identity, "type": "world"} for identity in query]
 
         with (

@@ -3,7 +3,7 @@ name: astrbot-hindsight
 services:
   db:
     build: ./postgres
-    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-pgvector0.8.6-r2
+    image: astrbot-hindsight-postgres:17-pgroonga4.0.8-r3
     restart: unless-stopped
     environment:
       POSTGRES_USER: hindsight
@@ -12,7 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U hindsight -d hindsight"]
       interval: 10s
       timeout: 5s
       retries: 15

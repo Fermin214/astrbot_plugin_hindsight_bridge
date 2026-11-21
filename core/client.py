@@ -18,6 +18,7 @@ STATUSES = {"pending", "processing", "completed", "failed", "cancelled", "not_fo
 EXPORT_FORMAT = "astrbot-hindsight-memory-export"
 EXPORT_VERSION = 1
 FACT_TYPES = {"world", "experience", "observation"}
+RECALL_BUDGETS = ("low", "mid", "high")
 BACKGROUND_MAX_BYTES = 256 * 1024
 
 
@@ -539,7 +540,10 @@ class HindsightClient:
         timeout: float | None = None,
         bounded: bool = False,
         types: list[str] | None = None,
+        budget: str = "mid",
     ) -> list[dict]:
+        if budget not in RECALL_BUDGETS:
+            raise HindsightError("invalid_recall_budget", permanent=True)
         if types == []:
             return []
         if not query.strip() or token_count(query, self.tokenizer) > 400:
@@ -548,7 +552,7 @@ class HindsightClient:
         try:
             options = dict(
                 body={
-                    "query": query, "budget": "mid", "max_tokens": max_tokens,
+                    "query": query, "budget": budget, "max_tokens": max_tokens,
                     "query_timestamp": timestamp,
                     "types": types if types is not None else ["world", "experience", "observation"],
                     "include": {"source_facts": {"max_tokens": 256, "max_tokens_per_observation": 64}},

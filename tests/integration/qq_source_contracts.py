@@ -40,7 +40,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 from plugins.astrbot_plugin_hindsight_bridge.core.materials import Message, retain_payload
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.qq_source import native_login
-from plugins.astrbot_plugin_hindsight_bridge.core.source import native_header
+from plugins.astrbot_plugin_hindsight_bridge.core.source import inspect_header, native_header
 
 
 class Fixture:
@@ -415,6 +415,20 @@ async def main():
     })
     assert fixture.header(quote_elements) is None
     passed.append("observed_quote_type_and_parallel_elements_shape_rejected")
+
+    quote_only_elements = await fixture.event(data={
+        "message_type": 103, "msg_elements": [{
+            "content": "synthetic quoted body", "message_type": 0, "msg_idx": "synthetic-quote-index",
+        }],
+    })
+    assert [type(part).__name__ for part in quote_only_elements.get_messages()][0] == "Reply"
+    for sample, expected in ((attachment, "media_or_non_text"), (quote, "quoted_or_reply"),
+                             (quote_elements, "quoted_or_reply"), (quote_only_elements, "quoted_or_reply")):
+        reasons = []
+        assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
+                              inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+        assert reasons == [expected]
+    passed.append("native_quote_and_media_diagnostics")
 
     direct = await fixture.event(direct=True)
     assert direct.is_private_chat() and fixture.header(direct) is None

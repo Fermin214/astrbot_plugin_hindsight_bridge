@@ -40,22 +40,27 @@ async def install_probe(acceptance):
     return name
 
 
-async def verify_assistant_capture(acceptance):
+async def verify_assistant_capture(acceptance, frame):
     scope = await acceptance.scope()
     assert scope["reading"]["mode"] == "automatic" and not scope["reflect"]["enabled"]
     name = await install_probe(acceptance)
     try:
-        await acceptance.action(scope["scope_id"], "mode", mode="active")
+        identifier = scope["scope_id"]
+        await acceptance.action(identifier, "mode", mode="active")
         await asyncio.sleep(1.1)
+        reading_route = acceptance.prefix + "/scopes/" + identifier + "/reading"
+
+        async def reading_mode(mode):
+            options = await acceptance.http("GET", reading_route)
+            saved = await acceptance.http("POST", reading_route, payload={
+                "mode": mode, "revision": options["selection"]["revision"],
+                "scope_revision": options["scope_revision"], "config_revision": options["config_revision"],
+            })
+            assert saved["selection"]["mode"] == mode
+
         for mode in ("automatic", "tools"):
             if mode == "tools":
-                route = acceptance.prefix + "/scopes/" + scope["scope_id"] + "/reading"
-                options = await acceptance.http("GET", route)
-                saved = await acceptance.http("POST", route, payload={
-                    "mode": mode, "revision": options["selection"]["revision"],
-                    "scope_revision": options["scope_revision"], "config_revision": options["config_revision"],
-                })
-                assert saved["selection"]["mode"] == mode
+                await reading_mode(mode)
             start = len(jsonl("retain-trace"))
             prompt = "HB-CAPTURE-PRIMARY-" + mode
             answer = await acceptance.bot.chat(ALICE, prompt)
@@ -73,6 +78,52 @@ async def verify_assistant_capture(acceptance):
             replies = database(acceptance.runtime, "SELECT text FROM replies WHERE text LIKE 'HB-CAPTURE-%'")
             assert [row["text"] for row in replies] == ["HB-CAPTURE-PRIMARY-REPLY"] * (1 if mode == "automatic" else 2)
             acceptance.passed("secondary_agent_preserves_primary_assistant_capture_" + mode)
+
+        await reading_mode("automatic")
+        references_route = acceptance.prefix + "/scopes/" + identifier + "/references"
+        budget = frame.locator("#reference-budget")
+        capture = frame.locator("#reference-capture-assistant")
+        await until(budget.is_enabled, timeout=15, label="chat reference form")
+        assert await budget.input_value() == "mid" and await capture.is_checked()
+        await budget.select_option("low")
+        await capture.uncheck()
+        await frame.locator("#reference-save").click()
+
+        async def disabled_in_store():
+            options = (await acceptance.http("GET", references_route))["selection"]
+            return options["recall_budget"] == "low" and options["capture_assistant"] is False
+
+        await until(disabled_in_store, timeout=15, label="saved assistant capture settings")
+        retain_start, recall_start = len(jsonl("retain-trace")), len(jsonl("recall-trace"))
+        for suffix in ("first", "second"):
+            prompt = "HB-CAPTURE-PRIMARY-disabled-" + suffix
+            assert "HB-CAPTURE-PRIMARY-REPLY" in await acceptance.bot.chat(ALICE, prompt)
+            await acceptance.drained()
+        captured = [item for trace in jsonl("retain-trace")[retain_start:] for item in trace["body"]["items"]]
+        assert [item["metadata"]["role"] for item in captured] == ["user", "user"], captured
+        assert all("HB-CAPTURE-PRIMARY-disabled-" in item["content"] and "[assistant;" not in item["content"]
+                   for item in captured)
+        assert "[user;" in captured[0]["content"].split("【本次新增用户消息】", 1)[0]
+        assert [trace["body"]["budget"] for trace in jsonl("recall-trace")[recall_start:]] == ["low", "low"]
+        await frame.locator("#reference-capture-assistant").check()
+        await frame.locator("#reference-save").click()
+        await until(capture.is_enabled, timeout=15, label="capture settings re-enabled")
+        assert (await acceptance.http("GET", references_route))["selection"]["capture_assistant"] is True
+        start = len(jsonl("retain-trace"))
+        assert "HB-CAPTURE-PRIMARY-REPLY" in await acceptance.bot.chat(ALICE, "HB-CAPTURE-PRIMARY-restored")
+        await acceptance.drained()
+        captured = [item for trace in jsonl("retain-trace")[start:] for item in trace["body"]["items"]]
+        assert len(captured) == 2 and {item["metadata"]["role"] for item in captured} == {"user", "assistant"}
+        acceptance.passed("panel_budget_reaches_native_recall_and_capture_switch_controls_retain_roles")
+
+        start = len(acceptance.tasks())
+        await acceptance.bot.chat(ALICE, "/hindsight help")
+        status = await acceptance.bot.chat(ALICE, "/hindsight status")
+        assert "最近跳过：命令或排除前缀" in status, status
+        assert len(acceptance.tasks()) == start
+        await frame.locator("#scope-skip-row").wait_for(state="visible", timeout=15000)
+        assert "命令或排除前缀" in await frame.locator("#scope-skip-status").text_content()
+        acceptance.passed("private_skip_visible_in_command_and_panel_without_memory_write")
     finally:
         await acceptance.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + name)
 

@@ -643,6 +643,11 @@ class MemoryPanel:
             }
             summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
             summary["recall"] = plugin.recall_status(scope) if queue and not scope.get("pending") else None
+            account = (scope["platform_instance_id"], scope["user_id"])
+            if account in accounts and (not scope.get("historical") or scope.get("availability") == "disconnected"):
+                skipped = plugin.skip_status(*account)
+                if skipped:
+                    summary["skip"] = skipped
             if summary["recall"]:
                 summary["recall"]["error_message"] = (
                     self.error_message(summary["recall"]["code"]) if summary["recall"]["code"] else ""
@@ -1485,8 +1490,9 @@ class MemoryPanel:
             queue, scope = await self.reference_scope(scope_id)
             config_revision = self.config_revision()
             if posting:
-                if (set(payload) != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
-                                     "history_limit", "scope_revision", "config_revision"}
+                if (set(payload) - {"recall_budget", "capture_assistant"}
+                    != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
+                        "history_limit", "scope_revision", "config_revision"}
                     or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]
                     or payload.pop("config_revision") != config_revision):
                     raise QueueError("reference_changed")

@@ -68,29 +68,33 @@ def valid_user_id(host_type, value):
 
 
 def native_header(event, plain_type, wake_prefixes=(), *, adapter=None, binding=None) -> Incoming | None:
+    return inspect_header(event, plain_type, wake_prefixes, adapter=adapter, binding=binding)
+
+
+def inspect_header(event, plain_type, wake_prefixes, *, adapter, binding, inspect=None):
     host_type = event.get_platform_name()
     if host_type not in PLATFORMS:
         return None
     if host_type == "lark":
         from .lark_source import header
 
-        return header(event, plain_type, wake_prefixes, adapter, binding)
+        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
     if host_type in {"qq_official", "qq_official_webhook"}:
         from .qq_source import header
 
-        return header(event, plain_type, wake_prefixes, adapter, binding)
+        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
     if host_type == "weixin_oc":
         from .weixin_source import header
 
-        return header(event, plain_type, wake_prefixes, adapter, binding)
+        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
     if host_type == "telegram":
         from .telegram_source import header
 
-        return header(event, plain_type, wake_prefixes, adapter, binding)
+        return header(event, plain_type, wake_prefixes, adapter, binding, inspect=inspect)
     if host_type == "aiocqhttp":
         from .onebot_source import header
 
-        return header(event, plain_type, wake_prefixes, adapter)
+        return header(event, plain_type, wake_prefixes, adapter, inspect=inspect)
     return None
 
 

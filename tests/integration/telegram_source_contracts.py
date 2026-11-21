@@ -35,7 +35,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_login, prepare_bot_identity,
+    inspect_header, native_header, native_login, prepare_bot_identity,
 )
 
 USER = 9007199254740993
@@ -133,7 +133,13 @@ async def main(output):
                 ("via_bot", {"via_bot": {"id": 777, "is_bot": True, "first_name": "Inline"}}),
                 ("unknown", {"future_protocol_field": {"text": "synthetic"}}),
             ):
-                assert fixture.header(await fixture.event(changes=changes)) is None, label
+                sample = await fixture.event(changes=changes)
+                assert fixture.header(sample) is None, label
+                if label in {"media", "reply"}:
+                    reasons = []
+                    assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
+                                          inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                    assert reasons == ["quoted_or_reply" if label == "reply" else "media_or_non_text"]
             passed.append("nonordinary_private_media_reply_forward_edit_business_and_unknown_fields_rejected")
 
             for entity in ("bold", "italic", "code", "bot_command"):

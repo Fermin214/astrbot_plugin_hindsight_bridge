@@ -79,6 +79,14 @@ async def main():
             bridge.context, bridge.outbox, bridge.stopping = context, queue, False
             bridge.config = {"allowed_accounts": [{"platform_instance_id": "fixture", "user_id": "2001"}]}
             bridge.source_accounts = {"fixture": {"bot_id": "1001"}}
+            bridge.skip_outcomes = {}
+            for kind, expected in (("image", "media_or_non_text"), ("reply", "quoted_or_reply")):
+                sample = await event(host, "skipped text")
+                sample.message_obj.raw_message["message"].append({"type": kind, "data": {}})
+                assert native_header(sample, Plain, adapter=host) is None
+                bridge.record_skip(sample, queue)
+                assert bridge.skip_status("fixture", "2001")["code"] == expected
+            assert queue.summary(incoming.scope(queue.deployment_id).id)["counts"] == {}
             after_grant_event = await event(host, "new authorized", mid=4)
             after_grant = bridge.snapshot(after_grant_event)
             assert after_grant.received_at == after_grant_event.created_at

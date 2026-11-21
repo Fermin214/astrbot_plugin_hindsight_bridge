@@ -54,6 +54,7 @@ case "$*" in
   *"exec -T memory-db psql"*) [ "$TEST_FAIL_STAGE" != extensions ] || exit 54; printf '%s\\n' "${TEST_EXTENSIONS:-2}" ;;
   *"up -d --no-build --wait --wait-timeout 180 memory-db"*) [ "$TEST_FAIL_STAGE" != database_start ] || exit 55 ;;
   "image inspect "*) [ "$TEST_IMAGE_CACHE" != old ] || exit 1 ;;
+  *"build memory-db") [ "$TEST_FAIL_STAGE" != database_build ] || exit 56 ;;
   "pull ghcr.io/vectorize-io/hindsight:1.2.0-slim") [ "$TEST_FAIL_STAGE" != pull ] || exit 51 ;;
   *"exec -T memory-api python -c"*"models.json"*) printf '%s\n' '{"environment":{}}' ;;
   *"exec -T memory-api python -c"*) cat >/dev/null ;;
@@ -162,6 +163,27 @@ class InstallerTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=OSError("not ready")), patch("time.monotonic", side_effect=[0, 181]):
             with self.assertRaises(RuntimeError):
                 exec(code, {})
+
+    def test_redeployment_build_failure_leaves_running_installation_untouched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = install_environment(root)
+            generated = script(installation(ROOT, {**STATE, **free_ports()}))
+            subprocess.run(["bash"], input=generated, env=env, text=True, check=True, capture_output=True)
+            target = root / ("astrbot-memory-" + STATE["id"])
+            compose = target / "compose.yaml"
+            previous = compose.read_text().replace(POSTGRES_IMAGE, "astrbot-hindsight-postgres:previous")
+            compose.write_text(previous)
+            (root / "calls").write_text("")
+            failed = subprocess.run(["bash"], input=generated,
+                                    env={**env, "TEST_IMAGE_CACHE": "old", "TEST_FAIL_STAGE": "database_build"},
+                                    text=True, capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("数据库镜像构建失败", failed.stderr)
+            self.assertEqual(compose.read_text(), previous)
+            calls = (root / "calls").read_text()
+            self.assertNotIn(" up ", calls)
+            self.assertNotIn(" stop ", calls)
 
     def test_encoded_pipeline_survives_docker_exec_reading_stdin(self):
         with tempfile.TemporaryDirectory() as temporary:

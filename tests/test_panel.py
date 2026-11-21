@@ -80,7 +80,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = SimpleNamespace(
             context=context, config=self.config, client=None, outbox=None,
             stopping=False, status="已停用", confirmations={},
-            refresh_permissions=lambda: None, recall_status=lambda scope: None,
+            refresh_permissions=lambda: None, recall_status=lambda scope: None, skip_status=lambda platform, user: None,
             prepare_sources=AsyncMock(), source_accounts={},
             diagnostic=lambda code: code,
             error_code=lambda exc: exc.code if isinstance(exc, HindsightError) else "timeout",

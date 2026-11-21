@@ -199,6 +199,82 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
+    async def test_skip_diagnostics_rank_identity_and_time_before_shape_and_ignore_other_senders(self):
+        plugin = self.plugin
+        queue = plugin.outbox
+        event = Mock()
+        event.is_private_chat.return_value = True
+        event.get_group_id.return_value = ""
+        event.get_platform_name.return_value = "aiocqhttp"
+        event.get_platform_id.return_value = "qq"
+        event.get_sender_id.return_value = "123"
+        shape = Mock(return_value="quoted_or_reply")
+        timestamp = self.incoming.timestamp + 2
+
+        def source_header(event, *, inspect=None):
+            inspect(bot, timestamp, time.time(), shape)
+
+        with patch.object(plugin, "source_header", side_effect=source_header) as header:
+            event.get_sender_id.return_value = "stranger"
+            plugin.record_skip(event, queue)
+            event.get_sender_id.return_value = "123"
+            event.get_group_id.return_value = "group"
+            plugin.record_skip(event, queue)
+            header.assert_not_called()
+            self.assertEqual(plugin.skip_outcomes, {})
+            event.get_group_id.return_value = ""
+            bot = "new-bot"
+            plugin.record_skip(event, queue)
+            self.assertEqual(plugin.skip_status("qq", "123")["code"], "bot_not_confirmed")
+            shape.assert_not_called()
+            bot = "456"
+            timestamp = self.incoming.timestamp - 1
+            plugin.record_skip(event, queue)
+            self.assertEqual(plugin.skip_status("qq", "123")["code"], "before_accept_from")
+            shape.assert_not_called()
+            timestamp = self.incoming.timestamp + 2
+            plugin.record_skip(event, queue)
+            outcome = plugin.skip_status("qq", "123")
+            self.assertEqual(outcome["code"], "quoted_or_reply")
+            self.assertEqual(set(plugin.skip_outcomes[("qq", "123")][-1]), {"code", "at"})
+            self.assertEqual(queue.summary(self.incoming.scope(queue.deployment_id).id)["counts"], {})
+            self.assertTrue(queue.access.observe_bot("qq", "aiocqhttp", "new-bot"))
+            self.assertIsNone(plugin.skip_status("qq", "123"))
+            grant = queue.access.authorization("qq", "123")
+            queue.activate(replace(self.incoming, bot_id="new-bot"), grant["revision"])
+            self.assertIsNone(plugin.skip_status("qq", "123"))
+            self.config["allowed_accounts"] = []
+            self.assertIsNone(plugin.skip_status("qq", "123"))
+
+    async def test_observer_resuming_after_reload_cannot_record_a_skip(self):
+        plugin = self.plugin
+        queue = plugin.outbox
+        event = Mock()
+        event.get_platform_name.return_value = "aiocqhttp"
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def prepare(platform):
+            entered.set()
+            await release.wait()
+
+        with patch.object(plugin, "source_header", return_value=self.incoming), \
+                patch.object(plugin, "prepare_sources", side_effect=prepare), \
+                patch.object(plugin, "record_skip") as record:
+            observation = asyncio.create_task(plugin.observe_incoming(event))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                plugin.outbox = object()
+                release.set()
+                await observation
+                record.assert_not_called()
+                self.assertEqual(plugin.skip_outcomes, {})
+                self.assertNotIn(event, plugin.incoming)
+            finally:
+                plugin.outbox = queue
+                if not observation.done():
+                    observation.cancel()
+                    await asyncio.gather(observation, return_exceptions=True)
+
     async def test_success_empty_and_failure_are_temporary_and_captured_durably(self):
         self.results = [{"id": "fact", "text": "coffee", "type": "world"}]
         event, req = self.turn()
@@ -229,6 +305,74 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         await self.plugin.add_memory(event, req)
         self.assertEqual(self.plugin.recall_status(scope)["consecutive_failures"], 0)
         self.logger.info.assert_called()
+
+    async def test_automatic_recall_sends_user_budget_without_changing_token_limit(self):
+        scope = self.plugin.outbox.scope(self.incoming)
+        for budget in ("low", "mid", "high"):
+            save_reference_options(self.plugin.outbox, scope, **{
+                **reference_options(self.plugin.outbox, scope), "recall_budget": budget,
+            })
+            event, req = self.turn("budget-" + budget)
+            await self.plugin.add_memory(event, req)
+            request = next(request for request in reversed(self.requests) if request.url.path.endswith("/recall"))
+            payload = json.loads(request.content)
+            self.assertEqual((payload["budget"], payload["max_tokens"]), (budget, 1200))
+        with self.assertRaisesRegex(HindsightError, "invalid_recall_budget"):
+            await self.plugin.client.recall("bank", "hello", timestamp=self.incoming.iso_timestamp, budget="medium")
+
+    async def test_disabling_assistant_capture_blocks_late_callback_and_future_backfill(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        event, request = self.turn("enabled-before-callback")
+        await plugin.add_memory(event, request)
+        queued_turn = plugin.pending_assistant_captures[event]
+        scope = queue.scope(self.incoming)
+        rows = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "delayed answer"}]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_history(event, conversation):
+            entered.set()
+            await release.wait()
+            return rows
+
+        def settings(enabled):
+            save_reference_options(queue, scope, **{
+                **reference_options(queue, scope), "capture_assistant": enabled,
+            })
+
+        with patch.object(plugin, "conversation_history", side_effect=delayed_history):
+            callback = asyncio.create_task(plugin.persist_history(event, queued_turn, "delayed answer"))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                settings(False)
+            finally:
+                release.set()
+                await asyncio.wait_for(callback, 2)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 0)
+        prior = queue.capture_assistant(queued_turn["task_id"], "already saved assistant context " + "字" * 4100)
+        queue.release(prior.task_id)
+
+        event, request = self.turn("disabled")
+        with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows)), \
+                patch.object(plugin, "record_history", wraps=plugin.record_history) as backfill, \
+                patch.object(plugin, "track_assistant_capture", wraps=plugin.track_assistant_capture) as track:
+            await plugin.add_memory(event, request)
+            backfill.assert_not_called()
+            track.assert_not_called()
+        anchor = queue.history_anchor(scope["scope_id"], "conversation")
+        self.assertIsNone(anchor["history_before"])
+        self.assertNotIn(event, plugin.pending_assistant_captures)
+        self.assertEqual(queue.db.execute("SELECT released FROM outbox ORDER BY id").fetchall()[-1][0], 1)
+        payload = json.loads(queue.db.execute("SELECT payload FROM outbox ORDER BY id DESC LIMIT 1").fetchone()[0])
+        self.assertNotIn("already saved assistant context", payload["items"][0]["content"])
+        self.assertRegex(payload["items"][0]["content"], r"【历史语境】\n\[user;[^\n]+\]\nhello")
+
+        settings(True)
+        event, request = self.turn("reenabled")
+        with patch.object(plugin, "conversation_history", AsyncMock(return_value=rows + rows)):
+            await plugin.add_memory(event, request)
+        self.assertIn(event, plugin.pending_assistant_captures)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM replies").fetchone()[0], 1)
+        self.assertEqual(queue.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 4)
 
     async def test_authentication_and_recall_deadlines_are_distinct_and_honor_setting(self):
         self.config["recall_timeout"] = 0.2

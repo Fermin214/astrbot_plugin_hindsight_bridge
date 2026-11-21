@@ -34,7 +34,7 @@ for name, path in (("plugins", ROOT.parent), ("plugins.astrbot_plugin_hindsight_
 
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.source import (
-    native_header, native_login, prepare_bot_identity,
+    inspect_header, native_header, native_login, prepare_bot_identity,
 )
 
 spec = importlib.util.spec_from_file_location("field_probe", Path(__file__).parent / "platform_probe/probe.py")
@@ -173,7 +173,13 @@ async def main(output):
                 {"type": 1, "text_item": {"text": "synthetic"}, "button_item_list": ""},
             ]}),
         ):
-            assert fixture.header(await fixture.event(changes=changes)) is None, label
+            sample = await fixture.event(changes=changes)
+            assert fixture.header(sample) is None, label
+            if label in {"media", "reference"}:
+                reasons = []
+                assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
+                                      inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                assert reasons == ["quoted_or_reply" if label == "reference" else "media_or_non_text"]
         passed.append("native_fallback_media_reference_updates_direction_and_unknown_fields_rejected")
 
         created = int(time.time() * 1000) - 100

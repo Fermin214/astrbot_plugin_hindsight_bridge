@@ -34,15 +34,26 @@ from .core.dialogue import (
     history_messages,
     persistent_messages,
 )
-from .core.identity import Incoming, sha256
+from .core.identity import Incoming, Scope, sha256
 from .core.materials import DEFAULT_MEMORY_PROMPT, TokenizerError, load_encoding, recall_query
 from .core.outbox import Outbox, QueueError
 from .core.permissions import configuration_accounts, pairs
 from .core.panel import MemoryPanel, PanelError
 from .core.reading import chat_records
+from .core.reference import reference_options
 from .core.reflection import Reflection
-from .core.source import local_runner, native_header, native_login, platform_details, prepare_bot_identity
+from .core.source import inspect_header, local_runner, native_login, platform_details, prepare_bot_identity
 from .core.worker import Worker
+
+
+SKIP_MESSAGES = {
+    "bot_not_confirmed": "机器人未连接或身份未确认",
+    "before_accept_from": "消息早于开通或恢复时间",
+    "quoted_or_reply": "引用或回复消息",
+    "media_or_non_text": "包含媒体或非纯文字内容",
+    "command_prefix": "命令或排除前缀",
+    "unsupported_message": "不支持的消息格式",
+}
 
 
 class HindsightBridge(Star):
@@ -58,6 +69,7 @@ class HindsightBridge(Star):
         self.status = "未配置"
         self.warning_log = WarningLog(logger)
         self.recall_outcomes = {}
+        self.skip_outcomes = {}
         self.background_outcomes = {}
         self.background_sequence = 0
         self.background_sequences = {}
@@ -198,6 +210,7 @@ class HindsightBridge(Star):
                 return
             self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer)
             self.recall_outcomes.clear()
+            self.skip_outcomes.clear()
             self.background_outcomes.clear()
             self.background_sequences.clear()
             self.outbox = Outbox(
@@ -269,6 +282,8 @@ class HindsightBridge(Star):
             accounts = frozenset()
         if self.outbox is not None and accounts != self.outbox.permission_pairs:
             self.outbox.sync_permissions(accounts)
+            self.skip_outcomes = {account: value for account, value in self.skip_outcomes.items()
+                                  if account in accounts}
             self.permissions = accounts
             self.permission_revision += 1
         if self.outbox is not None:
@@ -389,28 +404,111 @@ class HindsightBridge(Star):
             return incoming
         return None
 
-    def source_header(self, event):
+    def source_header(self, event, *, inspect=None):
         getter = getattr(self.context, "get_platform_inst", None)
         adapter = getter(event.get_platform_id()) if getter else None
         if getter and adapter is None:
             return None
-        return native_header(
+        return inspect_header(
             event, Plain, self.context.get_config().get("wake_prefix", []),
-            adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()),
+            adapter=adapter, binding=self.source_accounts.get(event.get_platform_id()), inspect=inspect,
         )
+
+    def excluded_prefix(self, text):
+        prefixes = ("/", *self.config.get("command_prefixes", []))
+        return any(text.lstrip().startswith(prefix) for prefix in prefixes if prefix)
 
     def snapshot(self, event):
         incoming = self.authorized_source(event)
-        if incoming is None:
+        return incoming if incoming is not None and not self.excluded_prefix(incoming.text) else None
+
+    def record_skip(self, event, queue):
+        if self.outbox is not queue or self.stopping or not event.is_private_chat() or event.get_group_id():
+            return
+        account = (event.get_platform_id(), event.get_sender_id())
+        platform = platform_details(event.get_platform_name())
+        if not platform["supported"]:
+            return
+        try:
+            if account not in pairs(self.config.get("allowed_accounts", [])):
+                return
+        except ValueError:
+            return
+        platform_id, user_id = account
+        grant = queue.access.authorization(*account)
+        getter = getattr(self.context, "get_platform_inst", None)
+        binding = self.source_accounts.get(platform_id, {})
+        bot_id = binding.get("bot_id")
+        active_source = Scope(queue.deployment_id, platform["logical_type"], platform_id, bot_id, user_id) if bot_id else None
+        confirmed = (
+            grant and grant["enabled"] and active_source and grant["source_id"] == active_source.id
+            and getter and getter(platform_id) is binding.get("adapter") and binding.get("adapter") is not None
+        )
+        code = None
+        invalid_time = False
+        classify = None
+
+        def inspect(bot, timestamp, received, message_shape):
+            nonlocal code, classify, invalid_time
+            identity = Scope(queue.deployment_id, platform["logical_type"], platform_id, bot, user_id)
+            if (
+                queue.permission_pairs is None or account not in queue.permission_pairs
+                or getter is not None and bot_id != bot
+                or not grant or not grant["enabled"] or grant["source_id"] != identity.id
+            ):
+                return
+            if timestamp is None:
+                code = "unsupported_message"
+                invalid_time = True
+                return
+            incoming = Incoming(platform["logical_type"], platform_id, bot, user_id,
+                                "", timestamp, "", received_at=received)
+            scope = queue.scope_owner(identity.id)
+            if not queue.accepts(incoming) or scope and timestamp < scope["accept_from"]:
+                code = "before_accept_from"
+                return
+            classify = message_shape
+
+        incoming = self.source_header(event, inspect=inspect)
+        if incoming:
+            if incoming.text.split()[:2] == ["/hindsight", "status"] or (
+                getattr(event, "is_at_or_wake_command", False) is True
+                and event.get_message_str().split()[:2] == ["hindsight", "status"]
+            ):
+                return
+        if classify is not None:
+            if incoming and self.excluded_prefix(incoming.text):
+                code = "command_prefix"
+            else:
+                code = classify()
+        if code is None:
+            if confirmed:
+                return
+            code = "bot_not_confirmed"
+        self.skip_outcomes[account] = (grant["revision"] if grant else None, invalid_time, {"code": code, "at": time.time()})
+
+    def skip_status(self, platform, user):
+        if self.outbox is None or self.stopping:
             return None
-        prefixes = ("/", *self.config.get("command_prefixes", []))
-        return incoming if not any(
-            incoming.text.lstrip().startswith(prefix) for prefix in prefixes if prefix
-        ) else None
+        try:
+            if (platform, user) not in pairs(self.config.get("allowed_accounts", [])):
+                return None
+        except ValueError:
+            return None
+        record = self.skip_outcomes.get((platform, user))
+        if record is None:
+            return None
+        revision, invalid_time, outcome = record
+        grant = self.outbox.access.authorization(platform, user)
+        if revision != (grant["revision"] if grant else None):
+            return None
+        message = "消息时间异常，请检查平台和 AstrBot 的时钟" if invalid_time else SKIP_MESSAGES[outcome["code"]]
+        return {**outcome, "message": message}
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
-        if self.outbox is not None and not self.stopping and event not in self.incoming:
+        queue = self.outbox
+        if queue is not None and not self.stopping and event not in self.incoming:
             if event.get_platform_name() == "aiocqhttp":
                 header = self.source_header(event)
                 if (
@@ -418,9 +516,16 @@ class HindsightBridge(Star):
                     and self.source_accounts.get(header.platform_instance_id, {}).get("bot_id") != header.bot_id
                 ):
                     await self.prepare_sources(header.platform_instance_id)
+            if self.outbox is not queue or self.stopping:
+                return
             incoming = self.snapshot(event)
             if incoming:
                 self.incoming[event] = incoming
+                scope = queue.scope_owner(incoming.scope(queue.deployment_id).id)
+                if scope and incoming.timestamp < scope["accept_from"]:
+                    self.record_skip(event, queue)
+            else:
+                self.record_skip(event, queue)
 
     def warning(self, label):
         self.status = label
@@ -475,7 +580,8 @@ class HindsightBridge(Star):
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
 
-    async def recall_text(self, bank, current, history=(), *, timestamp, prefix="", settings=None, delivered=None):
+    async def recall_text(self, bank, current, history=(), *, timestamp, prefix="", settings=None, delivered=None,
+                          recall_budget="mid"):
         if settings is not None and (not settings["types"] or not settings["detail_limit"]):
             delivered["status"] = "filtered" if not settings["types"] else "limit"
             return ""
@@ -493,6 +599,7 @@ class HindsightBridge(Star):
                 stage = "recall"
                 results = await client.recall(
                     bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
+                    budget=settings["recall_budget"] if settings is not None else recall_budget,
                     **({"types": settings["types"]} if settings is not None else {}),
                 )
                 if settings is not None:
@@ -551,6 +658,7 @@ class HindsightBridge(Star):
                         guard.scope["bank"], query, tokens, timestamp=timestamp,
                         timeout=max(0.001, deadline - time.monotonic()),
                         types=guard.settings["types"],
+                        budget=guard.settings["recall_budget"],
                     )
                     rows, excluded = chat_records(rows, guard.scope["bank"], guard.settings)
                     if excluded and not rows:
@@ -691,6 +799,7 @@ class HindsightBridge(Star):
                         or scope["revision"] != turn["revision"]
                         or scope["bank"] != turn["bank"]
                         or self.permission_revision != turn["permission_revision"]
+                        or not self.captures_assistant(scope)
                     ):
                         return
                     rows = await self.conversation_history(event, turn["conversation"])
@@ -700,6 +809,7 @@ class HindsightBridge(Star):
                         not self.allowed(event)
                         or not self.outbox.can_recall(scope)
                         or self.permission_revision != turn["permission_revision"]
+                        or not self.captures_assistant(scope)
                     ):
                         return
                     anchor = self.outbox.history_anchor(
@@ -736,9 +846,19 @@ class HindsightBridge(Star):
         except TimeoutError:
             raise HindsightError("history_timeout") from None
 
-    def freeze_user_capture(self, incoming, scope, conversation, rows):
-        self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
-        return self.outbox.capture(incoming, conversation, history_before=history_boundary(rows))
+    def captures_assistant(self, scope):
+        try:
+            return reference_options(self.outbox, scope)["capture_assistant"]
+        except (QueueError, sqlite3.Error):
+            return False
+
+    def freeze_user_capture(self, incoming, scope, conversation, rows, *, capture_assistant):
+        if capture_assistant:
+            self.record_history(self.outbox.history_anchor(scope["scope_id"], conversation), rows)
+        return self.outbox.capture(
+            incoming, conversation, history_before=history_boundary(rows) if capture_assistant else "",
+            include_assistant_context=capture_assistant,
+        )
 
     def track_assistant_capture(self, event, request, incoming, scope, conversation, capture):
         marker = request_marker()
@@ -840,11 +960,12 @@ class HindsightBridge(Star):
             ):
                 return
             if scope["mode"] == "active":
-                capture = self.freeze_user_capture(incoming, scope, conversation, rows)
+                capture_assistant = self.captures_assistant(scope)
+                capture = self.freeze_user_capture(incoming, scope, conversation, rows, capture_assistant=capture_assistant)
                 if not capture.created:
                     outcome = None
                     return
-                if rows is not None:
+                if capture_assistant and rows is not None:
                     request_prefix = self.track_assistant_capture(event, req, incoming, scope, conversation, capture)
             if read_error is not None:
                 raise read_error
@@ -1191,7 +1312,11 @@ class HindsightBridge(Star):
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
-            yield event.plain_result(f"Hindsight：{self.status}；当前私聊未开放记忆。")
+            skipped = self.skip_status(event.get_platform_id(), event.get_sender_id()) if (
+                event.is_private_chat() and not event.get_group_id()
+            ) else None
+            skip_line = f"\n最近跳过：{skipped['message']}" if skipped else ""
+            yield event.plain_result(f"Hindsight：{self.status}；当前私聊未开放记忆。{skip_line}")
             return
         async with self.using_resources():
             stats = {}
@@ -1255,6 +1380,8 @@ class HindsightBridge(Star):
                 f"{r['id']}（{task_labels.get(r['state'], r['state'])}）"
                 for r in summary["tasks"]
             ) or "无"
+            skipped = self.skip_status(scope["platform_instance_id"], scope["user_id"])
+            skip_line = f"最近跳过：{skipped['message']}\n" if skipped else ""
             yield event.plain_result(
                 f"Hindsight：{connection}\n{runner}；模式：{modes[scope['mode']]}\n"
                 f"恢复检查：{'进行中' if self.outbox.recovering else '完成'}\n"
@@ -1270,6 +1397,7 @@ class HindsightBridge(Star):
                 f"最近保存错误：{self.diagnostic(summary['last_error'])}\n"
                 f"最近记录状态：{self.status}\n"
                 f"最近记忆检索：{recall_description(self.recall_status(scope))}\n"
+                f"{skip_line}"
                 "常用操作：/hindsight help"
             )
 
@@ -1292,7 +1420,8 @@ class HindsightBridge(Star):
                 from .core.materials import utc_timestamp
 
                 result = await self.recall_text(
-                    scope["bank"], query, timestamp=utc_timestamp()
+                    scope["bank"], query, timestamp=utc_timestamp(),
+                    recall_budget=reference_options(self.outbox, scope)["recall_budget"],
                 )
                 await self.prepare_sources()
                 if not self.outbox.can_recall(scope, manual=True) or not self.allowed(
@@ -1523,6 +1652,7 @@ class HindsightBridge(Star):
         self.confirmations.clear()
         await self.panel.close()
         self.incoming.clear()
+        self.skip_outcomes.clear()
         self.source_accounts.clear()
         self.handled.clear()
         self.pending_assistant_captures.clear()

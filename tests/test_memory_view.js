@@ -793,6 +793,52 @@ test("connected service does not hide the user's recall failure", () => {
   assert.match(text, /增加召回等待时间/);
 });
 
+test("the last skip only appears for the selected user's recorded outcome", () => {
+  const context = harness();
+  vm.runInContext(declaration("renderScope"), context);
+  context.data = { config: {}, scopes: [
+    { scope_id: "one", summary: { skip: { code: "quoted_or_reply", at: 1700000000, message: "引用或回复消息" } } },
+    { scope_id: "two", summary: {} },
+  ] };
+  context.scopeId = "one";
+  context.renderScope();
+  assert.equal(context.$("scope-skip-row").hidden, false);
+  assert.match(context.$("scope-skip-status").textContent, /引用或回复消息/);
+  context.scopeId = "two";
+  context.renderScope();
+  assert.equal(context.$("scope-skip-row").hidden, true);
+  assert.equal(context.$("scope-skip-status").textContent, "");
+});
+
+test("chat reference loads legacy defaults and saves independent recall and capture settings", async () => {
+  const context = harness();
+  for (const name of ["loadReferences", "saveReferences"]) vm.runInContext(declaration(name), context);
+  context.data = { config_revision: "config", scopes: [{ scope_id: "one", revision: 2 }] };
+  const draft = { id: "one", revision: 3, scopeRevision: 2, configRevision: "config" };
+  context.referenceDraft = draft;
+  context.endpoint = (name, id) => `${name}/${id}`;
+  const saved = { revision: 3, prompt: "", types: ["world"], exclude_assistant: true, detail_limit: 6, history_limit: 2 };
+  context.bridge = {
+    apiGet: async () => ({ selection: saved, config_revision: "config", scope_revision: 2, prompt_tokens: 0 }),
+    apiPost: async (path, payload) => {
+      assert.equal(path, "references/one");
+      assert.equal(payload.recall_budget, "high");
+      assert.equal(payload.capture_assistant, false);
+      assert.equal(payload.exclude_assistant, true);
+      return { selection: { ...payload, revision: 4 }, prompt_tokens: 0 };
+    },
+  };
+  context.perform = async (button, lock, work) => work();
+  context.refreshBootstrap = async () => {};
+  await context.loadReferences(draft);
+  assert.equal(context.$("reference-budget").value, "mid");
+  assert.equal(context.$("reference-capture-assistant").checked, true);
+  context.$("reference-budget").value = "high";
+  context.$("reference-capture-assistant").checked = false;
+  await context.saveReferences();
+  assert.equal(draft.revision, 4);
+});
+
 test("connection errors retain specific guidance and existing services hide models", () => {
   const context = harness();
   context.data = { config: { managed: false }, status: { connected: false, message: "连接密钥无效，请检查 API Key" }, scopes: [] };

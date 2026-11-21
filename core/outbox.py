@@ -29,6 +29,17 @@ STATES = (
 )
 
 
+def bounded_history(turns):
+    history = []
+    remaining = 4000
+    for turn in reversed(turns):
+        remaining -= sum(len(message.text) for message in turn)
+        if remaining < 0:
+            break
+        history[:0] = turn
+    return tuple(history)
+
+
 @dataclass(frozen=True)
 class Capture:
     task_id: int
@@ -579,6 +590,7 @@ class Outbox:
         conversation_id: str,
         *,
         history_before="",
+        include_assistant_context=True,
     ) -> Capture:
         if (
             not incoming.text.strip()
@@ -653,15 +665,14 @@ class Outbox:
                         )
                     )
                 turns.append(turn)
-            while sum(len(m.text) for turn in turns for m in turn) > 4000:
-                turns.pop(0)
-            history = [message for turn in turns for message in turn]
+            history = bounded_history(turns)
+            retained_history = history if include_assistant_context else bounded_history([turn[:1] for turn in turns])
             current = Message(key, incoming.text, incoming.timestamp)
             payload = retain_payload(
                 identity,
                 scope["generation"],
                 current,
-                tuple(history),
+                retained_history,
                 conversation_id,
                 str(uuid.uuid4()),
                 self.zone,

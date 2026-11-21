@@ -672,6 +672,9 @@ function renderScope() {
   $("retry").disabled = !!unavailable || !!summary.maintenance || !!summary.bank_missing || locks.has("memory");
   $("retry").hidden = $("retry").disabled || !(counts.failed || counts.dead);
   $("scope-recall-status").textContent = recallDescription(summary.recall);
+  $("scope-skip-row").hidden = !summary.skip;
+  $("scope-skip-status").textContent = summary.skip
+    ? `${new Date(summary.skip.at * 1000).toLocaleString()} · ${summary.skip.message}` : "";
   $("maintenance-state").textContent = summary.bank_missing ? "找不到原记忆库，读写已暂停。请恢复原库，或清空旧记忆后重新开始。" : summary.maintenance ? "这个记忆库的插件读写已暂停。" : "";
   $("maintenance-state").hidden = !$("maintenance-state").textContent;
   $("maintenance-view").hidden = !summary.maintenance && !summary.bank_missing;
@@ -745,6 +748,8 @@ async function loadReferences(draft) {
     $("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
     for (const type of ["world", "experience", "observation"]) $("reference-" + type).checked = saved.types.includes(type);
     $("reference-exclude").checked = saved.exclude_assistant;
+    $("reference-capture-assistant").checked = saved.capture_assistant ?? true;
+    $("reference-budget").value = saved.recall_budget ?? "mid";
     $("reference-limit").value = saved.detail_limit;
     $("reference-history").value = saved.history_limit;
   } catch (error) {
@@ -776,6 +781,7 @@ async function saveReferences() {
   const draft = referenceDraft;
   if (!draft?.selection || $("reference-save").disabled || !$("reference-form").reportValidity()) return;
   const payload = { prompt: $("reference-prompt").value, exclude_assistant: $("reference-exclude").checked,
+    capture_assistant: $("reference-capture-assistant").checked, recall_budget: $("reference-budget").value,
     types: ["world", "experience", "observation"].filter((type) => $("reference-" + type).checked),
     detail_limit: $("reference-limit").valueAsNumber, history_limit: $("reference-history").valueAsNumber,
     revision: draft.revision, scope_revision: draft.scopeRevision, config_revision: draft.configRevision };

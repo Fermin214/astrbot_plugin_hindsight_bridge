@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -14,16 +15,109 @@ import threading
 import time
 from urllib.request import ProxyHandler, Request, build_opener
 
+from model_probe import STAGES
 from model_transport import TransportServer, transport_environment
 
 
 MAX_BODY = 256 * 1024
 STOP_TIMEOUT = 75
+PROBE_TIMEOUT = 120
+PROBE_LIMIT = 4096
 OPENER = build_opener(ProxyHandler({}))
+
+PROBE_ERRORS = {
+    "embedding_init": {
+        "embedding_init_failed": "嵌入模型初始化失败，请检查模型配置。",
+    },
+    "embedding_encode": {
+        "embedding_encode_failed": "嵌入模型请求失败，请检查地址、密钥与网络。",
+        "embedding_empty": "嵌入模型返回了空向量。",
+        "embedding_invalid_count": "嵌入模型返回的向量数量不正确。",
+    },
+    "embedding_dim_check": {
+        "embedding_dim_check_failed": "无法校验嵌入模型维数，请检查模型配置。",
+        "embedding_dim_mismatch": "嵌入模型返回的维数与配置不符。",
+        "embedding_non_finite": "嵌入模型返回的向量含无效数值。",
+    },
+    "llm_verify": {
+        "llm_verify_failed": "对话模型连接失败，请检查地址、密钥与网络。",
+    },
+    "rerank_init": {
+        "rerank_init_failed": "重排模型初始化失败，请检查模型配置。",
+    },
+    "rerank_predict": {
+        "rerank_predict_failed": "重排模型请求失败，请检查地址、密钥与网络。",
+        "rerank_invalid_score": "重排模型返回了无效分数。",
+    },
+}
+
+SERVICE_ERRORS = {
+    "probe_failed": "模型连接或应用失败，请检查所选模型的地址、密钥与网络。",
+    "probe_timeout": "模型探测超时，请检查模型服务与网络。",
+    "service_start_timeout": "记忆服务启动超时，请检查数据库是否就绪及容器资源是否充足。",
+    "service_exited": "记忆服务在启动时退出，请检查数据库连接与容器内存限制。",
+}
 
 
 class ConfigurationError(ValueError):
     pass
+
+
+class ApplyError(ConfigurationError):
+    def __init__(self, code, stage=None, last_ok_stage=None):
+        self.diagnostic = {"code": code, "stage": stage, "last_ok_stage": last_ok_stage}
+        super().__init__(PROBE_ERRORS[stage][code] if stage else SERVICE_ERRORS[code])
+
+
+def probe_error(output, returncode):
+    try:
+        report = json.loads(output)
+        if not isinstance(report, dict) or set(report) != {"ok", "stage", "last_ok_stage", "code"}:
+            return ApplyError("probe_failed")
+        ok, stage, last_ok_stage, code = (
+            report["ok"], report["stage"], report["last_ok_stage"], report["code"],
+        )
+        if not isinstance(stage, str) or not isinstance(code, str) or len(output.splitlines()) != 1:
+            return ApplyError("probe_failed")
+        if (ok is True and returncode == 0 and stage == "complete" and code == "ok"
+                and last_ok_stage in ("llm_verify", "rerank_predict")):
+            return None
+        if ok is False and returncode > 0 and code in PROBE_ERRORS.get(stage, {}):
+            position = STAGES.index(stage)
+            if last_ok_stage == (STAGES[position - 1] if position else None):
+                return ApplyError(code, stage, last_ok_stage)
+    except (ValueError, RecursionError):
+        pass
+    return ApplyError("probe_failed")
+
+
+def run_probe(environment):
+    command = [sys.executable, str(Path(__file__).with_name("model_probe.py"))]
+    deadline = time.monotonic() + PROBE_TIMEOUT
+    with subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        try:
+            output = bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while len(output) < PROBE_LIMIT:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise ApplyError("probe_timeout")
+                    chunk = os.read(process.stdout.fileno(), PROBE_LIMIT - len(output))
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                else:
+                    raise ApplyError("probe_failed")
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise ApplyError("probe_timeout") from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+    error = probe_error(output, returncode)
+    if error:
+        raise error
 
 
 def configuration(environment):
@@ -60,6 +154,7 @@ class Runtime:
         self.active = None
         self.applying_fingerprint = ""
         self.last_error = ""
+        self.diagnostic = None
         if embedding_fingerprint and not re.fullmatch(r"[0-9a-f]{64}", embedding_fingerprint):
             raise ConfigurationError("嵌入模型标识无效。")
         self.initial_fingerprint = embedding_fingerprint
@@ -82,6 +177,7 @@ class Runtime:
             "applying": bool(self.applying_fingerprint),
             "applying_fingerprint": self.applying_fingerprint,
             "error": self.last_error,
+            "diagnostic": self.diagnostic,
         }
 
     def fingerprint(self, environment):
@@ -148,11 +244,11 @@ class Runtime:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                break
+                raise ApplyError("service_exited")
             if self.healthy():
                 return
             time.sleep(1)
-        raise ConfigurationError("记忆服务启动失败，请检查服务日志与模型配置。")
+        raise ApplyError("service_start_timeout")
 
     def apply(self, environment):
         candidate = configuration(environment)
@@ -172,11 +268,7 @@ class Runtime:
             try:
                 values, descriptors = self.environment(candidate)
                 self.start_transport(descriptors)
-                subprocess.run(
-                    [sys.executable, str(Path(__file__).with_name("model_probe.py"))],
-                    env=values, check=True, timeout=120,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                run_probe(values)
                 if self.transport:
                     self.transport.shutdown()
                     self.transport.server_close()
@@ -186,12 +278,15 @@ class Runtime:
                 self.wait_ready()
                 self.save(candidate)
                 self.last_error = ""
-            except Exception:
+                self.diagnostic = None
+            except Exception as exc:
+                error = exc if isinstance(exc, ApplyError) else ApplyError("probe_failed")
+                self.last_error = str(error)
+                self.diagnostic = error.diagnostic
                 self.stop()
                 if previous:
                     self.start(previous)
-                self.last_error = "模型连接或应用失败，请检查所选模型的地址、密钥与网络。"
-                raise ConfigurationError(self.last_error) from None
+                raise error from None
             self.applying_fingerprint = ""
             return self.status()
         finally:

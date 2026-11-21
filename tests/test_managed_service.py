@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,127 @@ SPEC = importlib.util.spec_from_file_location("managed_service", DEPLOY / "manag
 service = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(service)
 sys.path.remove(str(DEPLOY))
+
+
+class ProbeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        package = Path(directory.name, "hindsight_api")
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            '''import os
+import sys
+from types import ModuleType, SimpleNamespace
+
+secret = os.environ["HINDSIGHT_API_LLM_API_KEY"]
+failure = os.environ["PROBE_TEST_FAILURE"]
+
+def check(stage):
+    if failure == stage:
+        print(secret)
+        os.write(2, secret.encode())
+        raise RuntimeError(secret)
+
+async def initialize_embedding():
+    check("embedding_init")
+
+async def encode(texts):
+    check("embedding_encode")
+    return {
+        "embedding_empty": [],
+        "embedding_invalid_count": [[1, 2], [1, 2]],
+        "embedding_dim_mismatch": [[1]],
+        "embedding_non_finite": [[1, float("nan")]],
+    }.get(failure, [[1, 2]])
+
+async def verify():
+    check("llm_verify")
+
+async def cleanup():
+    pass
+
+async def initialize_reranker():
+    check("rerank_init")
+
+async def predict(pairs):
+    check("rerank_predict")
+    return [] if failure == "rerank_invalid_score" else [1]
+
+engine = sys.modules["hindsight_api.engine"] = ModuleType("hindsight_api.engine")
+sys.modules["hindsight_api.engine.embeddings"] = SimpleNamespace(
+    create_embeddings_from_env=lambda: SimpleNamespace(initialize=initialize_embedding, encode=encode),
+)
+sys.modules["hindsight_api.engine.llm_wrapper"] = SimpleNamespace(
+    LLMProvider=SimpleNamespace(from_env=lambda: SimpleNamespace(verify_connection=verify, cleanup=cleanup)),
+)
+sys.modules["hindsight_api.engine.cross_encoder"] = SimpleNamespace(
+    create_cross_encoder_from_env=lambda: SimpleNamespace(initialize=initialize_reranker, predict=predict),
+)
+''', encoding="utf-8",
+        )
+        self.environment = {
+            **os.environ, "PYTHONPATH": directory.name, "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS": "2",
+            "HINDSIGHT_API_LLM_API_KEY": "secret-from-provider", "HINDSIGHT_API_RERANKER_PROVIDER": "remote",
+        }
+
+    def test_subprocess_reports_each_stage_and_never_prints_provider_output(self):
+        for failure, stage, previous, code in (
+            ("embedding_init", "embedding_init", None, "embedding_init_failed"),
+            ("embedding_encode", "embedding_encode", "embedding_init", "embedding_encode_failed"),
+            ("embedding_empty", "embedding_encode", "embedding_init", "embedding_empty"),
+            ("embedding_invalid_count", "embedding_encode", "embedding_init", "embedding_invalid_count"),
+            ("embedding_dim_mismatch", "embedding_dim_check", "embedding_encode", "embedding_dim_mismatch"),
+            ("embedding_non_finite", "embedding_dim_check", "embedding_encode", "embedding_non_finite"),
+            ("llm_verify", "llm_verify", "embedding_dim_check", "llm_verify_failed"),
+            ("rerank_init", "rerank_init", "llm_verify", "rerank_init_failed"),
+            ("rerank_predict", "rerank_predict", "rerank_init", "rerank_predict_failed"),
+            ("rerank_invalid_score", "rerank_predict", "rerank_init", "rerank_invalid_score"),
+        ):
+            with self.subTest(failure=failure):
+                result = subprocess.run(
+                    [sys.executable, str(DEPLOY / "model_probe.py")],
+                    env={**self.environment, "PROBE_TEST_FAILURE": failure},
+                    capture_output=True, timeout=5,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, b"")
+                expected = {"ok": False, "stage": stage, "last_ok_stage": previous, "code": code}
+                self.assertEqual(result.stdout.decode(), json.dumps(expected) + "\n")
+                self.assertNotIn(b"secret-from-provider", result.stdout)
+                self.assertEqual(service.probe_error(result.stdout, result.returncode).diagnostic, {
+                    "stage": stage, "last_ok_stage": previous, "code": code,
+                })
+        for provider in ("remote", "rrf"):
+            service.run_probe({
+                **self.environment, "PROBE_TEST_FAILURE": "", "HINDSIGHT_API_RERANKER_PROVIDER": provider,
+            })
+
+    def test_timeout_and_excess_output_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory, "model_probe.py")
+            script.write_text("import time; time.sleep(30)\n", encoding="utf-8")
+            with patch.object(service, "__file__", str(script)), patch.object(service, "PROBE_TIMEOUT", 0.1):
+                with self.assertRaises(service.ApplyError) as raised:
+                    service.run_probe(self.environment)
+                self.assertEqual(raised.exception.diagnostic["code"], "probe_timeout")
+            script.write_text("import os; os.write(1, b'secret' * 1024)\n", encoding="utf-8")
+            with patch.object(service, "__file__", str(script)), self.assertRaises(service.ApplyError) as raised:
+                service.run_probe(self.environment)
+            self.assertEqual(raised.exception.diagnostic["code"], "probe_failed")
+            self.assertNotIn("secret", str(raised.exception))
+
+    def test_parser_drops_unknown_fields_and_codes(self):
+        for output in (
+            b"secret-from-provider",
+            b'{"ok":false,"stage":"llm_verify","last_ok_stage":"embedding_dim_check","code":"secret"}',
+            b'{"ok":false,"stage":"llm_verify","last_ok_stage":"secret","code":"llm_verify_failed"}',
+            b'{"ok":false,"stage":"secret","last_ok_stage":null,"code":"llm_verify_failed"}',
+            b'{"ok":false,"stage":"llm_verify","last_ok_stage":"embedding_dim_check","code":"llm_verify_failed","key":"secret"}',
+        ):
+            error = service.probe_error(output, 1)
+            self.assertEqual(error.diagnostic, {"code": "probe_failed", "stage": None, "last_ok_stage": None})
+            self.assertNotIn("secret", str(error))
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -47,7 +169,7 @@ class ConfigurationTests(unittest.TestCase):
 
             with patch.object(runtime, "start", side_effect=start) as launch, patch.object(runtime, "stop") as stop, \
                     patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), \
-                    patch.object(service.subprocess, "run") as probe:
+                    patch.object(service, "run_probe") as probe:
                 first = runtime.apply(self.environment)
                 self.assertEqual(runtime.apply(dict(reversed(list(self.environment.items())))), first)
                 self.assertEqual((launch.call_count, stop.call_count, probe.call_count), (1, 1, 1))
@@ -112,7 +234,7 @@ class ConfigurationTests(unittest.TestCase):
 
             with patch.object(runtime, "start", side_effect=start), patch.object(runtime, "stop"), \
                     patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), \
-                    patch.object(service.subprocess, "run", side_effect=probe):
+                    patch.object(service, "run_probe", side_effect=probe):
                 worker = threading.Thread(target=lambda: results.append(runtime.apply(self.environment)))
                 worker.start()
                 try:
@@ -136,7 +258,7 @@ class ConfigurationTests(unittest.TestCase):
             def start(candidate):
                 runtime.process = Mock()
                 runtime.process.poll.return_value = None
-            with patch.object(runtime, "start", side_effect=start) as launch, patch.object(runtime, "stop"), patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), patch.object(service.subprocess, "run") as probe:
+            with patch.object(runtime, "start", side_effect=start) as launch, patch.object(runtime, "stop"), patch.object(runtime, "wait_ready"), patch.object(runtime, "healthy", return_value=True), patch.object(service, "run_probe") as probe:
                 runtime.apply(self.environment)
                 saved = (Path(directory) / "models.json").read_bytes()
                 self.assertEqual(runtime.status()["configured"], True)
@@ -150,6 +272,35 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(service.ConfigurationError, "需要迁移"):
                     runtime.apply({**self.environment, "HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS": "3"})
                 self.assertEqual(launch.call_count, calls)
+
+    def test_apply_reports_safe_probing_and_startup_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = service.Runtime(directory, "service-key", "012345abcdef")
+            runtime.process = Mock()
+            missing_vector = service.ApplyError("embedding_empty", "embedding_encode", "embedding_init")
+            with patch.object(runtime, "start"), patch.object(runtime, "stop"), \
+                    patch.object(service, "run_probe") as probe:
+                probe.side_effect = missing_vector
+                with self.assertRaisesRegex(service.ConfigurationError, "空向量"):
+                    runtime.apply(self.environment)
+                self.assertEqual(runtime.status()["diagnostic"], missing_vector.diagnostic)
+                self.assertEqual(runtime.status()["error"], str(missing_vector))
+                probe.side_effect = None
+                for poll, clock, code in (
+                    (1, [0, 1], "service_exited"),
+                    (None, [0, 181], "service_start_timeout"),
+                ):
+                    with patch.object(runtime.process, "poll", return_value=poll), \
+                            patch.object(service.time, "monotonic", side_effect=clock):
+                        with self.assertRaises(service.ApplyError) as raised:
+                            runtime.apply(self.environment)
+                    self.assertEqual(raised.exception.diagnostic["code"], code)
+                    self.assertEqual(runtime.status()["diagnostic"]["code"], code)
+                runtime.process.poll.return_value = None
+                with patch.object(runtime, "healthy", return_value=True):
+                    result = runtime.apply(self.environment)
+                self.assertEqual(result["error"], "")
+                self.assertIsNone(result["diagnostic"])
 
     def test_existing_installation_fingerprint_is_checked_before_first_model_start(self):
         with tempfile.TemporaryDirectory() as directory:
