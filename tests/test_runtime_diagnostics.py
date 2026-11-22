@@ -18,6 +18,7 @@ import httpx
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
+from plugins.astrbot_plugin_hindsight_bridge.core.materials import DEFAULT_MEMORY_PROMPT
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
@@ -224,6 +225,26 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(str(row.url.path).endswith("/memories") and row.method == "POST" for row in self.requests))
         for table in ("events", "outbox", "window", "replies"):
             self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    async def test_request_snapshot_records_actual_prompt_for_automatic_and_on_demand_delivery(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        for mode in ("automatic", "tools"):
+            for prompt in (DEFAULT_MEMORY_PROMPT, "  Custom memory prompt\r\nKeep the original names.  ", ""):
+                with self.subTest(mode=mode, prompt=prompt):
+                    scope = queue.scope(self.incoming)
+                    save_reference_options(queue, scope, **{**reference_options(queue, scope), "prompt": prompt})
+                    event, request = self.turn(f"prompt-{mode}-{len(queue.references.list(scope))}")
+                    with patch.object(plugin.read_tools, "prepare", AsyncMock(return_value={"mode": mode})):
+                        await plugin.add_memory(event, request)
+                    turn = queue.references.list(scope)[0]
+                    delivery = queue.references.detail(scope, turn["id"])["deliveries"][0]
+                    self.assertEqual(delivery["prompt"], prompt)
+                    self.assertEqual(delivery["text"], request.extra_user_content_parts[0].text)
+                    self.assertEqual(delivery["status"], "not_called" if mode == "tools" else "no_match")
+                    if prompt:
+                        self.assertEqual(delivery["text"].count(prompt), 1)
+                    else:
+                        self.assertNotIn(DEFAULT_MEMORY_PROMPT, delivery["text"])
 
     async def test_status_is_short_when_healthy_and_keeps_diagnostics_after_an_error(self):
         plugin = self.plugin

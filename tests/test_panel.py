@@ -15,9 +15,11 @@ from urllib.parse import parse_qs, urlsplit
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
 from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
-from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
@@ -749,6 +751,54 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(state.get(key) for key in (
             "database_password", "api_key", "management_key",
         )))
+
+    async def test_direct_connection_save_and_initialization_probe_new_credentials_once(self):
+        requests, clients = [], []
+
+        async def service(request):
+            invalid = request.headers["Authorization"].startswith("Bearer invalid-")
+            requests.append((str(request.url), invalid))
+            return httpx.Response(401 if invalid else 200, json={"banks": []})
+
+        class TransportClient(HindsightClient):
+            def __init__(self, url, key, *, auth_verified=False):
+                super().__init__(url, key, auth_verified=auth_verified, transport=httpx.MockTransport(service))
+                clients.append(self)
+
+        async def initialize():
+            self.plugin.client = self.panel.new_client(self.config["api_url"], self.config["api_key"])
+            await self.plugin.client.check_connection(force=True)
+            self.panel.remember_auth(self.plugin.client)
+            self.plugin.outbox = SimpleNamespace(
+                recovering=False, list_scopes=lambda: [], connection_error=lambda: "",
+                sync_permissions=Mock(), connection_id=self.config["service_id"],
+            )
+
+        remember = self.panel.remember_auth
+
+        def remembered(client):
+            revision = self.panel.config_revision()
+            remember(client)
+            self.assertEqual(self.panel.config_revision(), revision)
+
+        self.plugin.initialize = AsyncMock(side_effect=initialize)
+        try:
+            with patch.object(module, "HindsightClient", TransportClient), patch.object(self.panel, "remember_auth", side_effect=remembered):
+                for index, updates in enumerate((
+                    {"api_url": "http://new-service:8888", "api_key": self.config["api_key"]},
+                    {"api_url": "http://new-service:8888", "api_key": "rotated-secret"},
+                ), start=1):
+                    with self.subTest(change="address" if index == 1 else "key"):
+                        self.assertTrue((await self.save(**updates))["saved"])
+                        self.assertEqual(sum(invalid for _, invalid in requests), index)
+                        fingerprint = HindsightClient.connection_fingerprint(self.config["api_url"], self.config["api_key"])
+                        self.assertIn(fingerprint, self.panel.state()["auth_fingerprints"])
+                        await self.plugin.client.check_connection(force=True)
+                        await self.plugin.client.check_connection(force=True)
+                        self.assertEqual(sum(invalid for _, invalid in requests), index)
+        finally:
+            for client in clients:
+                await client.close()
 
     async def test_save_lock_covers_inherited_credentials_and_network_check(self):
         entered, release = asyncio.Event(), asyncio.Event()

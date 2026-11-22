@@ -149,7 +149,7 @@ a { color: var(--accent); }
 .footer-end { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-left: auto; }
 .dirty-indicator { display: none; align-items: center; gap: 6px; font-size: 12.5px; color: var(--warning-text); }
 .dirty-indicator::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warning); }
-.card-footer:has(button.primary:enabled) .dirty-indicator { display: inline-flex; }
+.card.is-dirty .dirty-indicator { display: inline-flex; }
 .overview-top { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; }
 .overview-top .hint, #historical-mode { margin-top: 5px; }
 .mode-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex-shrink: 0; gap: 3px; padding: 3px; border-radius: var(--radius-md); background: var(--surface-subtle); }

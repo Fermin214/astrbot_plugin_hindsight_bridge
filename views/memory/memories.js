@@ -188,13 +188,14 @@ export function createMemories(view) {
     ]) : undefined;
     const changed = available && view.referenceDraft && (view.referenceDraft.revision !== scope.reference_revision
       || view.referenceDraft.configRevision !== view.data.config_revision);
-    if (view.referenceDraft?.key !== key || (changed && !view.referenceDraft.dirty)) {
+    if (changed && view.referenceDraft.dirty) view.referenceDraft.conflict = true;
+    if (view.referenceDraft?.key !== key || (changed && !view.referenceDraft.dirty && !view.referenceDraft.conflict)) {
       view.clearReferenceDraft();
       if (available) view.referenceDraft = { key, id: view.scopeId, revision: scope.reference_revision,
         observedRevision: scope.reference_revision, scopeRevision: scope.revision, configRevision: view.data.config_revision };
     }
     const draft = view.referenceDraft;
-    const conflict = changed && draft?.dirty;
+    const conflict = draft?.conflict === true;
     if (draft && draft.observedRevision !== scope.reference_revision) {
       draft.observedRevision = scope.reference_revision;
       view.resetUsage();
@@ -202,6 +203,7 @@ export function createMemories(view) {
     const blocked = !draft?.selection || view.locks.has("memory");
     view.$("reference-fields").disabled = blocked;
     view.$("reference-save").disabled = blocked || !draft.dirty || conflict;
+    view.$("reference-save").closest(".card")?.classList.toggle("is-dirty", !!draft?.dirty);
     view.$("reference-reload").hidden = !(draft?.failed || conflict);
     view.$("usage-open").disabled = !available || view.locks.has("memory");
     if (scope?.reference_error || conflict) {
@@ -416,7 +418,9 @@ export function createMemories(view) {
     const scope = view.data?.scopes.find((item) => item.scope_id === view.scopeId);
     const saved = scope?.reading || { revision: 0, mode: "automatic" };
     const snapshot = JSON.stringify([view.scopeId, scope?.bank, saved.revision, saved.scope_revision, view.data?.config_revision]);
-    if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank || !view.readingDraft.dirty) {
+    if (view.readingDraft?.snapshot !== snapshot && view.readingDraft?.dirty) view.readingDraft.conflict = true;
+    if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank
+      || (!view.readingDraft.dirty && !view.readingDraft.conflict)) {
       if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank) view.$("reading-feedback").hidden = true;
       view.readingDraft = { snapshot, id: view.scopeId, bank: scope?.bank, revision: saved.revision,
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
@@ -426,8 +430,9 @@ export function createMemories(view) {
     const select = view.$("reading-mode");
     select.disabled = !scope || !!scope.pending || !!scope.historical || !!view.data?.status?.recovering
       || !!saved.error || view.locks.has("memory");
-    const conflict = view.readingDraft.snapshot !== snapshot;
+    const conflict = view.readingDraft.conflict === true;
     view.$("reading-save").disabled = select.disabled || conflict || !view.readingDraft.dirty;
+    view.$("reading-save").closest(".card")?.classList.toggle("is-dirty", view.readingDraft.dirty);
     const status = saved.status || {};
     const messages = [];
     if (conflict) messages.push("设置已更新，请刷新页面。");
@@ -463,7 +468,8 @@ export function createMemories(view) {
     const saved = scope?.reflect || { revision: 0, enabled: false, timeout: 12 };
     const snapshot = JSON.stringify([view.scopeId, scope?.bank, saved.revision, saved.scope_revision, view.data?.config_revision]);
     const changedScope = !view.reflectDraft || view.reflectDraft.id !== view.scopeId || view.reflectDraft.bank !== scope?.bank;
-    if (discard || changedScope || !view.reflectDraft.dirty) {
+    if (view.reflectDraft?.snapshot !== snapshot && view.reflectDraft?.dirty) view.reflectDraft.conflict = true;
+    if (discard || changedScope || (!view.reflectDraft.dirty && !view.reflectDraft.conflict)) {
       view.reflectDraft = { snapshot, id: view.scopeId, bank: scope?.bank, revision: saved.revision,
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
       view.$("reflect-enabled").checked = !!saved.enabled;
@@ -471,11 +477,12 @@ export function createMemories(view) {
       view.reflectDraft.baseline = JSON.stringify(view.reflectValues());
       if (discard || changedScope) view.$("reflect-feedback").hidden = true;
     }
-    const conflict = view.reflectDraft.snapshot !== snapshot;
+    const conflict = view.reflectDraft.conflict === true;
     const unavailable = !scope || scope.pending || scope.historical || view.data?.status?.recovering || saved.error || view.locks.has("memory");
     view.$("reflect-enabled").disabled = !!unavailable || (!saved.enabled && !!scope?.summary?.maintenance);
     view.$("reflect-timeout").disabled = !!unavailable;
     view.$("reflect-save").disabled = !!unavailable || conflict || !view.reflectDraft.dirty;
+    view.$("reflect-save").closest(".card")?.classList.toggle("is-dirty", view.reflectDraft.dirty);
     view.$("reflect-conflict").hidden = !conflict;
     const unsupported = saved.enabled && saved.status?.state === "unavailable";
     const messages = [];
@@ -523,7 +530,8 @@ export function createMemories(view) {
     const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
     const snapshot = view.backgroundSnapshot(scope);
     const changedScope = !view.backgroundDraft || view.backgroundDraft.id !== view.scopeId || view.backgroundDraft.bank !== scope?.bank;
-    if (changedScope || (!view.backgroundDraft.dirty && view.backgroundDraft.snapshot !== snapshot)) {
+    if (view.backgroundDraft?.snapshot !== snapshot && view.backgroundDraft?.dirty) view.backgroundDraft.conflict = true;
+    if (changedScope || (!view.backgroundDraft.dirty && !view.backgroundDraft.conflict && view.backgroundDraft.snapshot !== snapshot)) {
       view.backgroundReadRevision++;
       view.backgroundDraft = { snapshot, id: view.scopeId, bank: scope?.bank, page_id: saved.page_id || "", enabled: saved.enabled === true,
         revision: saved.revision, scope_revision: saved.scope_revision, config_revision: view.data?.config_revision,
@@ -536,7 +544,7 @@ export function createMemories(view) {
     const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
     const select = view.$("background-page");
     const draft = view.backgroundDraft;
-    const conflict = draft.snapshot !== snapshot;
+    const conflict = draft.conflict === true;
     const selected = draft.selected;
     select.disabled = !!unavailable || view.locks.has("memory") || (blocked && !saved.enabled);
     const options = [view.option("", "不使用知识页")];
@@ -594,6 +602,7 @@ export function createMemories(view) {
     view.$("background-recheck").disabled = !!blocked || view.backgroundDraft.loading || view.locks.has("memory");
     view.$("background-recheck").textContent = draft.loading ? "刷新中…" : "刷新知识页";
     view.$("background-save").disabled = !!unavailable || view.locks.has("memory") || conflict || !draft.dirty;
+    view.$("background-save").closest(".card")?.classList.toggle("is-dirty", draft.dirty);
     if (view.viewReady && !blocked && !view.backgroundDraft.attempted && !view.locks.has("memory")) void view.loadBackground();
   }
 

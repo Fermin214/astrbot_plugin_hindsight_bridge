@@ -402,8 +402,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                             })
                         if changed:
                             value = json.dumps(result).encode()
-                if state.settings.get("references") and self.path.startswith("/memory/") and self.path.endswith("/recall"):
-                    self.server.record("recall-order", {"ids": [row["id"] for row in json.loads(value)["results"]]})
+                if self.path.startswith("/memory/") and path.endswith("/recall") and self.command == "POST":
+                    recalled = json.loads(value)
+                    self.server.record("recall-response-trace", {"path": path, "request": json.loads(raw), "response": recalled})
+                    if state.settings.get("references"):
+                        self.server.record("recall-order", {"ids": [row["id"] for row in recalled["results"]]})
                 if self.path.startswith("/memory/") and self.path.endswith("/reflect"):
                     self.server.record("reflect-response-trace", {"path": self.path, "response": json.loads(value)})
                     if self.server.drop_reflect:

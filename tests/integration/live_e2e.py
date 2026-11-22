@@ -10,6 +10,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import time
@@ -254,6 +255,103 @@ class Acceptance:
                 return {"items": [], "total": 0}
             assert response.status == 200
             return await response.json()
+
+    async def observation_sources(self, scope):
+        bank = scope["bank"]
+        route = self.prefix + "/scopes/" + scope["scope_id"]
+        source_budget = {"max_tokens": 2048, "max_tokens_per_observation": 256}
+
+        async def native(method, suffix):
+            async with self.session.request(
+                method, self.settings["hindsight_url"] + "/v1/default/banks/" + bank + suffix,
+                headers={"Authorization": "Bearer " + self.settings["memory_key"]},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                value = await response.json()
+                assert response.status == 200, (suffix, response.status, value)
+                return value
+
+        operation = await native("POST", "/consolidate")
+
+        async def completed():
+            value = await native("GET", "/operations/" + operation["operation_id"])
+            assert value["status"] != "failed", value
+            return value if value["status"] == "completed" else None
+
+        await until(completed, timeout=300, label="native observation consolidation")
+        observations = await native("GET", "/memories/list?type=observation&limit=100")
+        assert observations["total"] > 0 and observations["items"], "Native consolidation produced no observation sample"
+        observation_ids = {item["id"] for item in observations["items"]}
+        original = (await self.http("GET", route + "/references"))["selection"]
+
+        async def settings(selection):
+            stored = await self.http("GET", route + "/references")
+            await self.http("POST", route + "/references", payload={
+                **selection, "scope_revision": stored["scope_revision"], "config_revision": stored["config_revision"],
+            })
+
+        await settings({**original, "types": ["observation"], "detail_limit": 12, "exclude_assistant": False})
+        try:
+            traces = len(jsonl("recall-response-trace"))
+            requests = len(self.requests())
+            await self.bot.chat(ALICE, "Summarize my jasmine tea preference and notebook code Cedar-42 from long-term memory. Answer briefly.")
+            turns = (await self.http("GET", route + "/usage"))["turns"]
+            turn = (await self.http("GET", route + "/usage/" + turns[0]["id"]))["turn"]
+            assert turn["message_id"] == str(self.bot.message_id), turn
+            delivery = turn["deliveries"][0]
+            assert delivery["kind"] == "request" and delivery["text"]
+            request = self.requests()[requests]
+            content = next(message["content"] for message in reversed(request["messages"]) if message["role"] == "user")
+            parts = [content] if isinstance(content, str) else [part["text"] for part in content if "text" in part]
+            assert delivery["text"] in parts
+            items = [item for item in delivery["items"] if item["type"] == "observation"]
+            assert items, "Bridge did not deliver a real observation in its persisted request snapshot"
+            recalled = next(trace for trace in jsonl("recall-response-trace")[traces:] if (
+                trace["path"] == "/v1/default/banks/" + bank + "/memories/recall"
+                and trace["request"]["types"] == ["observation"]
+            ))
+            assert recalled["request"]["include"]["source_facts"] == source_budget
+            sources = recalled["response"].get("source_facts") or {}
+            native_items = {item["id"]: item for item in recalled["response"]["results"]}
+            retained = {
+                item["document_id"]: item["metadata"]["role"]
+                for trace in jsonl("retain-trace") if trace["path"] == "/v1/default/banks/" + bank + "/memories"
+                for item in trace["body"]["items"]
+            }
+            samples = []
+            for item in items:
+                assert item["id"] in observation_ids and item["id"] in native_items
+                assert item["text"] == native_items[item["id"]]["text"]
+                assert item["text"].replace("\n", "\n  ") in delivery["text"]
+                if item["source_kind"] not in {"user", "assistant", "mixed"}:
+                    continue
+                linked = item.get("source_fact_ids") or []
+                assert linked and linked == native_items[item["id"]]["source_fact_ids"]
+                roles, documents = set(), []
+                for identity in linked:
+                    assert identity in sources, "Known observation source is absent from the actual source_facts response"
+                    source = sources[identity]
+                    assert source["id"] == identity and source["type"] in {"world", "experience"}
+                    document = source["document_id"]
+                    assert re.fullmatch(r"[au]w1-(?:0|[1-9][0-9]*)-[0-9a-f]{64}", document), source
+                    role = "assistant" if document.startswith("aw1-") else "user"
+                    assert retained.get(document) == role, (document, source)
+                    assert (source.get("metadata") or {}).get("role", role) == role
+                    roles.add(role)
+                    documents.append(document)
+                expected = "mixed" if len(roles) == 2 else next(iter(roles))
+                assert item["source_kind"] == expected, item
+                samples.append({"id": item["id"], "source_kind": expected, "source_document_ids": documents})
+            assert samples, "No persisted observation has known attribution backed by real retained source facts"
+            self.report["measurements"]["native_observation_sources"] = {
+                "operation_id": operation["operation_id"], "native_observation_count": observations["total"],
+                "source_facts_budget": source_budget, "source_facts_returned": len(sources),
+                "source_facts_truncated": recalled["response"].get("source_facts_truncated"), "samples": samples,
+            }
+            self.passed("real_native_consolidation_observation_snapshot_attribution_matches_retained_sources_with_2048_256_budget")
+        finally:
+            await settings(original)
+        await self.drained()
 
     def tasks(self):
         if not self.runtime.exists():
@@ -684,6 +782,7 @@ class Acceptance:
                 assert len(self.tasks()) == outsider_rows
                 self.passed("actual_allowed_user_banks_unauthorized_user_and_group_isolation")
 
+                await self.observation_sources(alice)
                 await self.action(alice["scope_id"], "mode", mode="readonly")
                 await self.control("delay_recall", seconds=6)
                 start = time.monotonic()

@@ -157,7 +157,8 @@ export function createSetup(view) {
   function renderParameters({ discard = false } = {}) {
     const snapshot = view.data?.parameters;
     if (!snapshot) return;
-    if (discard || !view.parameterDraft || !view.parameterDraft.dirty) {
+    if (view.parameterDraft?.revision !== view.data.config_revision && view.parameterDraft?.dirty) view.parameterDraft.conflict = true;
+    if (discard || !view.parameterDraft || (!view.parameterDraft.dirty && !view.parameterDraft.conflict)) {
       view.parameterDraft = { revision: view.data.config_revision, dirty: false };
       for (const key of view.parameterKeys) {
         view.$("memory-" + key).value = key === "command_prefixes"
@@ -166,9 +167,10 @@ export function createSetup(view) {
       view.parameterDraft.baseline = JSON.stringify(view.parameterPayload().parameters);
     }
     view.$("parameters-fields").disabled = view.locks.has("parameters");
-    view.$("parameters-conflict").hidden = view.parameterDraft.revision === view.data.config_revision;
+    view.$("parameters-conflict").hidden = !view.parameterDraft.conflict;
     view.$("save-parameters").disabled = view.locks.has("parameters") || !view.parameterDraft.dirty
-      || view.parameterDraft.revision !== view.data.config_revision || !view.$("parameters-form").checkValidity();
+      || view.parameterDraft.conflict || !view.$("parameters-form").checkValidity();
+    view.$("save-parameters").closest(".card")?.classList.toggle("is-dirty", view.parameterDraft.dirty);
     const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
       service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
     view.$("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
@@ -228,7 +230,7 @@ export function createSetup(view) {
       view.data.parameters = response.parameters;
       view.data.config_revision = response.config_revision;
       view.renderParameters({ discard: true });
-      if (!view.backgroundDraft?.dirty) view.backgroundDraft = null;
+      if (!view.backgroundDraft?.dirty && !view.backgroundDraft?.conflict) view.backgroundDraft = null;
       view.notify("已保存", false, "parameters-feedback");
       await view.refreshBootstrap({ automatic: true, pollMaintenance: false });
     }, "parameters-feedback");

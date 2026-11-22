@@ -471,6 +471,7 @@ class PanelSetup:
                 raise PanelError("设置保存失败，请检查插件数据目录后重试。") from None
             return self.settings_saved()
         self.connection_ready(client.url, key)
+        state = self.state()
         connections = state.setdefault("connections", {})
         if not isinstance(connections, dict) or any(
             not isinstance(address, str) or not isinstance(service, str) or not service

@@ -301,7 +301,92 @@ async def five_cards(page, checks, name):
     await dirty_state(page, "save-parameters", False)
     await page.locator("#tab-memories").click()
     assert await page.locator("details").count() == 0
-    checks.append(name + "_five_cards_business_values_ordered_pages_and_feedback_timers")
+    checks.append(name + "_five_cards_business_values_ordered_pages_conflicts_and_feedback_timers")
+
+
+async def revision_conflicts(page):
+    await page.locator("#reading-mode").select_option("tools")
+    await page.locator("#reference-prompt").fill("冲突中的提示草稿")
+    await page.locator("#reflect-timeout").fill("14")
+    await page.locator("#background-enabled").check()
+    await page.locator("#tab-setup").click()
+    await page.locator("#memory-recall_max_tokens").fill("1203")
+    await page.evaluate("""() => {
+      window.fixtureScope.reading = {...window.fixtureScope.reading, revision: window.fixtureScope.reading.revision + 1, mode: 'tools'};
+      window.fixtureScope.reflect = {...window.fixtureScope.reflect, revision: window.fixtureScope.reflect.revision + 1, timeout: 20};
+      window.fixtureScope.background = {...window.fixtureScope.background, revision: window.fixtureScope.background.revision + 1, enabled: true};
+      window.fixtureReferences.one = {...window.fixtureReferences.one, revision: window.fixtureReferences.one.revision + 1, prompt: '另一页面保存的提示'};
+      window.fixtureScope.reference_revision = window.fixtureReferences.one.revision;
+      window.fixtureParameters.values.recall_max_tokens = 2400;
+      window.fixtureConfigRevision += '-external';
+    }""")
+    bootstraps = await page.evaluate("window.fixtureBootstraps")
+    await page.clock.run_for(5500)
+    await page.wait_for_function("previous => window.fixtureBootstraps > previous", arg=bootstraps)
+    await page.locator("#parameters-conflict").wait_for()
+    await page.locator("#memory-recall_max_tokens").fill("1202")
+    assert await page.locator("#memory-recall_max_tokens").input_value() == "1202"
+    assert await page.locator("#parameters-conflict").is_visible()
+    assert await page.locator("#save-parameters").is_disabled()
+    assert not await page.locator("#parameters-form .dirty-indicator").is_visible()
+    await page.locator("#memory-recall_max_tokens").fill("1203")
+    assert await page.locator("#parameters-form .dirty-indicator").is_visible()
+    assert await page.locator("#save-parameters").is_disabled()
+    await page.locator("#memory-recall_max_tokens").fill("1202")
+    await page.locator("#tab-memories").click()
+    cases = [
+        ("reading-mode", "reading-save", "reading-status", "automatic", "tools"),
+        ("reference-prompt", "reference-save", "reference-feedback", "自定义提示", "冲突中的提示草稿"),
+        ("reflect-timeout", "reflect-save", "reflect-conflict", "13", "14"),
+    ]
+    for field, button, feedback, original, edited in cases:
+        locator = page.locator("#" + field)
+        if field == "reading-mode":
+            await locator.select_option(original)
+        else:
+            await locator.fill(original)
+        assert await locator.input_value() == original
+        await page.locator("#" + feedback).filter(has_text="设置已变化" if field == "reference-prompt" else "设置已更新").wait_for()
+        assert await page.locator("#" + button).is_disabled()
+        card = page.locator(".card").filter(has=page.locator("#" + button))
+        assert not await card.locator(".dirty-indicator").is_visible()
+        if field == "reading-mode":
+            await locator.select_option(edited)
+        else:
+            await locator.fill(edited)
+        assert await card.locator(".dirty-indicator").is_visible()
+        assert await page.locator("#" + button).is_disabled()
+        if field == "reading-mode":
+            await locator.select_option(original)
+        else:
+            await locator.fill(original)
+    await page.locator("#background-enabled").uncheck()
+    assert not await page.locator("#background-enabled").is_checked()
+    await page.locator("#background-status").filter(has_text="设置已更新").wait_for()
+    assert await page.locator("#background-save").is_disabled()
+    card = page.locator(".card").filter(has=page.locator("#background-save"))
+    assert not await card.locator(".dirty-indicator").is_visible()
+    await page.locator("#background-enabled").check()
+    assert await card.locator(".dirty-indicator").is_visible()
+    assert await page.locator("#background-save").is_disabled()
+    await page.locator("#background-enabled").uncheck()
+    bootstraps = await page.evaluate("window.fixtureBootstraps")
+    await page.clock.run_for(5500)
+    await page.wait_for_function("previous => window.fixtureBootstraps > previous", arg=bootstraps)
+    assert await page.locator("#reading-mode").input_value() == "automatic"
+    assert await page.locator("#reference-prompt").input_value() == "自定义提示"
+    assert await page.locator("#reflect-timeout").input_value() == "13"
+    assert not await page.locator("#background-enabled").is_checked()
+    assert await page.locator("#reading-status").is_visible()
+    assert await page.locator("#reference-feedback").is_visible()
+    assert await page.locator("#reflect-conflict").is_visible()
+    assert await page.locator("#background-status").is_visible()
+    await page.reload()
+    await page.locator('#background-page option[value="kp-fixture"]').wait_for(state="attached")
+    assert await page.locator("#reading-mode").input_value() == "automatic"
+    assert await page.locator("#reference-prompt").input_value() == "记忆提示"
+    assert await page.locator("#reflect-timeout").input_value() == "12"
+    assert not await page.locator("#reflect-conflict").is_visible()
 
 
 async def usage_tabs(page, checks, name, size):
@@ -433,6 +518,7 @@ async def main(port):
                 assert await page.evaluate("window.fixtureCalls.length") == 2
                 await five_cards(page, checks, name)
                 await usage_tabs(page, checks, name, size)
+                await revision_conflicts(page)
                 await page.evaluate("window.fixtureRefreshGate = true")
                 await page.locator("#background-recheck").click()
                 await page.wait_for_function("typeof window.fixtureReleaseRefresh === 'function'")

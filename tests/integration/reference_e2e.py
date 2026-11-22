@@ -187,13 +187,23 @@ async def verify(acceptance, page, frame, bank):
     await frame.locator('[data-close="usage-dialog"]').click()
     acceptance.passed("native_31_turns_trim_to_last_30_then_two_then_zero_without_affecting_other_users")
 
-    await settings(history_limit=30, prompt=CUSTOM)
-    await chat("One reference before downgrade.")
+    await settings(
+        history_limit=30, prompt=CUSTOM, types=first["types"],
+        detail_limit=first["detail_limit"], exclude_assistant=first["exclude_assistant"],
+    )
+    reading = await acceptance.http("GET", route + "/reading")
+    await acceptance.http("POST", route + "/reading", payload={
+        "mode": "automatic", "revision": reading["selection"]["revision"],
+        "scope_revision": reading["scope_revision"], "config_revision": reading["config_revision"],
+    })
+    _, candidate_delivery = await chat("Cedar-120 reference before downgrade.")
+    assert candidate_delivery["items"]
     old_timestamp = int(time.time())
     await acceptance.install("baseline-install.zip")
     await acceptance.usable()
     await acceptance.bot.chat(ALICE, "Cedar-120 legacy snapshot before the 0.5 upgrade.")
     legacy_turn = await detail((await turns())[0]["id"])
+    assert str(acceptance.bot.message_id) == legacy_turn["message_id"]
     legacy_delivery = legacy_turn["deliveries"][0]
     assert legacy_delivery["items"] and all(item["id"] in legacy_delivery["text"] for item in legacy_delivery["items"])
     frozen = json.dumps(legacy_turn, ensure_ascii=False)

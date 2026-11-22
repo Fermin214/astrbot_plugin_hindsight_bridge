@@ -305,7 +305,7 @@ class Worker:
             nodes = await self.tree(row, root)
         if not self.outbox.current(row, writing=False):
             return
-        active = any(n["status"] in {"pending", "processing"} for n in nodes.values())
+        active = any(node["status"] not in {"completed", "failed", "cancelled", "not_found"} for node in nodes.values())
         self.outbox.update(
             row["id"],
             "cancel_requested" if active else "cancelled",

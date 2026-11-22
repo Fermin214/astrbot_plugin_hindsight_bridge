@@ -286,6 +286,38 @@ class DurableCore(unittest.IsolatedAsyncioTestCase):
         await self.worker.step()
         self.assertEqual(self.queue.get(capture.task_id)["state"], "done")
 
+    async def test_legacy_cancel_intent_preserves_unknown_parent_and_child_until_terminal(self):
+        for children, user in ((False, "alice"), (True, "bob")):
+            with self.subTest(children=children):
+                capture = self.enqueue(self.incoming(user=user, mid="legacy-cancel"))
+                row = self.queue.get(capture.task_id)
+                operation_id = row["operation_id"]
+                self.service.tree(operation_id, "completed" if children else "checkpointing",
+                                  *(["checkpointing"] if children else []))
+                self.queue.update(capture.task_id, "tracking", accepted=1)
+                self.queue.request_cancel(capture.scope_id, capture.task_id)
+                frozen = dict(self.queue.get(capture.task_id))
+                self.queue.close()
+                self.open()
+                self.worker.outbox = self.queue
+                self.worker.maintenance.outbox = self.queue
+                await self.worker.process(self.queue.claim(self.queue.get(capture.task_id)))
+                kept = self.queue.get(capture.task_id)
+                self.assertEqual(kept["state"], "cancel_requested")
+                self.assertEqual(kept["cancel_intent"], 1)
+                for field in ("payload", "payload_bytes", "payload_sha256", "operation_id"):
+                    self.assertEqual(kept[field], frozen[field])
+                self.assertGreater(kept["payload_bytes"], 0)
+                self.assertLess(kept["next_at"] - kept["updated_at"], 1)
+                self.assertEqual(self.queue.summary(capture.scope_id)["counts"]["cancel_requested"], 1)
+                self.worker.maintenance.begin(capture.scope_id)
+                self.assertFalse((await self.worker.maintenance.status(capture.scope_id))["ready"])
+                self.service.tree(operation_id, "completed", *(["completed"] if children else []))
+                await self.worker.process(self.queue.claim(self.queue.get(capture.task_id)))
+                settled = self.queue.get(capture.task_id)
+                self.assertEqual(settled["state"], "cancelled")
+                self.assertEqual(settled["payload"], "")
+
     async def test_remote_concurrency_is_two_and_one_per_scope(self):
         self.service.pending = True
         captures = [

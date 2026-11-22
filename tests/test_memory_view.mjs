@@ -144,6 +144,83 @@ test("memory settings polling retains drafts and exposes conflicts without chang
   assert.equal(context.parameterDraft.revision, "b");
 });
 
+test("all five cards retain revision conflicts when edited values return to their baseline", async () => {
+  const parameters = parameterHarness();
+  const reading = harness();
+  const reflection = harness();
+  for (const context of [reading, reflection]) {
+    context.scopeId = "one";
+    context.data = { config_revision: "config", status: {}, scopes: [{
+      scope_id: "one", bank: "bank", summary: {},
+      reading: { revision: 1, scope_revision: 1, mode: "automatic" },
+      reflect: { revision: 1, scope_revision: 1, enabled: false, timeout: 12 },
+    }] };
+  }
+  loadFunctions(reading, ["renderReading"]);
+  reading.renderReading();
+  loadFunctions(reflection, ["renderReflect"]);
+  reflection.renderReflect();
+  const background = backgroundHarness();
+  const reference = harness();
+  reference.scopeId = "one";
+  reference.data = { config: {}, config_revision: "config", scopes: [{
+    scope_id: "one", bank: "bank", revision: 1, reference_revision: 0,
+  }] };
+  loadFunctions(reference, ["renderReferences", "loadReferences"]);
+  reference.bridge = { apiGet: async () => ({scope_revision: 1, config_revision: "config", prompt_tokens: 3,
+    prompt_limit: 1024, selection: { revision: 0, prompt: "baseline", types: ["world"],
+      exclude_assistant: false, capture_assistant: true, detail_limit: 12, history_limit: 30 } }) };
+  reference.renderReferences();
+  await reference.loadReferences(reference.referenceDraft);
+  const cards = [
+    { context: parameters, draft: "parameterDraft", render: "renderParameters", edit: "editParameters", feedback: "parameters-conflict",
+      button: "save-parameters", field: "memory-recall_max_tokens", original: "1200", edited: "1300",
+      external: () => { parameters.data.config_revision = "b"; parameters.data.parameters.values.recall_max_tokens = 2000; } },
+    { context: reading, draft: "readingDraft", render: "renderReading", edit: "editReading", feedback: "reading-status",
+      button: "reading-save", field: "reading-mode", original: "automatic", edited: "tools",
+      external: () => { reading.data.scopes[0].reading = { revision: 2, scope_revision: 1, mode: "tools" }; } },
+    { context: reflection, draft: "reflectDraft", render: "renderReflect", edit: "editReflect", feedback: "reflect-conflict",
+      button: "reflect-save", field: "reflect-timeout", original: "12", edited: "13",
+      external: () => { reflection.data.scopes[0].reflect.revision++; reflection.data.scopes[0].reflect.timeout = 20; } },
+    { context: reference, draft: "referenceDraft", render: "renderReferences", edit: "editReferences", feedback: "reference-feedback",
+      button: "reference-save", field: "reference-prompt", original: "baseline", edited: "edited",
+      external: () => { reference.data.scopes[0].reference_revision++; } },
+  ];
+  for (const card of cards) {
+    const { context } = card;
+    const draft = context[card.draft];
+    context.$(card.field).value = card.edited;
+    context[card.edit]({ target: { id: card.field } });
+    assert.equal(draft.dirty, true, card.draft);
+    card.external();
+    context[card.render]();
+    assert.equal(context.$(card.feedback).hidden, false, card.draft);
+    context.$(card.field).value = card.original;
+    context[card.edit]({ target: { id: card.field } });
+    assert.equal(context[card.draft], draft, card.draft);
+    assert.equal(draft.dirty, false, card.draft);
+    assert.equal(context.$(card.field).value, card.original, card.draft);
+    assert.equal(context.$(card.feedback).hidden, false, card.draft);
+    assert.equal(context.$(card.button).disabled, true, card.draft);
+    context[card.render]();
+    assert.equal(context[card.draft], draft, card.draft);
+  }
+  const draft = background.backgroundDraft;
+  background.$("background-enabled").checked = false;
+  background.toggleBackground();
+  background.data.scopes[0].background.revision++;
+  background.data.scopes[0].background.enabled = false;
+  background.renderBackground();
+  assert.equal(background.$("background-status").hidden, false);
+  background.$("background-enabled").checked = true;
+  background.toggleBackground();
+  assert.equal(background.backgroundDraft, draft);
+  assert.equal(draft.dirty, false);
+  assert.equal(draft.enabled, true);
+  assert.equal(background.$("background-status").hidden, false);
+  assert.equal(background.$("background-save").disabled, true);
+});
+
 test("memory parameter saves use an independent payload and acknowledge the returned runtime values", async () => {
   const context = parameterHarness();
   context.$("api-url").value = "http://unsaved-connection";

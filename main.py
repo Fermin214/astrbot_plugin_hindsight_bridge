@@ -1054,8 +1054,9 @@ class HindsightBridge(Star):
                             content = ReferenceBudget(limits["tokens"], limits["chars"], self.client.tokenizer, request_prefix).wrap(
                                 recall_notice(code) if code else "", read_guard.settings["prompt"] if read_guard else "",
                             )
-                            if read_guard and read_guard.settings["prompt"] and content:
-                                delivered["prompt"] = read_guard.settings["prompt"]
+                        if read_guard:
+                            prompt = read_guard.settings["prompt"]
+                            delivered["prompt"] = prompt if content.startswith(prompt) else ""
                         text = request_prefix + content
                         req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
                         if read_guard:
