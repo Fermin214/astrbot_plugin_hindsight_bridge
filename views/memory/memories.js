@@ -284,15 +284,27 @@ export function createMemories(view) {
   function clearUsageDetail() {
     view.$("usage-deliveries").replaceChildren();
     view.$("usage-json").value = "";
-    view.$("usage-json").hidden = true;
+    view.$("usage-text").value = "";
     view.$("usage-copy-json").hidden = true;
-    view.$("usage-feedback").textContent = "";
+    view.clearFeedback("usage-feedback");
+  }
+
+  function activateUsageTab(name, focus = false) {
+    for (const kind of ["content", "text", "json"]) {
+      const tab = view.$(`usage-tab-${kind}`);
+      const selected = kind === name;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      view.$(`usage-panel-${kind}`).hidden = !selected;
+      if (selected && focus) tab.focus();
+    }
   }
 
   function resetUsage() {
     view.usageReadRevision++;
     view.clearUsageDetail();
     view.$("usage-turn").replaceChildren();
+    view.activateUsageTab("content");
     if (view.$("usage-dialog").open) view.$("usage-dialog").close();
   }
 
@@ -309,8 +321,16 @@ export function createMemories(view) {
       const { turns } = await view.bridge.apiGet(view.endpoint("usage", draft.id));
       if (revision !== view.usageReadRevision || view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
       if (!turns.length) { view.notify("暂无使用记录。", false, "usage-feedback"); return; }
-      view.$("usage-turn").replaceChildren(...turns.map((turn) => view.option(turn.id,
-        `${new Date(turn.created_at * 1000).toLocaleString()} · ${turn.conversation_id} · ${turn.message_id}`)));
+      view.$("usage-turn").replaceChildren(...turns.map((turn) => {
+        const summary = turn.summary || {};
+        const labels = [new Date(turn.created_at * 1000).toLocaleString("zh-CN", { year: "numeric", month: "2-digit",
+          day: "2-digit", hour: "2-digit", minute: "2-digit" })];
+        if (summary.pages) labels.push(`${summary.pages} 篇知识页`);
+        if (summary.memories) labels.push(`${summary.memories} 条记忆`);
+        if (summary.tools) labels.push(`${summary.tools} 次工具调用`);
+        if (summary.status === "error") labels.push("读取失败");
+        return view.option(turn.id, labels.join(" · "));
+      }));
       view.$("usage-picker").hidden = false;
       await view.loadUsageTurn();
     } catch (error) {
@@ -328,8 +348,10 @@ export function createMemories(view) {
       const { turn } = await view.bridge.apiGet(view.endpoint(`usage/${encodeURIComponent(turnId)}`, draft.id));
       if (revision !== view.usageReadRevision || view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
       view.$("usage-json").value = JSON.stringify(turn, null, 2);
+      view.$("usage-text").value = turn.deliveries.map((delivery) => delivery.text).filter(Boolean).join("\n\n");
       view.$("usage-copy-json").hidden = false;
       view.$("usage-deliveries").replaceChildren(...turn.deliveries.map((delivery, index) => view.usageDelivery(delivery, index, turn)));
+      view.clearFeedback("usage-feedback");
     } catch (error) {
       if (revision === view.usageReadRevision && view.$("usage-dialog").open) view.notify(view.errorMessage(error), true, "usage-feedback");
     }
@@ -340,33 +362,50 @@ export function createMemories(view) {
       page_sources: "知识页来源", page_history: "知识页版本", reflect: "Reflect" };
     const statuses = { delivered: "已交付", no_match: "无匹配", filtered: "已筛除", duplicate: "条目重复",
       limit: "达到条数或长度上限", error: "读取失败", budget: "额度已用完", not_called: "工具未调用" };
-    const sourceKinds = { user: "用户发言", assistant: "助手发言", mixed: "混合来源", unknown: "来源未知" };
+    const sourceKinds = { user: "用户发言", assistant: "助手回复", mixed: "混合来源", external: "早期/外部记录", unknown: "来源未知" };
     const types = { world: "世界事实", experience: "经历", observation: "观察" };
     const section = view.el("section", "usage-delivery");
     const title = kinds[delivery.kind] || delivery.kind;
     section.append(view.el("h3", "", `${index + 1}. ${title}`));
     const usedTools = delivery.kind === "request" && delivery.status === "not_called" && turn.deliveries.length > 1;
     if (!usedTools) section.append(view.el("p", "", [statuses[delivery.status] || delivery.status, delivery.code].filter(Boolean).join(" · ")));
-    for (const item of delivery.items || []) {
-      const labels = [item.id, types[item.type] || item.type, sourceKinds[item.source_kind] || "来源未知",
-        item.document_id, item.occurred_start, item.occurred_end, item.mentioned_at].filter(Boolean);
-      section.append(view.el("p", "usage-meta", labels.join(" · ")));
+    function card(label, body, labels, id) {
+      const article = view.el("article", "usage-card");
+      const header = view.el("div", "usage-card-header");
+      header.append(view.el("h4", "", label));
+      if (id) {
+        const button = view.el("button", "", "复制 ID");
+        button.type = "button";
+        button.setAttribute("aria-label", `复制${label} ID`);
+        button.addEventListener("click", () => void view.copyValue("usage-copy-value", "ID 已复制。", "usage-feedback", id)
+          .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
+        header.append(button);
+      }
+      article.append(header);
+      if (labels.length) article.append(view.el("p", "usage-meta", labels.filter(Boolean).join(" · ")));
+      if (body) article.append(view.el("div", "usage-body", body));
+      return article;
     }
     for (const page of delivery.pages || []) {
-      section.append(view.el("p", "usage-meta", [page.page_id, page.mental_model_id, page.version, page.last_refreshed_at].filter(Boolean).join(" · ")));
+      const freshness = page.is_stale === true ? "有新记忆待刷新" : page.is_stale === false ? "已是最新" : "";
+      const updated = page.last_refreshed_at ? new Date(page.last_refreshed_at).toLocaleString("zh-CN") : "";
+      section.append(card(page.name || "知识页", page.content ?? page.text ?? "", [freshness, updated], page.page_id));
     }
-    if (delivery.text) {
-      const field = view.el("textarea", "usage-text");
-      field.id = `usage-text-${index}`;
-      field.readOnly = true;
-      field.rows = 5;
-      field.value = delivery.text;
-      field.setAttribute("aria-label", `${title}原文`);
-      const button = view.el("button", "", "复制原文");
-      button.type = "button";
-      button.addEventListener("click", () => void view.copyValue(field.id, "原文已复制。", "usage-feedback", delivery.text)
-        .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
-      section.append(field, button);
+    for (const item of delivery.items || []) {
+      const date = (item.occurred_start || item.mentioned_at || "").slice(0, 10);
+      section.append(card("细节记忆", item.text || "", [types[item.type] || item.type,
+        sourceKinds[item.source_kind] || "来源未知", date], item.id));
+    }
+    if (delivery.kind !== "request") {
+      const labels = Object.entries(delivery.arguments || {}).map(([key, value]) => {
+        const names = { query: "查询", page_id: "知识页", start_line: "起始行", end_line: "结束行",
+          offset: "起点", limit: "条数", version: "版本" };
+        return `${names[key] || key}：${value}`;
+      });
+      section.append(card(title, delivery.items?.length || delivery.pages?.length ? "" : delivery.text,
+        labels, ""));
+    } else if (!delivery.items?.length && !delivery.pages?.length && delivery.text) {
+      section.append(view.el("div", "usage-body", delivery.text));
     }
     return section;
   }
@@ -553,7 +592,8 @@ export function createMemories(view) {
       }
       if (check?.code && check.code !== "background_too_large") row.append(view.el("p", "operation-status error", check.message));
       if (!draft.dirty && saved.enabled && usage) row.append(view.el("span", "page-status", usage.used ? "已使用" : usage.message));
-      if (native?.index_stale === true && draft.enabled) row.append(view.el("span", "page-status", "有新记忆待刷新"));
+      if (typeof native?.index_stale === "boolean" && draft.enabled) row.append(view.el("span", "page-status",
+        native.index_stale ? "有新记忆待刷新" : "已是最新"));
       const actions = view.el("div", "knowledge-page-actions");
       for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
         const button = view.el("button", "", label);
@@ -786,5 +826,5 @@ export function createMemories(view) {
     });
   }
 
-  return { referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { activateUsageTab, referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }

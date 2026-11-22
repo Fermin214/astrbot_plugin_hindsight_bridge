@@ -73,6 +73,7 @@ async def mapped_page(client, bank, page_id, recheck):
         raise HindsightError("background_changed")
     return {
         **page, "mental_model_id": model["id"], "path": selected["path"],
+        **client.cached_page_metadata(bank, page_id, model["id"]),
         "last_refreshed_at": model["last_refreshed_at"],
         "last_refresh_failed_at": model["last_refresh_failed_at"],
         "version": sha256(canonical([page_id, model["id"], page["body"], model["last_refreshed_at"]])),
@@ -93,10 +94,12 @@ def page_excerpt(page, *, start_line=1, version="", **limits):
         raise HindsightError("invalid_read_position", permanent=True)
     result = {
         "page_id": page["id"], "name": page["name"], "version": page["version"],
-        "last_refreshed_at": page["last_refreshed_at"], "freshness": "unknown",
+        "last_refreshed_at": page["last_refreshed_at"],
         "start_line": start_line, "end_line": start_line - 1, "total_lines": len(lines),
         "next_line": start_line, "content": "",
     }
+    if type(page.get("is_stale")) is bool:
+        result["is_stale"] = page["is_stale"]
     for number in range(start_line, len(lines) + 1):
         candidate = {**result, "content": result["content"] + lines[number - 1],
                      "end_line": number, "next_line": number + 1 if number < len(lines) else None}
@@ -182,12 +185,14 @@ def attributed_records(rows, bank, sources, *, strict=False):
                 roles.update(known or {"unknown"})
         elif record.get("type") == "observation":
             roles.add("unknown")
-        if {"user", "assistant"} <= roles:
+        if "unknown" in roles:
+            source_kind = "unknown"
+        elif {"user", "assistant"} <= roles:
             source_kind = "mixed"
         elif len(roles) == 1:
             source_kind = next(iter(roles))
         else:
-            source_kind = "unknown"
+            source_kind = "external" if record.get("type") in {"world", "experience"} and not roles else "unknown"
         record["source_kind"] = source_kind
     return records
 

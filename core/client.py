@@ -117,6 +117,7 @@ class HindsightClient:
         self.auth_lock = asyncio.Lock()
         self.connection = {"connected": None, "code": "", "checked_at": None}
         self.request_sequence = self.connection_sequence = 0
+        self.page_metadata = {}
 
     def next_connection_sequence(self):
         self.request_sequence += 1
@@ -320,7 +321,25 @@ class HindsightClient:
             if len(stack) + len(seen) + len(children) > 500:
                 raise HindsightError("background_index_too_large")
             stack.extend((child, (*parents, name), depth + 1) for child in reversed(children))
+        self.page_metadata = {key: value for key, value in self.page_metadata.items() if key[:3] != (self.url, self.api_key, bank)}
+        expires = time.monotonic() + 30
+        for page in pages:
+            metadata = {"name": page["name"], "path": page["path"]}
+            if type(page["index_stale"]) is bool:
+                metadata["is_stale"] = page["index_stale"]
+            self.page_metadata[(self.url, self.api_key, bank, page["page_id"], page["mental_model_id"])] = (expires, metadata)
         return pages
+
+    def cached_page_metadata(self, bank, page_id, model_id):
+        key = (self.url, self.api_key, bank, page_id, model_id)
+        cached = self.page_metadata.get(key)
+        if cached is None:
+            return {}
+        expires, metadata = cached
+        if expires <= time.monotonic():
+            self.page_metadata.pop(key, None)
+            return {}
+        return dict(metadata)
 
     async def knowledge_page(self, bank, page_id):
         value = await self._background_read(
@@ -350,7 +369,7 @@ class HindsightClient:
             or (value.get("content") is not None and not isinstance(value["content"], str))
         ):
             raise HindsightError("invalid_background_response")
-        result = {"id": model_id, "content": value.get("content") or "", "freshness": "unknown"}
+        result = {"id": model_id, "content": value.get("content") or ""}
         for key in ("last_refreshed_at", "last_memory_seen_at", "last_refresh_failed_at"):
             stamp = value.get(key)
             if stamp is not None:
@@ -430,7 +449,7 @@ class HindsightClient:
                     "query": query, "budget": budget, "max_tokens": max_tokens,
                     "query_timestamp": timestamp,
                     "types": types if types is not None else ["world", "experience", "observation"],
-                    "include": {"source_facts": {"max_tokens": 256, "max_tokens_per_observation": 64}},
+                    "include": {"source_facts": {"max_tokens": 2048, "max_tokens_per_observation": 256}},
                 }, timeout=timeout,
             )
             result = await self.read_bounded(

@@ -96,7 +96,7 @@ export function createDom(view) {
     if (name !== "setup") {
       view.clearCommands();
     }
-    view.document.querySelectorAll('[role="tab"]').forEach((tab) => {
+    view.document.querySelectorAll('[role="tab"][id^="tab-"]').forEach((tab) => {
       const selected = tab.id === `tab-${name}`;
       tab.setAttribute("aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;

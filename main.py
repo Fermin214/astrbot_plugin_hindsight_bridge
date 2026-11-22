@@ -644,6 +644,9 @@ class HindsightBridge(Star):
                         page = await guard.client.background_page(
                             guard.scope["bank"], selected["mental_model_id"],
                         )
+                        page.update(guard.client.cached_page_metadata(
+                            guard.scope["bank"], selected["page_id"], selected["mental_model_id"],
+                        ))
             except (HindsightError, TimeoutError) as exc:
                 code = exc.code if isinstance(exc, HindsightError) else "background_timeout"
             return {"reference": selected, "page": page, "code": code}
@@ -895,17 +898,29 @@ class HindsightBridge(Star):
             outcome = "error" if code else "on_demand" if on_demand else "success" if has_facts else "empty"
             return memory, outcome, code, status
         if on_demand:
-            return self.read_tools.notice(scope), "on_demand", "", None
+            limits = context_limits(self.config)
+            return ReferenceBudget(limits["tokens"], limits["chars"], guard.client.tokenizer, prefix).wrap(
+                self.read_tools.notice(scope), guard.settings["prompt"],
+            ), "on_demand", "", None
         memory = await self.recall_text(
             scope["bank"], incoming.text, history, timestamp=incoming.iso_timestamp, prefix=prefix,
             settings=guard.settings, delivered=delivered,
         )
         return memory, "success" if memory else "empty", "", None
 
-    def record_tool_delivery(self, turn, kind, text, status):
+    def record_tool_delivery(self, turn, kind, text, status, *, arguments=None, delivery=None):
         if turn.snapshot_id:
+            extra = {}
+            if isinstance(delivery, dict):
+                if isinstance(delivery.get("results"), list):
+                    extra["items"] = delivery["results"]
+                if kind == "read_page":
+                    extra["pages"] = [{key: delivery[key] for key in (
+                        "page_id", "mental_model_id", "version", "last_refreshed_at", "name", "is_stale", "content", "text",
+                    ) if key in delivery}]
             turn.guard.queue.references.append(turn.guard.scope, turn.snapshot_id, {
-                "kind": kind, "text": text, "status": status,
+                "kind": kind, "text": text, "status": status, **extra,
+                **({"arguments": arguments} if arguments else {}),
             })
 
     @filter.on_llm_request()
@@ -992,8 +1007,14 @@ class HindsightBridge(Star):
                 if HindsightError(code).authentication:
                     self.outbox.pause_connection(code)
                 self.warning(code)
-            content = memory or ("Hindsight 细节记忆已按设置筛除。" if delivered.get("status") in {"filtered", "limit"}
-                                 else "Hindsight 检索完成，本轮未匹配到相关记忆。")
+            if memory:
+                content = memory
+            else:
+                limits = context_limits(self.config)
+                content = ReferenceBudget(limits["tokens"], limits["chars"], read_guard.client.tokenizer, request_prefix).wrap(
+                    "Hindsight 细节记忆已按设置筛除。" if delivered.get("status") in {"filtered", "limit"}
+                    else "Hindsight 检索完成，本轮未匹配到相关记忆。", read_guard.settings["prompt"],
+                )
             self.status = "运行中"
         except asyncio.CancelledError:
             outcome = None
@@ -1025,10 +1046,10 @@ class HindsightBridge(Star):
                         self.record_recall(scope, outcome, started, code)
                         if not content:
                             delivered.clear()
-                            content = recall_notice(code)
-                        if read_guard and read_guard.settings["prompt"] not in ("", DEFAULT_MEMORY_PROMPT):
-                            delivered["prompt"] = read_guard.settings["prompt"]
-                            content = delivered["prompt"] + "\n\n" + content
+                            limits = context_limits(self.config)
+                            content = ReferenceBudget(limits["tokens"], limits["chars"], self.client.tokenizer, request_prefix).wrap(
+                                recall_notice(code) if code else "", read_guard.settings["prompt"] if read_guard else "",
+                            )
                         text = request_prefix + content
                         req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
                         if read_guard:

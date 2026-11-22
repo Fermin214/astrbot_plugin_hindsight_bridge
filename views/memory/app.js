@@ -145,7 +145,7 @@ export function createApp(view) {
   }
 
   function bindEvents() {
-  const tabs = [...view.document.querySelectorAll('[role="tab"]')];
+  const tabs = [...view.document.querySelectorAll('[role="tab"][id^="tab-"]')];
   tabs.forEach((tab, index) => {
     tab.addEventListener("click", () => view.activateTab(tab.id.slice(4)));
     tab.addEventListener("keydown", (event) => {
@@ -302,9 +302,25 @@ export function createApp(view) {
   view.$("usage-turn").addEventListener("change", () => void view.loadUsageTurn());
   view.$("usage-dialog").addEventListener("close", () => { if (!view.$("usage-dialog").open) view.resetUsage(); });
   view.$("usage-copy-json").addEventListener("click", () => {
-    view.$("usage-json").hidden = false;
-    void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback").then(() => { view.$("usage-json").hidden = true; })
+    void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback")
       .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback"));
+  });
+  view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback")
+    .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
+  const usageTabs = ["content", "text", "json"];
+  usageTabs.forEach((name, index) => {
+    const tab = view.$(`usage-tab-${name}`);
+    tab.addEventListener("click", () => view.activateUsageTab(name));
+    tab.addEventListener("keydown", (event) => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % usageTabs.length;
+      if (event.key === "ArrowLeft") next = (index + usageTabs.length - 1) % usageTabs.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = usageTabs.length - 1;
+      if (next == null) return;
+      event.preventDefault();
+      view.activateUsageTab(usageTabs[next], true);
+    });
   });
   for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", view.editReflect);
   view.$("reflect-save").addEventListener("click", () => void view.saveReflect());

@@ -54,7 +54,7 @@ Bridge 仅通过 AstrBot 的公开钩子/插件接口与 Hindsight 的公开 HTT
 
 `core/background.py` 在控制库 `settings` 中按连接与用户保存已选页面有序 ID 列表（格式 2 最多存 8 个，格式 1 为兼容单页读取）、授权修订、Bank/代次及启用开关，**不缓存页面正文**；页面内容始终在需要时向 Hindsight 实时拉取。
 
-- **预算与并发**：读取前先校验页面预算（`background_max_tokens`，默认 400，64–8192）和共享预算（`recall_max_tokens` 默认 1200，`context_max_chars` 默认 4000）。认证后知识页与 Recall 并发执行，最多 4 路并发拉取；知识页共享 `background_timeout`（默认 1 秒，不超过剩余 `recall_timeout` 的四分之一）。
+- **预算与并发**：请求标记、记忆提示、知识页标头与正文、细节记忆和分隔符共同计入最终交付预算（`recall_max_tokens` 默认 1200，`context_max_chars` 默认 4000），先装提示，再装知识页与细节条目。知识页另受 `background_max_tokens` 限制（默认 400，64–8192）。认证后知识页与 Recall 并发执行，最多 4 路并发拉取；知识页共享 `background_timeout`（默认 1 秒，不超过剩余 `recall_timeout` 的四分之一）。
 - **整页装载**：按用户排列顺序逐篇尝试放入，单篇超限则跳过并继续尝试下一篇，绝不截断正文。拉取时调用单模型 `detail=content` 接口（该接口返回 `is_stale=null`，因此目录的 `index_stale` 标记仅作为独立元数据展示，不代表正文是否已刷新完成）。
 - **防过期守卫**：请求前冻结当前配置、Bank、代次与选项修订，返回后和注入前再次比对，一旦用户切换、撤权、遗忘或修改设置即丢弃在途旧结果。
 

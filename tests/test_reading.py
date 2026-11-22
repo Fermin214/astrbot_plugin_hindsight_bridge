@@ -95,9 +95,46 @@ class ReadContracts(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(excluded, 2)
         self.assertEqual([(row["id"], row["source_kind"]) for row in selected], [
-            ("custom", "unknown"), ("both", "mixed"), ("incomplete", "unknown"),
+            ("custom", "external"), ("both", "mixed"), ("incomplete", "unknown"),
             ("imported", "unknown"), ("unlinked", "unknown"),
         ])
+
+    def test_external_direct_records_do_not_supply_missing_observation_role_evidence(self):
+        rows = [
+            {"id": "legacy", "type": "world", "text": "old", "document_id": "legacy-0104"},
+            {"id": "user", "type": "experience", "text": "user", "document_id": "uw1-0-" + "a" * 64},
+            {"id": "assistant", "type": "experience", "text": "assistant", "document_id": "aw1-12-" + "b" * 64},
+            {"id": "mixed_incomplete", "type": "observation", "text": "mixed", "source_fact_ids": ["user", "assistant", "legacy"]},
+        ]
+        records = reading.attributed_records(rows, "bank", None, strict=True)
+        self.assertEqual([record["source_kind"] for record in records], ["external", "user", "assistant", "unknown"])
+
+    async def test_directory_metadata_is_connection_bank_mapping_bound_and_snapshot_values_are_copied(self):
+        tree = {"roots": [{"id": "kp-1", "kind": "page", "name": "First", "mental_model_id": "mm-1", "is_stale": False, "children": []}]}
+
+        async def service(request):
+            return httpx.Response(200, json=tree)
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+        try:
+            self.assertEqual(client.cached_page_metadata("bank", "kp-1", "mm-1"), {})
+            await client.knowledge_pages("bank")
+            frozen = client.cached_page_metadata("bank", "kp-1", "mm-1")
+            self.assertEqual(frozen, {"name": "First", "path": "First", "is_stale": False})
+            self.assertEqual(client.cached_page_metadata("other-bank", "kp-1", "mm-1"), {})
+            self.assertEqual(client.cached_page_metadata("bank", "kp-1", "mm-2"), {})
+            client.api_key = "changed"
+            self.assertEqual(client.cached_page_metadata("bank", "kp-1", "mm-1"), {})
+            client.api_key = "key"
+            tree["roots"][0].update(name="Renamed", is_stale=True)
+            await client.knowledge_pages("bank")
+            self.assertEqual(frozen["name"], "First")
+            self.assertFalse(frozen["is_stale"])
+            self.assertEqual(client.cached_page_metadata("bank", "kp-1", "mm-1")["name"], "Renamed")
+            with patch.object(time, "monotonic", return_value=time.monotonic() + 31):
+                self.assertEqual(client.cached_page_metadata("bank", "kp-1", "mm-1"), {})
+        finally:
+            await client.close()
 
 
 class RunContext:
@@ -258,6 +295,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
             self.context.get_config = lambda *args: {"agent_runner": {
                 "runner_type": "local", "config": {"model": {"fallback_provider_ids": ["other"]}},
             }}
+            self.context.get_provider_by_id = lambda identifier: None
             self.assertFalse((await self.tools.provider_state(event.unified_msg_origin))[1])
             self.assertFalse(await self.tools.availability(self.scope()))
             self.assertIn("tool_context_unavailable", await self.tools.execute(context, "recall", {"query": "q"}))
@@ -267,6 +305,25 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         await self.tools.prepare(event, self.request, self.incoming, self.scope(), self.request.func_tool)
         self.assertFalse(self.tools.public(self.scope())["observed_available"])
         self.assertNotIn(event, self.tools.tool_turns)
+
+    async def test_all_candidates_must_explicitly_support_tools(self):
+        fallback = SimpleNamespace(provider_config={"id": "fallback", "modalities": ["tool_use"]}, get_model=lambda: "backup")
+        self.context.get_provider_by_id = lambda identifier: fallback if identifier == "backup" else None
+        self.context.get_config = lambda *args: {"agent_runner": {
+            "runner_type": "local", "config": {"model": {"fallback_provider_ids": ["backup"]}},
+        }}
+        event, context = await self.ready()
+        self.plugin.prepare_sources = AsyncMock()
+        self.plugin.client.ensure_auth = AsyncMock()
+        self.assertTrue((await self.tools.provider_state(event.unified_msg_origin))[1])
+        with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "items": []})):
+            self.assertIn("items", json.loads(await self.tools.execute(context, "recall", {"query": "q"})))
+        for modalities in (None, [], ["text"]):
+            fallback.provider_config["modalities"] = modalities
+            self.assertFalse((await self.tools.provider_state(event.unified_msg_origin))[1])
+        fallback.provider_config["modalities"] = ["tool_use"]
+        self.provider.provider_config.pop("modalities")
+        self.assertFalse((await self.tools.provider_state(event.unified_msg_origin))[1])
 
     async def test_native_light_schemas_preserve_request_ownership_and_retire_cached_source_tools(self):
         event, context = await self.ready()

@@ -613,5 +613,5 @@ class SourceAndQuery(unittest.TestCase):
             ]
         )
         self.assertLessEqual(len(block), 4000)
-        self.assertIn("doc", block)
+        self.assertNotIn("document_id", block)
         self.assertIn("2026-10-24", block)
