@@ -29,11 +29,14 @@ MAIN_TABLES = (CONTROL_TABLES | RUNTIME_TABLES | {"history_prompts"}) - {"scopes
 IGNORED = {BACKUP, BACKUP + ".building", "worker.lock", "control.lock"} | {
     name + suffix for name in ("bridge.sqlite3", "bridge.sqlite3.migrating")
     for suffix in ("", "-wal", "-shm")
-}
+} | {name + suffix for name in ("runtime.sqlite3", "control.sqlite3") for suffix in ("-wal", "-shm")}
 
 
 def safe_path(path):
-    if any(path.with_name(path.name + suffix).is_symlink() for suffix in ("", "-wal", "-shm")):
+    if any(
+        candidate.is_symlink() or (os.name == "nt" and candidate.is_dir())
+        for candidate in (path.with_name(path.name + suffix) for suffix in ("", "-wal", "-shm"))
+    ):
         raise QueueError("database_path_invalid")
 
 
