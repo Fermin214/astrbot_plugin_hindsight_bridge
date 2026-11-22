@@ -250,6 +250,17 @@ class Acceptance:
             return value if value["status"]["connected"] and not value["status"]["recovering"] and all(not row["pending"] for row in value["scopes"]) else None
         return await until(ready, timeout=60)
 
+    async def confirm(self, user):
+        state = await self.bootstrap()
+        prepared = await self.http("POST", self.prefix + "/accounts/authorize", payload={
+            "action": "prepare", "platform_instance_id": "delivery-onebot", "user_id": str(user),
+            "config_revision": state["config_revision"],
+        })
+        await self.http("POST", self.prefix + "/accounts/authorize", payload={
+            "action": "confirm", "platform_instance_id": "delivery-onebot", "user_id": str(user),
+            "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
+        })
+
     async def action(self, scope, action, **extra):
         return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={"action": action, **extra})
 
@@ -693,6 +704,8 @@ class Acceptance:
                 await self.install("released-install.zip")
                 configuration = await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"], service_id="delivery-existing-service",
                                                   allowed_accounts=[{"__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(user)} for user in (ALICE, BOB)])
+                for user in (ALICE, BOB):
+                    await self.confirm(user)
                 await self.usable()
                 await self.bot.chat(ALICE, "Remember this: I prefer jasmine tea, and my notebook code is Cedar-42. Reply briefly.")
                 await self.drained()

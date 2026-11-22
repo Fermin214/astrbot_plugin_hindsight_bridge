@@ -126,17 +126,6 @@ class Feedback(Acceptance):
                          if row["user_id"] == str(user) and not row["historical"] and not row["pending"]), None)
         return await until(ready, timeout=30)
 
-    async def confirm(self, user):
-        state = await self.bootstrap()
-        prepared = await self.http("POST", self.prefix + "/accounts/authorize", payload={
-            "action": "prepare", "platform_instance_id": "delivery-onebot", "user_id": str(user),
-            "config_revision": state["config_revision"],
-        })
-        await self.http("POST", self.prefix + "/accounts/authorize", payload={
-            "action": "confirm", "platform_instance_id": "delivery-onebot", "user_id": str(user),
-            "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
-        })
-
     async def page(self, bank, query, *, wait=True):
         value = await self.native("POST", bank + "/knowledge-base/pages", {
             "name": query, "source_query": query, "max_tokens": 8192,

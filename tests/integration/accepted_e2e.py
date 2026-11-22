@@ -71,6 +71,7 @@ class Accepted(Acceptance):
                 await self.install("candidate-install.zip")
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"], service_id="accepted-service",
                                   allowed_accounts=[{"__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(ALICE)}])
+                await self.confirm(ALICE)
                 await self.usable()
                 await self.bot.chat(ALICE, "Remember: my permanent baseline marker is Orchid-18. Reply briefly.")
                 await self.drained()
