@@ -618,7 +618,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         outside = self.directory / "other-plugin"
         outside.mkdir(mode=0o755)
         self.config["control_state_dir"] = str(outside)
-        self.assertEqual(self.plugin.control_directory(), outside)
+        self.assertEqual(self.plugin.control_directory(), outside.resolve())
         self.assertEqual(list(outside.iterdir()), [])
         self.config["control_state_dir"] = "relative"
         await self.plugin.initialize()

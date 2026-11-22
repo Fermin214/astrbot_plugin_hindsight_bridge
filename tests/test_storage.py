@@ -210,6 +210,7 @@ class Migration(unittest.TestCase):
         manifest = json.loads((backup / "manifest.json").read_text())
         self.assertIn("runtime/runtime.sqlite3", manifest["files"])
         self.assertIn("control/control.sqlite3", manifest["files"])
+        self.assertTrue(all("\\" not in name for name in manifest["files"]))
         self.assert_migrated()
 
     def test_missing_mismatch_rollback_and_space_abort_without_new_identity(self):

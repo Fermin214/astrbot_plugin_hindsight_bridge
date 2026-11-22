@@ -101,7 +101,7 @@ def fingerprint(path):
 
 
 def inventory(directory, *, exclude=()):
-    return {str(path.relative_to(directory)): fingerprint(path) for path in directory.rglob("*")
+    return {path.relative_to(directory).as_posix(): fingerprint(path) for path in directory.rglob("*")
             if not set(path.relative_to(directory).parts) & set(exclude)
             and (path.is_file() or path.is_symlink())}
 
