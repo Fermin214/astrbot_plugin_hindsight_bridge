@@ -181,7 +181,8 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.dismiss_host_notice(page)
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
     await frame.locator("#usage-open").click()
-    await frame.locator("#usage-feedback").filter(has_text="暂无使用记录").wait_for()
+    await frame.locator("#usage-deliveries").filter(has_text="暂无使用记录").wait_for()
+    assert await frame.locator("#usage-dialog").evaluate("dialog => dialog.open")
     assert not await frame.locator("#usage-text").input_value() and not await frame.locator("#usage-json").input_value()
     assert await frame.locator("#usage-turn option").count() == 0
     await frame.locator('[data-close="usage-dialog"]').click()
@@ -196,7 +197,7 @@ async def verify(acceptance, page, frame, bank):
         "mode": "automatic", "revision": reading["selection"]["revision"],
         "scope_revision": reading["scope_revision"], "config_revision": reading["config_revision"],
     })
-    _, candidate_delivery = await chat("Cedar-120 reference before downgrade.")
+    _, candidate_delivery = await chat("Cedar-120 reference before reload.")
     assert candidate_delivery["items"]
     old_timestamp = int(time.time())
     await acceptance.install("candidate-upgrade.zip")
