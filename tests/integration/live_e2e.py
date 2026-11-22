@@ -260,6 +260,10 @@ class Acceptance:
             "action": "confirm", "platform_instance_id": "delivery-onebot", "user_id": str(user),
             "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
         })
+        scope = next(row for row in (await self.bootstrap())["scopes"]
+                     if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
+        boundary = database(self.runtime, "SELECT accept_from FROM scopes WHERE scope_id=?", (scope["scope_id"],))[0]["accept_from"]
+        await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
     async def action(self, scope, action, **extra):
         return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={"action": action, **extra})
