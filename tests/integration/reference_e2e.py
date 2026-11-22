@@ -128,7 +128,7 @@ async def verify(acceptance, page, frame, bank):
     assert json.dumps(await detail(legacy["id"]), ensure_ascii=False) == frozen_legacy
     await reference_panel_e2e.verify_clipboard(page, frame, legacy)
     await frame.locator('[data-close="usage-dialog"]').click()
-    acceptance.passed("native_040_snapshots_and_exact_json_stay_frozen_after_page_refresh_and_render_in_four_tabs")
+    acceptance.passed("native_baseline_snapshots_and_exact_json_stay_frozen_after_page_refresh_and_render_in_four_tabs")
     await acceptance.action((await acceptance.scope(BOB))["scope_id"], "mode", mode="readonly")
     await acceptance.bot.chat(BOB, "No memories yet.")
     bob_record = (await turns(bob_route))[0]
@@ -206,7 +206,10 @@ async def verify(acceptance, page, frame, bank):
     legacy_turn = await detail((await turns())[0]["id"])
     assert str(acceptance.bot.message_id) == legacy_turn["message_id"]
     legacy_delivery = legacy_turn["deliveries"][0]
-    assert legacy_delivery["items"] and all(item["id"] in legacy_delivery["text"] for item in legacy_delivery["items"])
+    assert legacy_delivery["items"] and all(
+        item["text"] in legacy_delivery["text"] and item["id"] not in legacy_delivery["text"]
+        for item in legacy_delivery["items"]
+    )
     frozen = json.dumps(legacy_turn, ensure_ascii=False)
     await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
