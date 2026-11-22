@@ -104,6 +104,16 @@ class Accepted(Acceptance):
                     headers={"Authorization": "Bearer " + self.settings["memory_key"]},
                 ) as response:
                     assert response.status == 200
+                async def cancellation_inflight():
+                    local = database(self.runtime, "SELECT state,cancel_intent FROM outbox WHERE id=?", (row["id"],))[0]
+                    nodes = database(self.runtime, "SELECT operation_id,status FROM operations WHERE task_id=?", (row["id"],))
+                    return local if local["state"] == "cancel_requested" and local["cancel_intent"] == 0 and any(
+                        node["operation_id"] == row["operation_id"] and node["status"] == "cancelled" for node in nodes
+                    ) and any(
+                        node["operation_id"] != row["operation_id"] and node["status"] in {"pending", "processing"} for node in nodes
+                    ) else None
+                await until(cancellation_inflight, timeout=30)
+                await self.control("release_extraction")
                 async def cancelled():
                     local = database(self.runtime, "SELECT state,cancel_intent FROM outbox WHERE id=?", (row["id"],))[0]
                     remote = await self.operation(row["bank"], row["operation_id"])
@@ -111,7 +121,6 @@ class Accepted(Acceptance):
                 remote = await until(cancelled, timeout=30)
                 for child in remote.get("child_operations", []):
                     assert (await self.operation(row["bank"], child["operation_id"]))["status"] not in {"pending", "processing"}
-                await self.control("release_extraction")
                 await until(lambda: all(task["state"] in {"done", "cancelled"} for task in self.tasks()), timeout=120)
                 self.assert_single_submission(row)
                 assert "Orchid-18" in json.dumps(await self.memories(scope["bank"]))
