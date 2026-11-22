@@ -218,7 +218,7 @@ class AuthorizationTests(unittest.TestCase):
     def test_mode_receipt_and_control_change_are_atomic_and_replay_is_persistent(self):
         scope = self.authorize()
         source = self.incoming.scope(self.queue.deployment_id)
-        command_event = replace(self.incoming, message_id="pause", text="/hindsight pause")
+        command_event = replace(self.incoming, message_id="pause", text="/hb pause")
         command = self.queue.access.command(command_event, source, scope, "mode", ("paused",))
         self.queue.access.run(
             command, scope, lambda: self.queue.control.set_mode("service", scope["owner_id"], "paused"),
@@ -233,11 +233,11 @@ class AuthorizationTests(unittest.TestCase):
             self.queue.access.command(command_event, source, self.queue.scope(self.incoming), "mode", ("paused",))
         with self.assertRaisesRegex(QueueError, "command_identity_conflict"):
             self.queue.access.command(
-                replace(command_event, text="/hindsight on"), source,
+                replace(command_event, text="/hb on"), source,
                 self.queue.scope(self.incoming), "mode", ("active",),
             )
         receipt = dict(self.queue.access.receipt(command))
-        self.assertNotIn("/hindsight", json.dumps(receipt))
+        self.assertNotIn("/hb", json.dumps(receipt))
 
     def test_failed_atomic_change_does_not_consume_command(self):
         scope = self.authorize()
@@ -345,7 +345,7 @@ class SourceContracts(unittest.TestCase):
         def __init__(self, text):
             self.text = text
 
-    def event(self, text="/hindsight pause"):
+    def event(self, text="/hb pause"):
         raw = {
             "post_type": "message", "message_type": "private", "self_id": 10,
             "user_id": 20, "message_id": 30, "time": 100,
@@ -393,7 +393,7 @@ class SourceContracts(unittest.TestCase):
         event.get_message_str = lambda: "hindsight pause"
         event.is_at_or_wake_command = True
         self.assertIsNone(native_header(event, self.Plain))
-        self.assertEqual(native_header(event, self.Plain, ["/"]).text, "/hindsight pause")
+        self.assertEqual(native_header(event, self.Plain, ["/"]).text, "/hb pause")
         self.assertIsNone(native_header(event, self.Plain, ["!"]))
 
     def test_new_materials_keep_platform_time_provenance_and_assistant_observation(self):

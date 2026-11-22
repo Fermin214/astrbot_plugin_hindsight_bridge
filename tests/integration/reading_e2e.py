@@ -118,8 +118,8 @@ async def verify_assistant_capture(acceptance, frame):
         acceptance.passed("panel_budget_reaches_native_recall_and_capture_switch_controls_retain_roles")
 
         start = len(acceptance.tasks())
-        await acceptance.bot.chat(ALICE, "/hindsight help")
-        status = await acceptance.bot.chat(ALICE, "/hindsight status")
+        await acceptance.bot.chat(ALICE, (await acceptance.command_prefix()) + " help")
+        status = await acceptance.bot.chat(ALICE, (await acceptance.command_prefix()) + " status")
         assert "最近跳过：命令或排除前缀" in status, status
         assert len(acceptance.tasks()) == start
         await frame.locator("#scope-skip-row").wait_for(state="visible", timeout=15000)

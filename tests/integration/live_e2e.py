@@ -228,6 +228,11 @@ class Acceptance:
             form.add_field("file", file, filename=filename, content_type="application/zip")
             await self.http("POST", "/api/v1/plugins/install/upload", form=form)
 
+    async def command_prefix(self):
+        plugin = await self.http("GET", "/api/v1/plugins/by-id?plugin_id=" + NAME)
+        version = plugin["version"].removeprefix("v").split(".")
+        return "/hb" if tuple(int(part) for part in version[:2]) >= (0, 5) else "/hindsight"
+
     async def config(self, **updates):
         value = await self.http("GET", "/api/v1/plugins/config?plugin_id=" + NAME)
         if updates:

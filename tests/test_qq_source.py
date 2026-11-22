@@ -188,11 +188,11 @@ class QQSourceTests(unittest.TestCase):
                 self.assertIsNone(self.header(self.event(timestamp=value)))
 
     def test_commands_keep_raw_prefix_after_native_wake_stripping(self):
-        event = self.event("/hindsight status")
+        event = self.event("/hb status")
         event.get_message_str = lambda: "hindsight status"
         self.assertIsNone(self.header(event, ["/"]))
         event.is_at_or_wake_command = True
-        self.assertEqual(self.header(event, ["/"]).text, "/hindsight status")
+        self.assertEqual(self.header(event, ["/"]).text, "/hb status")
         self.assertIsNone(self.header(event, ["!"]))
 
     def test_sdk_type_and_original_identifiers_are_required(self):

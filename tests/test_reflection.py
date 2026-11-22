@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import sqlite3
 import tempfile
+import time
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,6 +199,35 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*list(self.plugin.reflection.tasks))
         self.assertFalse(self.plugin.reflection.tasks)
         self.assertEqual(self.plugin.hooks, 0)
+
+    async def test_resume_preserves_reflect_and_reopens_only_after_platform_second_boundary(self):
+        _, _, scope = await self.ready()
+        queue = self.plugin.outbox
+        queue.set_mode(scope["scope_id"], "readonly", now=int(time.time()))
+        self.plugin.client.list_operations = AsyncMock(return_value=[])
+        maintenance = Maintenance(queue, self.plugin.client)
+        maintenance.begin(scope["scope_id"])
+        resumed_at = int(time.time()) + 4.25
+        with unittest.mock.patch("plugins.astrbot_plugin_hindsight_bridge.core.control.time.time", return_value=resumed_at):
+            await maintenance.resume(scope["scope_id"])
+        current = queue.scope_owner(scope["scope_id"])
+        boundary = current["accept_from"]
+        self.assertGreater(boundary, resumed_at)
+        self.assertTrue(read_options(queue, current)["enabled"])
+        shared = reading_tests.ToolSet(list(self.tools.owned.values()))
+        for accepted in (False, True):
+            event, request = self.turn("after-resume-" + str(accepted))
+            self.incoming = replace(self.incoming, timestamp=boundary if accepted else boundary - 1,
+                                    received_at=boundary + 0.1 if accepted else resumed_at + 0.1)
+            self.plugin.incoming[event] = self.incoming
+            request.model, request.func_tool = None, shared
+            await self.plugin.add_memory(event, request)
+            self.assertEqual(REFLECT_NAME in {tool.name for tool in request.func_tool.tools}, accepted)
+            self.assertIn(REFLECT_NAME, {tool.name for tool in shared.tools})
+            self.assertTrue(read_options(queue, queue.scope_owner(scope["scope_id"]))["enabled"])
+            if not accepted:
+                outcome = self.plugin.recall_outcomes[(queue.connection_id, scope["owner_id"])]
+                self.assertEqual(outcome["code"], "message_before_accept_from")
 
     async def test_forget_deletes_without_waiting_for_reflect_and_drops_old_response(self):
         _, context, scope = await self.ready()

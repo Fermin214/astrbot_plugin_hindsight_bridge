@@ -69,12 +69,12 @@
 
 | 想做什么 | 私聊命令 |
 | --- | --- |
-| 查看命令说明 | `/hindsight help` |
-| 查看状态与错误诊断 | `/hindsight status` |
-| 切为只读（停止保存，继续召回） | `/hindsight readonly` |
-| 暂停（停止保存与自动召回） | `/hindsight pause` |
-| 恢复读写 | `/hindsight on` |
-| 清空个人记忆 | `/hindsight forget`，按提示发送确认码 |
+| 查看命令说明 | `/hb help` |
+| 查看状态与错误诊断 | `/hb status` |
+| 切为只读（停止保存，继续召回） | `/hb readonly` |
+| 暂停（停止保存与自动召回） | `/hb pause` |
+| 恢复读写 | `/hb on` |
+| 清空个人记忆 | `/hb forget`，按提示发送确认码 |
 
 0.5.0 退休 `correct/view/show/export/recall/background/retry/cancel`。交付内容、选页和重试使用插件面板；浏览、检索、修改与导出使用 Hindsight Control Plane。不再提供单项任务私聊取消，清空仍作废积压并删除个人 Bank。
 

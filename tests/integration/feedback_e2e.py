@@ -52,7 +52,7 @@ class Feedback(Acceptance):
     async def plugin_descriptions(self, page):
         detail = await self.http("GET", "/api/v1/plugins/by-id?plugin_id=" + NAME)
         components = detail["components"]
-        group = next(component for component in components if component.get("name") == "hindsight")
+        group = next(component for component in components if component.get("name") == "hb")
         commands = group.get("subcommands", [])
         assert {command["name"] for command in commands} == {"help", "status", "on", "readonly", "pause", "forget"}
         descriptions = [group, *commands, *(component for component in components if component.get("type") in {"hook", "listener"})]
@@ -64,7 +64,7 @@ class Feedback(Acceptance):
         await self.dismiss_host_notice(page)
         await page.locator("#plugin-components .handler-row__desc").first.wait_for(timeout=30000)
         command_group = page.locator("#plugin-components tr.command-row--group").filter(
-            has=page.locator("code").filter(has_text=re.compile(r"^hindsight$")),
+            has=page.locator("code").filter(has_text=re.compile(r"^hb$")),
         )
         await command_group.locator("button.command-cell__toggle").click()
         child_rows = page.locator("#plugin-components tr.command-row--sub")
@@ -88,7 +88,7 @@ class Feedback(Acceptance):
         await self.bot.close()
         self.bot = OneBot(self.session, {**self.settings, "bot_id": old_bot + 1})
         await self.bot.connect()
-        await self.bot.chat(ALICE, "/hindsight status")
+        await self.bot.chat(ALICE, (await self.command_prefix()) + " status")
         await self.confirm(ALICE)
         current = await self.scope()
         assert current["bot_id"] == str(old_bot + 1) and current["bank"] != old_scope["bank"]
@@ -163,7 +163,7 @@ class Feedback(Acceptance):
         await self.control("start_astrbot")
         self.bot = OneBot(self.session, self.settings)
         await self.bot.connect()
-        await self.bot.chat(ALICE, "/hindsight status")
+        await self.bot.chat(ALICE, (await self.command_prefix()) + " status")
         await self.usable()
 
     async def single_page(self, page, frame, bank, short):

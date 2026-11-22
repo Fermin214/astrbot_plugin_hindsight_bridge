@@ -61,7 +61,7 @@ WebSocket 与 Webhook 两种方式的登录、验签和收发均由 AstrBot 原�
 
 Dify、Coze、百炼、DeerFlow 等外部执行器，以及 AstrBot WebChat 和其他未列出平台，暂未接入自动记录与记忆召回。
 
-使用 `/hindsight export` 导出文件时，若 AstrBot 与 OneBot 运行在不同容器，需配好 `callback_api_base` 或共享路径，见 [导出文件失败的处理](INSTALL.md#导出-json-文件失败)。
+记忆交付内容可在插件面板「使用记录」查看和复制；记忆浏览、修改和导出通过 Hindsight Control Plane。
 
 ## 默认额度与限制
 
@@ -70,7 +70,6 @@ Dify、Coze、百炼、DeerFlow 等外部执行器，以及 AstrBot WebChat 和�
 | 单条对话材料 | 最多 8,000 个字符 |
 | 单次带入模型的记忆 | 默认 1,200 token / 4,000 字符（检索超时默认 10 秒，可在面板调至 0.2–30 秒） |
 | 本地待保存队列 | 默认最多 10,000 条、正文总量 64 MiB（超出后暂停收新，排空后恢复） |
-| 单次 `/hindsight export` | 最多 10,000 条记忆、文件上限 8 MiB |
 
 ## 相关文档
 

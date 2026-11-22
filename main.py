@@ -114,7 +114,7 @@ class HindsightBridge(Star):
             "reference_history_unavailable": "无法读取或保存使用记录，请检查插件数据目录权限与剩余空间",
             "accepted_operation_missing": "Hindsight 找不到已接收的记录，请管理员检查服务恢复时使用的备份",
             "payload_digest_conflict": "待保存内容校验失败，请管理员检查插件本地数据库",
-            "scope_not_active": "请先用 /hindsight on 开启记忆",
+            "scope_not_active": "请先用 /hb on 开启记忆",
             "scope_not_available": "这个用户的记忆正在恢复或设置已变化，请稍后重试",
             "bank_missing": "找不到原记忆库，记忆功能已暂停；请管理员恢复原库并恢复原记忆模式，或清空旧记忆后重新开始",
             "maintenance_active": "保存和记忆查询已暂停。请管理员在插件页查看进度，完成操作后点击「解除读写暂停」",
@@ -478,9 +478,9 @@ class HindsightBridge(Star):
 
         incoming = self.source_header(event, inspect=inspect)
         if incoming:
-            if incoming.text.split()[:2] == ["/hindsight", "status"] or (
+            if incoming.text.split()[:2] == ["/hb", "status"] or (
                 getattr(event, "is_at_or_wake_command", False) is True
-                and event.get_message_str().split()[:2] == ["hindsight", "status"]
+                and event.get_message_str().split()[:2] == ["hb", "status"]
             ):
                 return
         if classify is not None:
@@ -1090,8 +1090,8 @@ class HindsightBridge(Star):
             if not self.hooks:
                 self.idle.set()
 
-    @filter.command_group("hindsight")
-    def hindsight(self):
+    @filter.command_group("hb")
+    def hb(self):
         """查看记忆状态、切换读写模式或清空个人记忆。"""
 
     def command_scope(self, event):
@@ -1145,11 +1145,11 @@ class HindsightBridge(Star):
             return self.diagnostic("maintenance_active")
         return self.diagnostic("scope_not_available")
 
-    @hindsight.command("help")
+    @hb.command("help")
     async def memory_help(self, event: AstrMessageEvent):
         """查看六个记忆命令及常用操作入口。"""
         yield event.plain_result(
-            "正常聊天即可保存和查找长期记忆。命令前缀：/hindsight\n"
+            "正常聊天即可保存和查找长期记忆。命令前缀：/hb\n"
             "status：查看连接、模式和保存进度\n"
             "help：查看命令说明\n"
             "on：读写记忆；readonly：只读记忆\n"
@@ -1165,7 +1165,7 @@ class HindsightBridge(Star):
             return exc.code
         return "timeout" if isinstance(exc, TimeoutError) else str(exc)
 
-    @hindsight.command("status")
+    @hb.command("status")
     async def memory_status(self, event: AstrMessageEvent):
         """查看记忆服务连接、读写模式和保存进度。"""
         await self.prepare_sources()
@@ -1266,7 +1266,7 @@ class HindsightBridge(Star):
                 )
             if skipped:
                 lines.append(f"最近跳过：{skipped['message']}")
-            lines.append("常用操作：/hindsight help")
+            lines.append("常用操作：/hb help")
             yield event.plain_result("\n".join(lines))
 
     async def mode(self, event, mode):
@@ -1307,22 +1307,22 @@ class HindsightBridge(Star):
             "paused": "记忆已暂停：不再记录新消息或自动查找记忆；尚未发送的记录等重新开启后再保存。",
         }[mode]
 
-    @hindsight.command("on")
+    @hb.command("on")
     async def memory_on(self, event: AstrMessageEvent):
         """开启读写记忆，保存新对话并自动召回。"""
         yield event.plain_result(await self.mode(event, "active"))
 
-    @hindsight.command("readonly")
+    @hb.command("readonly")
     async def memory_readonly(self, event: AstrMessageEvent):
         """只召回已有记忆，不保存新对话。"""
         yield event.plain_result(await self.mode(event, "readonly"))
 
-    @hindsight.command("pause")
+    @hb.command("pause")
     async def memory_pause(self, event: AstrMessageEvent):
         """暂停记忆读写，正常聊天继续。"""
         yield event.plain_result(await self.mode(event, "paused"))
 
-    @hindsight.command("forget")
+    @hb.command("forget")
     async def memory_forget(self, event: AstrMessageEvent, confirmation: str = ""):
         """二次确认后清空个人全部长期记忆。"""
         await self.prepare_sources()
@@ -1385,7 +1385,7 @@ class HindsightBridge(Star):
                     "将删除这个用户在 Hindsight 中的全部记忆、知识页及其历史、用于生成记忆的聊天内容，"
                     "以及插件中尚未保存的记录，无法撤销。AstrBot 聊天记录、工具历史和日志保留。"
                     "如果其他账号共用此记忆库，它们的记忆也会一起清空。\n"
-                    f"确认请在 120 秒内发送：/hindsight forget {token}"
+                    f"确认请在 120 秒内发送：/hb forget {token}"
                 )
                 return
             previous = self.confirmations.pop(key, None)
@@ -1400,7 +1400,7 @@ class HindsightBridge(Star):
                     event.get_platform_id(), event.get_sender_id(),
                 )["revision"]
             ):
-                yield event.plain_result("确认码失效，请重新发送 /hindsight forget。")
+                yield event.plain_result("确认码失效，请重新发送 /hb forget。")
                 return
             try:
                 command = self.prepare_command(event, scope, "forget", (sha256(confirmation),))
@@ -1411,7 +1411,7 @@ class HindsightBridge(Star):
                 self.worker.wake.set()
                 yield event.plain_result(
                     "正在清空旧记忆，记忆功能已暂停。"
-                    "用 /hindsight status 查看进度；清理完成后发送 /hindsight on，开始记录新记忆。"
+                    "用 /hb status 查看进度；清理完成后发送 /hb on，开始记录新记忆。"
                 )
             except (QueueError, OSError, sqlite3.DatabaseError) as exc:
                 self.warning(

@@ -98,12 +98,15 @@ class Accepted(Acceptance):
                 self.passed("real_backend_stop_after_acceptance_recovers_without_duplicate_submission")
 
                 row = await self.held_task("Remember: the cancellable work marker is Elm-45. Reply briefly.")
-                answer = await self.bot.chat(ALICE, "/hindsight cancel " + str(row["id"]))
-                assert str(row["id"]) in answer
+                async with self.session.delete(
+                    self.settings["hindsight_url"] + "/v1/default/banks/" + row["bank"] + "/operations/" + row["operation_id"],
+                    headers={"Authorization": "Bearer " + self.settings["memory_key"]},
+                ) as response:
+                    assert response.status == 200
                 async def cancelled():
                     local = database(self.runtime, "SELECT state,cancel_intent FROM outbox WHERE id=?", (row["id"],))[0]
                     remote = await self.operation(row["bank"], row["operation_id"])
-                    return remote if local["state"] == "cancelled" and local["cancel_intent"] == 1 and remote["status"] == "cancelled" else None
+                    return remote if local["state"] == "cancelled" and local["cancel_intent"] == 0 and remote["status"] == "cancelled" else None
                 remote = await until(cancelled, timeout=30)
                 for child in remote.get("child_operations", []):
                     assert (await self.operation(row["bank"], child["operation_id"]))["status"] not in {"pending", "processing"}
@@ -111,7 +114,7 @@ class Accepted(Acceptance):
                 await until(lambda: all(task["state"] in {"done", "cancelled"} for task in self.tasks()), timeout=120)
                 self.assert_single_submission(row)
                 assert "Orchid-18" in json.dumps(await self.memories(scope["bank"]))
-                self.passed("actual_cancel_command_cancels_real_operation_tree_and_keeps_existing_memories")
+                self.passed("native_control_plane_cancel_is_tracked_without_local_cancel_intent_and_keeps_existing_memories")
 
                 row = await self.held_task("Remember: the late-write marker after forget is Aspen-54. Reply briefly.")
                 await self.control("hold_cleanup")

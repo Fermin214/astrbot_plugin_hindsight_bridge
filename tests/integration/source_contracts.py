@@ -62,11 +62,11 @@ async def main():
     )
     with patch.dict(host.get_client()._wsr_api_clients, {"1001": object(), "1002": object()}):
         assert await prepare_bot_identity(context, "fixture") == ""
-    command_event = await event(host, "/hindsight pause", mid=2)
-    command_event.message_str = "hindsight pause"
+    command_event = await event(host, "/hb pause", mid=2)
+    command_event.message_str = "hb pause"
     command_event.is_at_or_wake_command = True
     header = native_header(command_event, Plain, ["/"])
-    assert header and header.text == "/hindsight pause"
+    assert header and header.text == "/hb pause"
     other_host = adapter("fixture")
     assert native_header(old, Plain, adapter=other_host) is None
     with tempfile.TemporaryDirectory() as temporary:
@@ -109,10 +109,10 @@ async def main():
             after_grant_event = await event(host, "new authorized", mid=4)
             after_grant = bridge.snapshot(after_grant_event)
             assert after_grant.received_at == after_grant_event.created_at
-            command_event = await event(host, "/hindsight pause", mid=5)
-            command_event.message_str = "hindsight pause"
+            command_event = await event(host, "/hb pause", mid=5)
+            command_event.message_str = "hb pause"
             command_event.is_at_or_wake_command = True
-            assert bridge.authorized_source(command_event).text == "/hindsight pause"
+            assert bridge.authorized_source(command_event).text == "/hb pause"
             assert bridge.snapshot(command_event) is None
             capture = queue.capture(after_grant, "conversation")
             duplicate = queue.capture(bridge.snapshot(after_grant_event), "conversation")
@@ -145,10 +145,10 @@ async def main():
             with patch.object(time, "time", return_value=baseline + 0.2):
                 older = await event(host, "queued before control", mid=20)
                 older.message_obj.raw_message["time"] = int(baseline) + 3
-                older_command = await event(host, "/hindsight pause", mid=21)
+                older_command = await event(host, "/hb pause", mid=21)
                 older_command.message_obj.raw_message["time"] = int(baseline) + 3
             with patch.object(time, "time", return_value=baseline + 0.3):
-                newer = await event(host, "/hindsight on", mid=22)
+                newer = await event(host, "/hb on", mid=22)
                 newer.message_obj.raw_message["time"] = int(baseline) + 2
             with patch.object(time, "time", return_value=baseline - 0.1):
                 header = native_header(newer, Plain)
@@ -181,7 +181,7 @@ async def main():
         try:
             queue.sync_permissions([("fixture", "2001")])
             queue.activate(incoming, queue.access.authorization("fixture", "2001")["revision"])
-            queued_command = native_header(await event(host, "/hindsight on", mid=10), Plain)
+            queued_command = native_header(await event(host, "/hb on", mid=10), Plain)
             queued_message = native_header(await event(host, "queued text", mid=11), Plain, adapter=host)
             scope = queue.scope(queued_command)
             prepared = queue.access.command(

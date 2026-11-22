@@ -51,7 +51,7 @@ async def verify_advanced(acceptance, frame):
         query = jsonl("recall-trace")[-1]["body"]["query"]
         assert len(tiktoken.get_encoding("cl100k_base").encode(query, disallowed_special=())) <= 32
     await acceptance.bot.chat(ALICE, "HB-IGNORE: this synthetic message must never become a saved material.")
-    await acceptance.bot.chat(ALICE, "/hindsight status")
+    await acceptance.bot.chat(ALICE, (await acceptance.command_prefix()) + " status")
     assert "Hindsight 知识页" not in acceptance.latest_wire()
     await acceptance.drained()
     assert "HB-IGNORE:" not in json.dumps(database(acceptance.runtime, "SELECT payload FROM outbox"))

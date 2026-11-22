@@ -210,10 +210,10 @@ async def main(output):
             {"type": 1, "text_item": {"text": " second "}},
         ]})
         assert fixture.header(multiline).text == "first\nsecond"
-        command = await fixture.event(text="/hindsight pause")
-        command.message_str = "hindsight pause"
+        command = await fixture.event(text="/hb pause")
+        command.message_str = "hb pause"
         command.is_at_or_wake_command = True
-        assert fixture.header(command).text == "/hindsight pause"
+        assert fixture.header(command).text == "/hb pause"
         command.message_str = "unrelated"
         assert fixture.header(command) is None
         passed.append("native_multitext_and_exact_wake_prefix_conversion")
@@ -281,7 +281,7 @@ async def main(output):
                     owner = queue.scope(fresh)
                     old_bank = owner["bank"]
                     paused = fixture.header(await fixture.event(
-                        text="/hindsight pause", changes={"message_id": "101"},
+                        text="/hb pause", changes={"message_id": "101"},
                     ))
                     source = paused.scope(queue.deployment_id)
                     change = queue.access.command(paused, source, owner, "mode", ("paused",))

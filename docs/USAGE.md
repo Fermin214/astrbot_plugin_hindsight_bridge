@@ -55,12 +55,12 @@ Hindsight 官方记忆面板（Control Plane）负责浏览、搜索、更正、
 
 | 命令 | 用途 |
 | --- | --- |
-| `/hindsight help` | 查看可用命令 |
-| `/hindsight status` | 查看连接状态、当前模式、待保存队列和暂停原因 |
-| `/hindsight on` | 开启读写记忆 |
-| `/hindsight readonly` | 切为只读模式（保留现有记忆并继续召回，不再保存新消息） |
-| `/hindsight pause` | 停用记忆（停止保存和自动召回） |
-| `/hindsight forget` | 发起清空个人记忆，按回复在 120 秒内输入确认码完成 |
+| `/hb help` | 查看可用命令 |
+| `/hb status` | 查看连接状态、当前模式、待保存队列和暂停原因 |
+| `/hb on` | 开启读写记忆 |
+| `/hb readonly` | 切为只读模式（保留现有记忆并继续召回，不再保存新消息） |
+| `/hb pause` | 停用记忆（停止保存和自动召回） |
+| `/hb forget` | 发起清空个人记忆，按回复在 120 秒内输入确认码完成 |
 
 浏览、检索、修改和导出记忆使用 Hindsight Control Plane；已交付的参考原文和知识页在插件 **使用记录** 中查看。保存失败记录在用户页重试。0.5.0 移除 `correct`、`view`、`show`、`export`、`recall`、`background`、`retry`、`cancel`，不再提供单项任务私聊取消；清空记忆会作废积压并删除整个个人 Bank。
 
@@ -129,6 +129,6 @@ Hindsight 官方记忆面板（Control Plane）负责浏览、搜索、更正、
 
 ## 故障处理
 
-遇到无法保存或检索报错时，先发送 `/hindsight status` 或查看总览卡提示，再对照 [异常提示](DATA-MAINTENANCE.md#异常提示) 排查。
+遇到无法保存或检索报错时，先发送 `/hb status` 或查看总览卡提示，再对照 [异常提示](DATA-MAINTENANCE.md#异常提示) 排查。
 
 保存失败记录在插件记忆管理页重试。需要作废积压并删除已有内容时，使用 **清空记忆**。

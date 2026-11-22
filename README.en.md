@@ -69,12 +69,12 @@ Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list)
 
 | Action | Command |
 | --- | --- |
-| Show command help | `/hindsight help` |
-| Check status & diagnostics | `/hindsight status` |
-| Switch to read-only (keep recalling, stop saving) | `/hindsight readonly` |
-| Pause saving and automatic recall | `/hindsight pause` |
-| Resume read/write | `/hindsight on` |
-| Erase personal memories | `/hindsight forget`, then reply to confirm |
+| Show command help | `/hb help` |
+| Check status & diagnostics | `/hb status` |
+| Switch to read-only (keep recalling, stop saving) | `/hb readonly` |
+| Pause saving and automatic recall | `/hb pause` |
+| Resume read/write | `/hb on` |
+| Erase personal memories | `/hb forget`, then reply to confirm |
 
 Version 0.5.0 retires `correct/view/show/export/recall/background/retry/cancel`. Inspect delivered context, select pages and retry failed saves in the plugin panel; browse, search, edit and export memories in Hindsight Control Plane. Individual task cancellation through chat is removed; erasure still invalidates pending work and deletes the personal Bank.
 

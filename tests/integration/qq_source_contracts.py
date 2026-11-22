@@ -229,7 +229,7 @@ async def control_contracts(fixture, directory):
         fresh = await incoming(5, "newly authorized source", "fresh-after-regrant")
         assert queue.accepts(fresh)
 
-        applied = await incoming(6, "/hindsight on", "already-applied-on")
+        applied = await incoming(6, "/hb on", "already-applied-on")
         source = applied.scope(queue.deployment_id)
         with patch.object(time, "time", return_value=baseline + 6):
             scope = queue.scope(applied)
@@ -238,12 +238,12 @@ async def control_contracts(fixture, directory):
                 scope["scope_id"], "active", journal_only=True,
             ))
             queue.apply_control()
-        delayed = await incoming(7, "/hindsight on", "first-seen-late-on")
+        delayed = await incoming(7, "/hb on", "first-seen-late-on")
         with patch.object(time, "time", return_value=baseline + 8):
             queue.set_mode(source.id, "paused")
         with patch.object(time, "time", return_value=baseline + 9):
             rejected_command(queue, applied, "command_already_applied")
-            conflict = await incoming(9, "/hindsight readonly", "already-applied-on")
+            conflict = await incoming(9, "/hb readonly", "already-applied-on")
             rejected_command(queue, conflict, "command_identity_conflict", mode="readonly")
             scope = queue.scope(delayed)
             delayed_command = queue.access.command(delayed, source, scope, "mode", ("active",))
@@ -401,10 +401,10 @@ async def main():
     assert material["timestamp"] == "2026-11-03T04:34:56.123456+00:00"
     passed = ["actual_native_c2c_callback_original_fields_and_fractional_material_time"]
 
-    command = await fixture.event("/hindsight pause")
-    command.message_str = "hindsight pause"
+    command = await fixture.event("/hb pause")
+    command.message_str = "hb pause"
     command.is_at_or_wake_command = True
-    assert fixture.header(command).text == "/hindsight pause"
+    assert fixture.header(command).text == "/hb pause"
     passed.append("host_wake_prefix_change_keeps_original_command")
 
     attachment = await fixture.event(data={"attachments": [{"content_type": "image/png"}]})

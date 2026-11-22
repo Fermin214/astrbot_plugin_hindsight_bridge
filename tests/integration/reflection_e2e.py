@@ -54,6 +54,18 @@ async def verify(acceptance, page, frame, bank):
         assert "HB-REFLECT-FINAL" in answer, answer
         return acceptance.requests()[start:]
 
+    async def resume():
+        await acceptance.action(identifier, "maintenance_resume")
+        current = await acceptance.scope()
+        assert current["mode"] == "readonly" and current["reflect"]["enabled"]
+        boundary = database(acceptance.runtime, "SELECT accept_from FROM scopes WHERE scope_id=?", (identifier,))[0]["accept_from"]
+        started = time.monotonic()
+        await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform reception boundary")
+        acceptance.report["measurements"].setdefault("reflect_resume_boundaries", []).append({
+            "accept_from": boundary, "platform_timestamp": int(time.time()),
+            "wait_ms": round((time.monotonic() - started) * 1000),
+        })
+
     start = len(jsonl("reflect-trace"))
     recalls = len(jsonl("recall-trace"))
     flow = await chat("HB-REFLECT-COMPLEX")
@@ -127,8 +139,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.action(identifier, "maintenance_begin")
     pending = await acceptance.action(identifier, "maintenance_status")
     assert pending["maintenance"]["ready"], pending
-    await acceptance.action(identifier, "maintenance_resume")
-    assert (await acceptance.scope())["mode"] == "readonly"
+    await resume()
     await acceptance.bot.chat(BOB, "Ordinary chat continues during an outstanding Reflect request.")
     start = len(jsonl("reflect-trace"))
     repeated = asyncio.create_task(chat("HB-REFLECT-AFTER-TIMEOUT"))
@@ -185,8 +196,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.action(identifier, "maintenance_begin")
     pending = await acceptance.action(identifier, "maintenance_status")
     assert pending["maintenance"]["ready"], pending
-    await acceptance.action(identifier, "maintenance_resume")
-    assert (await acceptance.scope())["mode"] == "readonly"
+    await resume()
     repeated = results(await chat("HB-REFLECT-AFTER-LOST-RESPONSE"))
     assert any(item.get("kind") == "reflect" for item in repeated)
     assert not (await acceptance.scope())["reflect"]["pending"]
@@ -227,7 +237,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.action(identifier, "maintenance_begin")
     pending = await acceptance.action(identifier, "maintenance_status")
     assert pending["maintenance"]["ready"], pending
-    await acceptance.action(identifier, "maintenance_resume")
+    await resume()
     assert any(item.get("kind") == "reflect" for item in results(await chat("HB-REFLECT-AFTER-UPGRADE")))
     acceptance.passed("native_040_to_050_upgrade_archives_all_format_seven_reflect_states_and_keeps_bank_and_reading_available")
 

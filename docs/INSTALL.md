@@ -140,11 +140,9 @@ sed -n 's/^HINDSIGHT_CP_ACCESS_KEY=//p' "${HINDSIGHT_INSTALL_ROOT:-$HOME/.local/
 
 账号刚开通时，需要等第一条普通私聊发送后才会在 Hindsight 中新建 Bank，后台提取和入库也需要数秒到十几秒。可在 **用户与记忆** 顶部卡片查看「待保存 / 已保存」计数，再用 Bank ID 去官方面板查看结果。
 
-### 导出 JSON 文件失败
+### 导出记忆与复制交付记录
 
-管理员可以直接在官方 Control Plane 导出完整数据，不需要走聊天通道。如果希望用户能在私聊中接收导出的文件：
-- **OneBot**：当 AstrBot 与 OneBot 分开部署时，需在 AstrBot **系统配置** 填好 OneBot 能访问的 `callback_api_base`（例如同网络的 `http://astrbot:6185`）或挂载共享目录。
-- **QQ 官方机器人**：使用 AstrBot 原生文件发送，遇到拦截或超限时请检查 AstrBot 日志和机器人权限，或改用官方面板导出。
+完整记忆通过 Hindsight Control Plane 导出。插件面板「使用记录」提供「参考内容」「发给 AI 的原文」「原始 JSON」三个页签，可复制交付原文与 JSON。
 
 ### 官方机器人没有回复
 

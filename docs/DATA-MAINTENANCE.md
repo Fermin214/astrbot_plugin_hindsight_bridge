@@ -57,7 +57,7 @@ docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 
 同时另存安装目录下的 `.env`、`compose.yaml` 以及 `memory_settings` 卷里的 `models.json`。备份完毕后启动 `memory-api` 并重新启用插件。
 
-> 完整备份配套记忆库必须按本节导出 PostgreSQL，插件数据备份和个人 `/hindsight export` 都不能替代数据库备份。
+> 完整备份配套记忆库必须按本节导出 PostgreSQL，插件数据备份和 Hindsight Control Plane 的个人记忆导出都不能替代数据库备份。
 
 ## 在官方面板修改记忆
 
@@ -79,7 +79,7 @@ docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 2. 在 AstrBot 插件管理中更新 Hindsight Bridge 并重载。
 3. 沿用原有连接配置与数据目录，查看运行状态；如果页面提示重新确认账号，核对机器人身份后确认即可。
 
-使用 QQ 官方机器人时，保持原平台实例、AppID 和用户 OpenID 不变，在 WebSocket 与 Webhook 之间切换会直接沿用已有记忆。升级后若提示恢复异常，可先通过 `/hindsight status` 查看原因并对照下文处理。
+使用 QQ 官方机器人时，保持原平台实例、AppID 和用户 OpenID 不变，在 WebSocket 与 Webhook 之间切换会直接沿用已有记忆。升级后若提示恢复异常，可先通过 `/hb status` 查看原因并对照下文处理。
 
 ## 升级 Hindsight 服务
 

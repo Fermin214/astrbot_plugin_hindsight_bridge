@@ -48,7 +48,7 @@ Bridge 仅通过 AstrBot 的公开钩子/插件接口与 Hindsight 的公开 HTT
 - 默认 `recall_timeout` 为 10 秒（范围 0.2–30 秒），覆盖查询构建、认证与检索；默认上下文上限 4,000 字符。
 - 召回超时、无匹配或服务断连时只附加简短状态说明（或保持静默），不阻塞普通聊天；各用户的最近检索结果与连续失败次数在内存中按作用域独立统计，服务恢复检查完成前暂缓向远端提交队列。
 - `core/reference.py` 管理按用户保存的参考设置，并将每轮真正写入请求的文本及工具返回值快照保存在业务目录的 `references.sqlite3`（按控制库身份、连接、用户、授权修订和 Bank 代次隔离；写入失败时跳过快照而不中断聊天）。
-- 私聊只提供 `help`、`status`、`on`、`readonly`、`pause`、`forget` 六个命令。查看交付内容、选页和重试使用插件管理页；浏览、查找、修改和导出记忆使用 Hindsight Control Plane。
+- 私聊命令组 `/hb` 只提供 `help`、`status`、`on`、`readonly`、`pause`、`forget` 六个命令。查看交付内容、选页和重试使用插件管理页；浏览、查找、修改和导出记忆使用 Hindsight Control Plane。
 
 ## 知识页（Knowledge Page）
 
