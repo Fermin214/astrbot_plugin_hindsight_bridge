@@ -313,12 +313,14 @@ class ReferenceHistory:
             if not deliveries:
                 return None
             last = deliveries[-1]
-            error = last.get("status") == "error"
-            details = any(item.get("items") for item in deliveries)
-            pages = any(item.get("pages") for item in deliveries)
+            failed = next((item for item in reversed(deliveries) if item.get("status") == "error"), None)
+            details = any(item.get("items") for item in deliveries if item.get("status") != "error")
+            pages = any(page.get("content") for item in deliveries if item.get("status") != "error"
+                        for page in item.get("pages", []))
+            error = last.get("status") == "error" or failed and not (details or pages)
             outcome = ("error" if error else "success" if details else "background_only" if pages
                        else "on_demand" if deliveries[0].get("status") == "not_called" and len(deliveries) == 1 else "empty")
-            return {"outcome": outcome, "code": last.get("code", "") if error else "",
+            return {"outcome": outcome, "code": (failed or last).get("code", "") if error else "",
                     "last_at": turn["created_at"], "elapsed_ms": deliveries[0].get("elapsed_ms"),
                     "consecutive_failures": 0, "persistent": True}
         except (sqlite3.Error, OSError, ValueError):

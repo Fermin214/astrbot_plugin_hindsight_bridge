@@ -4,10 +4,6 @@ import asyncio
 import hashlib
 import json
 import re
-from pathlib import Path
-import shutil
-import sqlite3
-import sys
 
 import aiohttp
 from playwright.async_api import async_playwright
@@ -413,7 +409,7 @@ class Feedback(Acceptance):
                     self.report.update(
                         complete=True,
                         acceptance_scope="native recovery of multiple deleted page references" if recovery_only
-                        else "0.2.8 upgrade, native ordered pages, shared budget, lifecycle and erasure",
+                        else "v0.5.0 upgrade, native ordered pages, shared budget, lifecycle and erasure",
                     )
                     self.save()
                     return

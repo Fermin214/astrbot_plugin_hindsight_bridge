@@ -167,6 +167,7 @@ def finish_message(event, plain_type, wake_prefixes, platform_type, bot_id, user
     host_text = host_separator.join(plain) if visible_text is None else visible_text
     if not visible_matches(event, host_text, wake_prefixes):
         return None
+    host_text = event.get_message_str()
     text, media = extracted
     return Incoming(platform_type, event.get_platform_id(), bot_id, user_id,
                     event.message_obj.message_id, occurred, text, received_at=event.created_at,

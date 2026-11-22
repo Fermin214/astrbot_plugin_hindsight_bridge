@@ -203,19 +203,17 @@
     <div class="dialog-header"><h2 id="backup-heading">备份与恢复</h2><button type="button" data-close="backup-dialog" aria-label="关闭">×</button></div>
     <ol class="guide-steps" data-managed-backup hidden>
       <li><h3>暂停 Bridge 读写</h3><p>暂停插件读写，等待保存任务结束。</p></li>
-      <li><h3>备份 Bridge 数据</h3><p>在 AstrBot 的 Python 环境执行，替换安装路径、控制目录和备份时间。输出目录使用新目录。</p>
+      <li><h3>备份 Bridge 数据</h3><p>在 AstrBot 的 Python 环境执行，替换安装路径和备份时间。输出目录使用新目录。</p>
         <textarea id="backup-command" aria-label="插件数据备份命令示例" rows="8" readonly spellcheck="false">python /AstrBot/data/plugins/astrbot_plugin_hindsight_bridge/scripts/backup.py \
   --data-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge \
-  --control-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control \
-  --output /AstrBot/data/backups/hindsight-business-YYYYMMDD-HHMMSS \
-  --latest-control /AstrBot/data/backups/hindsight-control-latest/control.sqlite3</textarea>
+  --output /AstrBot/data/backups/hindsight-YYYYMMDD-HHMMSS</textarea>
         <button type="button" data-copy="backup-command" data-feedback="backup-feedback">复制命令</button>
         <p>另存插件配置和 setup.json。</p>
       </li>
       <li><h3>备份配套服务</h3><p>停止配套 Hindsight 的写入，等待任务结束。导出 PostgreSQL 数据库，保存部署文件和 models.json。命令见操作文档。</p></li>
-      <li><h3>检查恢复</h3><p>在独立环境检查 Bridge 备份，并保存异机副本。恢复业务快照时沿用最新控制库、原 service_id 和账号对应关系。</p></li>
+      <li><h3>检查恢复</h3><p>在独立环境检查并保存异机副本。恢复主库即回到备份时刻，请勿用清空或撤权前的旧快照覆盖运行库；确认升级稳定后删除 legacy-v0.5-backup/ 中的旧聊天副本。</p></li>
     </ol>
-    <div id="backup-existing-service"><p>Bridge 备份内容：业务数据、最新控制库和插件配置。</p><p>Hindsight 数据由服务管理员按原部署方案备份与恢复。</p></div>
+    <div id="backup-existing-service"><p>Bridge 备份内容：主库、使用记录与插件配置。</p><p>Hindsight 数据由服务管理员按原部署方案备份与恢复。</p></div>
     <label for="backup-doc-url">操作文档<input id="backup-doc-url" readonly value="https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/DATA-MAINTENANCE.md"></label>
     <div class="actions"><button type="button" data-copy="backup-doc-url" data-feedback="backup-feedback">复制文档地址</button></div>
     <p id="backup-feedback" class="operation-status" role="status" hidden></p>
@@ -235,7 +233,7 @@
         </li>
         <li id="upgrade-prepare-step">
           <h3>备份并执行升级</h3>
-          <p>备份插件配置、业务库和最新控制库。</p>
+          <p>备份插件配置、主库和使用记录。</p>
           <button type="button" data-guide="backup-dialog">查看备份步骤</button>
           <label class="check-label" for="upgrade-backup-confirmed"><input id="upgrade-backup-confirmed" type="checkbox">已备份插件数据，并暂停其他写入</label>
           <button id="upgrade-prepare" type="button">生成升级命令</button>

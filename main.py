@@ -121,7 +121,7 @@ class HindsightBridge(Star):
             "maintenance_active": "保存和记忆查询已暂停。请管理员在插件页查看进度，完成操作后点击「解除读写暂停」",
             "maintenance_pending": "还有记录未处理完。请在插件页查看进度，等待完成，或放弃未发送及保存失败的记录",
             "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后检查暂停进度。需要清空全部旧记忆时，可使用清空操作重新开始",
-            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
+            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南完整备份旧数据，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
             "authorization_changed": "账号授权已变化，请管理员在插件页确认当前机器人身份",
             "command_already_applied": "这条命令已处理，请发送一条新命令",
@@ -934,9 +934,11 @@ class HindsightBridge(Star):
         if turn.snapshot_id:
             extra = {}
             if isinstance(delivery, dict):
+                if status == "error" and isinstance(delivery.get("error"), str):
+                    extra["code"] = delivery["error"]
                 if kind == "recall" and isinstance(delivery.get("items"), list):
                     extra["items"] = delivery["items"]
-                if kind == "read_page":
+                if kind == "read_page" and not delivery.get("error") and delivery.get("content"):
                     extra["pages"] = [{key: delivery[key] for key in (
                         "page_id", "mental_model_id", "version", "last_refreshed_at", "name", "is_stale", "content", "text",
                     ) if key in delivery}]

@@ -341,7 +341,7 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.service.submissions), 1)
         self.assertNotIn(task.bank, self.service.banks)
 
-    async def test_accepted_ledger_prevents_replay_after_restoring_unsubmitted_snapshot(
+    async def test_accepted_snapshot_with_missing_remote_operation_requires_reconciliation(
         self,
     ):
         task = self.enqueue()

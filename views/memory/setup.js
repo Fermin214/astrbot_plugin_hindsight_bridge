@@ -172,7 +172,7 @@ export function createSetup(view) {
       || view.parameterDraft.conflict || !view.$("parameters-form").checkValidity();
     view.$("save-parameters").closest(".card")?.classList.toggle("is-dirty", view.parameterDraft.dirty);
     const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
-      service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
+      service_address_revision: "服务地址变更序号", control_state_dir: "旧控制目录（迁移来源）" };
     view.$("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
       [view.el("dt", "", labels[key] || key), view.el("dd", "", value || (key === "control_state_dir"
         ? "data/plugin_data/astrbot_plugin_hindsight_bridge_control" : "未设置"))]));

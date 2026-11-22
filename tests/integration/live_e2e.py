@@ -15,15 +15,12 @@ import re
 import shutil
 import sqlite3
 import time
-from urllib.parse import unquote, urlsplit
 
 import aiohttp
 from playwright.async_api import TimeoutError as BrowserTimeout, async_playwright
+from onebot_peer import ALICE, BOB, BOT, OUTSIDER, ROOT, OneBot, message_segments
 
-ROOT = Path("/delivery")
 NAME = "astrbot_plugin_hindsight_bridge"
-ALICE, BOB, OUTSIDER = 123001, 123002, 123003
-BOT = 990001
 SUCCESS = "Hindsight 长期记忆：插件已根据本轮对话自动检索"
 EMPTY = "Hindsight 检索完成，本轮未匹配到相关记忆。"
 TIMEOUT = "记忆检索超时，历史记忆未载入（不影响新消息保存）。"
@@ -44,18 +41,6 @@ def database(path, query, args=()):
         return [dict(row) for row in connection.execute(query, args)]
 
 
-def message_segments(value):
-    if isinstance(value, str):
-        return [{"type": "text", "data": {"text": value}}]
-    if isinstance(value, list):
-        return [part for item in value for part in message_segments(item)]
-    if isinstance(value, dict):
-        if value.get("type") == "node":
-            return message_segments(value.get("data", {}).get("content", []))
-        return [value]
-    return []
-
-
 async def until(predicate, *, timeout=120, label="condition"):
     async with asyncio.timeout(timeout):
         while True:
@@ -65,112 +50,6 @@ async def until(predicate, *, timeout=120, label="condition"):
             if value:
                 return value
             await asyncio.sleep(0.25)
-
-
-class OneBot:
-    sequence = 1000
-
-    def __init__(self, session, settings):
-        self.session, self.settings = session, settings
-        self.bot_id = settings.get("bot_id", BOT)
-        self.socket = None
-        self.reader = None
-        self.actions = []
-        self.files = []
-        self.replies = asyncio.Queue()
-        self.message_id = type(self).sequence
-
-    async def connect(self):
-        async def attempt():
-            try:
-                self.socket = await self.session.ws_connect(
-                    f'http://127.0.0.1:{self.settings["onebot_port"]}/ws',
-                    headers={"X-Self-ID": str(self.bot_id), "X-Client-Role": "Universal",
-                             "Authorization": "Bearer " + self.settings["onebot_token"]})
-                return True
-            except (aiohttp.ClientError, OSError):
-                return False
-        await until(attempt, timeout=30, label="OneBot connection")
-        self.reader = asyncio.create_task(self.read())
-        await self.socket.send_json({"time": int(time.time()), "self_id": self.bot_id, "post_type": "meta_event",
-                                     "meta_event_type": "lifecycle", "sub_type": "connect"})
-
-    async def read(self):
-        async for message in self.socket:
-            if message.type != aiohttp.WSMsgType.TEXT:
-                continue
-            body = json.loads(message.data)
-            action, params = body.get("action", ""), body.get("params", {})
-            self.actions.append(body)
-            result = {}
-            if action == "get_login_info":
-                await asyncio.sleep(getattr(self, "login_info_delay", 0))
-                result = {"user_id": self.bot_id, "nickname": "Delivery bot"}
-            elif action == "get_status":
-                result = {"online": True, "good": True}
-            elif action == "get_msg":
-                result = {"message_id": params["message_id"], "self_id": self.bot_id,
-                          "user_id": ALICE, "message_type": "private", "sub_type": "friend",
-                          "time": int(time.time()), "sender": {"user_id": ALICE, "nickname": "Synthetic quote"},
-                          "message": [{"type": "text", "data": {"text": "UNTRUSTED_NATIVE_QUOTE"}}],
-                          "raw_message": "UNTRUSTED_NATIVE_QUOTE", "font": 0}
-            elif action in {"send_msg", "send_private_msg", "send_group_msg", "send_private_forward_msg", "send_group_forward_msg"}:
-                result = {"message_id": len(self.actions) + 10000}
-                segments = message_segments(params.get("message", params.get("messages", [])))
-                for part in segments:
-                    if part.get("type") != "file":
-                        continue
-                    uri = part.get("data", {}).get("file", "")
-                    path = Path(unquote(urlsplit(uri).path) if uri.startswith("file:") else uri).resolve()
-                    if not path.is_relative_to(ROOT):
-                        raise RuntimeError("OneBot file fixture may only read the dedicated test directory")
-                    self.files.append(json.loads(path.read_text()))
-                await self.replies.put({**params, "message": segments})
-            await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
-
-    async def send(self, user, text, *, group=False, message_id=None, timestamp=None, metadata=None, segments=None):
-        type(self).sequence += 1
-        self.message_id = type(self).sequence
-        while not self.replies.empty():
-            self.replies.get_nowait()
-        event = {
-            "time": int(time.time()) if timestamp is None else timestamp,
-            "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
-            "sub_type": "normal" if group else "friend", "user_id": user,
-            "message_id": message_id or self.message_id,
-            "message": segments if segments is not None else [{"type": "text", "data": {"text": text}}],
-            "raw_message": text, "font": 0, "sender": {"user_id": user, "nickname": "Synthetic user", "role": "member"},
-        }
-        if group:
-            event["group_id"] = 880001
-        if metadata:
-            assert not event.keys() & metadata.keys()
-            event.update(metadata)
-        await self.socket.send_json(event)
-        return event["message_id"]
-
-    async def chat(self, user, text, *, timestamp=None, metadata=None, segments=None):
-        await self.send(user, text, timestamp=timestamp, metadata=metadata, segments=segments)
-        async with asyncio.timeout(100):
-            while True:
-                reply = await self.replies.get()
-                content = reply.get("message", [])
-                result = content if isinstance(content, str) else "".join(
-                    part.get("data", {}).get("text", "") for part in content if part.get("type") == "text")
-                if result:
-                    return result
-
-    async def close(self):
-        try:
-            if self.reader:
-                self.reader.cancel()
-                try:
-                    await self.reader
-                except asyncio.CancelledError:
-                    pass
-        finally:
-            if self.socket:
-                await self.socket.close()
 
 
 class Acceptance:
@@ -946,7 +825,8 @@ class Acceptance:
                 await self.usable()
                 await self.drained()
                 await self.bot.chat(ALICE, "/new")
-                answer = await self.bot.chat(ALICE, "What is my offline note code? Answer briefly.")
+                answer = await self.bot.chat(ALICE, "What exact code did I explicitly label as my offline note code? It is distinct from my notebook code. Answer briefly.")
+                assert "Fern-73" in self.latest_wire()
                 assert "Fern-73" in answer
                 recovered = await self.bootstrap()
                 cold_recall = next(row for row in recovered["scopes"] if row["user_id"] == str(ALICE))["summary"]["recall"]

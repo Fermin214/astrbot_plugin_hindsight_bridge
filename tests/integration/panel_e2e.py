@@ -125,8 +125,7 @@ async def verify_panel(acceptance, page, context, frame, scope):
     }, indent=2) + "\n")
     acceptance.passed("removed_user_stays_removed_and_retained_bank_pause_ready_remains_stable_for_32_seconds")
 
-    control_path = Path(configuration.get("control_state_dir") or
-                        str(acceptance.runtime.parent.parent / (NAME + "_control"))) / "control.sqlite3"
+    control_path = acceptance.runtime
     with sqlite3.connect(control_path) as control:
         control.execute("CREATE TRIGGER panel_status_failure BEFORE UPDATE OF phase ON maintenance "
                         "BEGIN SELECT RAISE(ABORT,'panel status write failure'); END")
@@ -409,7 +408,7 @@ async def verify_panel(acceptance, page, context, frame, scope):
     # Restore the disabled reference to the pre-test empty choice for deployment invariance checks.
     saved = (await selected())["background"]
     await acceptance.http("POST", acceptance.prefix + "/scopes/" + identifier + "/background", payload={
-        "page_id": "", "enabled": False, "revision": saved["revision"], "scope_revision": saved["scope_revision"],
+        "page_ids": [], "enabled": False, "revision": saved["revision"], "scope_revision": saved["scope_revision"],
         "config_revision": (await acceptance.bootstrap())["config_revision"],
     })
     assert await acceptance.config() == configuration

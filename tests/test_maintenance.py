@@ -187,7 +187,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             await self.worker.maintenance.resume(first.scope_id)
         self.assertNotIn(first.bank, self.service.banks)
 
-    async def test_old_runtime_snapshot_cannot_replay_discarded_work_after_resume(self):
+    async def test_whole_snapshot_restore_recovers_queued_work_at_snapshot_time(self):
         first = await self.seed()
         pending = self.enqueue("pending")
         snapshot = self.root / "old.sqlite3"
@@ -199,13 +199,13 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         await self.worker.maintenance.resume(first.scope_id)
         self.queue.close()
         with closing(sqlite3.connect(snapshot)) as old, closing(
-            sqlite3.connect(self.root / "runtime" / "runtime.sqlite3")
+            sqlite3.connect(self.root / "runtime" / "bridge.sqlite3")
         ) as destination:
             old.backup(destination)
         self.open()
         await self.step()
-        self.assertIn(self.queue.get(pending.task_id)["state"], {"cancelled", "discarded"})
-        self.assertEqual(len(self.service.submissions), 1)
+        self.assertNotIn(self.queue.get(pending.task_id)["state"], {"cancelled", "discarded"})
+        self.assertEqual(len(self.service.submissions), 2)
 
     async def test_unknown_unaccepted_request_is_not_resubmitted_during_maintenance(self):
         pending = self.enqueue()

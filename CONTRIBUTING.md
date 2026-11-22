@@ -41,7 +41,7 @@
 
 ## 自动化测试与 CI
 
-### 存储行为映射
+### 行为映射与三层套件
 
 存储结构变化时，按行为维护断言；不保留已经废弃的双库重放或独立控制目录私有字段。
 
@@ -55,6 +55,14 @@
 | 使用记录锁库不拖停其他用户，清空仅在本地及远端核验完成后标记删净 | `tests/test_maintenance.py`、`tests/test_reference_history.py` |
 | 未完成 Reflect 请求在启动时归档，原始请求 ID 与错误记录不丢失 | `tests/test_reflection.py` |
 | 主库、侧文件与进程锁不能通过文件链接碰触其他资源 | `tests/test_runtime_diagnostics.py` |
+| 五平台身份、私聊边界、媒体段、Unicode / UTF-16 表情与引用只读原始 ID | `tests/test_gateway.py`、`tests/test_qq_source.py`，原生 SDK `tests/integration/*_source_contracts.py` |
+| 图文轮次的用户、工具与助手关联，以及不可信引用不泄漏助手正文 | `tests/test_dialogue.py`、`tests/test_source_hooks.py`，真实 `gateway` 验收 |
+| 请求绑定、主备模型能力、并发工具预算、多 Agent 隔离与子先结束 | `tests/test_reading.py`、`tests/test_reflection.py`，真实 `read-tools` 的 `full` / `skills_like` 两模式 |
+| 全路由登录、旧页失效、跨卡保存独立及同卡并发拒绝 | `tests/test_panel.py`、`tests/test_background_hooks.py`，真实 `upgrade` / `multi-page` 验收 |
+| 0 轮使用记录仍可打开跳过页签、键盘操作、窄屏、草稿及反馈淡出 | `tests/test_memory_view.mjs`，CI Chromium `tests/integration/background_view.py` |
+| 协议模拟消息 ID 重连后唯一、转发段不虚构正文 | `tests/test_live_harness.py` 直接导入协议客户端，不剥离 AST |
+
+Python 单测保护可确定复现的核心不变量；模拟 DOM 与真实 Chromium 分别保护快速交互逻辑和浏览器行为；真实 AstrBot + Hindsight 闭环负责宿主钩子、实际交付、迁移与恢复。CI 宿主烟雾、平台 SDK 契约与真实闭环各自记录边界，不互相替代。已有可靠入口覆盖的内部报错文案、私有字段或废弃双库重放断言不再重复保留。
 
 本地与 CI 按变更文件自动选择检查范围（纯文档变更仅运行基础语法、元数据、打包与文档链接检查）：
 
@@ -72,7 +80,7 @@
 - `python tools/check-package.py`：元信息、语法、资源引用及 Markdown 链接/锚点检查。
 - `python tests/integration/install_startup.py --output <目录>`：冷构建与数据库扩展初始化检查（加 `--fresh-only` 仅测冷构建空卷）。
 - `python tools/run-backend-compat.py --output <目录>`：双版 AstrBot + PostgreSQL 升级、任务中断与删除路径校验（支持 `--baseline`、`--scope deletion`、`--scope maintenance`）。
-- `python tools/run-feedback-e2e.py --output <目录>`：真实 AstrBot/Hindsight/Dashboard 联调（支持 `--astrbot-version`、`--hindsight-version` 及 `--scope single-page | multi-page | multi-page-recovery | read-tools`）。
+- `python tools/run-feedback-e2e.py --output <目录>`：真实 AstrBot/Hindsight/Dashboard 联调，基线默认 0.5.0；支持 `--baseline-version`、`--baseline-revision`、`--scope gateway | upgrade | recovery | multi-page | read-tools` 等专项，工具专项分别运行 `--tool-schema-mode full` 与 `--tool-schema-mode skills_like`。
 - `python tools/run-parameters-e2e.py --mode existing|managed --output <目录>`：面板参数到实际聊天的端到端校验（支持 `--scope references | advanced`）。
 - `python tools/build-test-package.py --distribution --revision <提交> --output <目录>`：构建带文件摘要的分发验收包。
 

@@ -98,6 +98,8 @@ def restore(source_dir, data_dir):
         if any(values[key] != manifest.get(key) for key in ("deployment_id", "control_id")):
             raise ValueError("restore_identity_mismatch")
     data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if (data_dir / "worker.lock").is_symlink():
+        raise ValueError("restore_lock_path_invalid")
     with (data_dir / "worker.lock").open("a+b") as lock:
         exclusive_lock(lock)
         for name in ("bridge.sqlite3", "references.sqlite3"):
@@ -113,12 +115,18 @@ def restore(source_dir, data_dir):
                     if not valid(database):
                         raise ValueError("restore_snapshot_invalid")
             for name in ("references.sqlite3", "bridge.sqlite3"):
+                destination = data_dir / name
+                if destination.exists():
+                    with closing(sqlite3.connect(destination, timeout=5)) as previous:
+                        if previous.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                            raise ValueError("restore_database_busy")
+                    sync_path(destination)
                 for suffix in ("-wal", "-shm"):
-                    (data_dir / (name + suffix)).unlink(missing_ok=True)
+                    destination.with_name(name + suffix).unlink(missing_ok=True)
                 if name in files:
-                    os.replace(staged / name, data_dir / name)
+                    os.replace(staged / name, destination)
                 else:
-                    (data_dir / name).unlink(missing_ok=True)
+                    destination.unlink(missing_ok=True)
             sync_path(data_dir)
     return manifest
 

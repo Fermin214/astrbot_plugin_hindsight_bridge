@@ -54,7 +54,7 @@ async def verify(acceptance, page, frame, bank):
 
     first = await settings()
     existing = await turns()
-    assert existing, "v0.4.0 baseline did not create a reference snapshot"
+    assert existing, "baseline did not create a reference snapshot"
     legacy = await detail(existing[0]["id"])
     frozen_legacy = json.dumps(legacy, ensure_ascii=False)
     assert first["prompt"] == DEFAULT and first["detail_limit"] == 12 and first["history_limit"] == 30
@@ -199,9 +199,9 @@ async def verify(acceptance, page, frame, bank):
     _, candidate_delivery = await chat("Cedar-120 reference before downgrade.")
     assert candidate_delivery["items"]
     old_timestamp = int(time.time())
-    await acceptance.install("baseline-install.zip")
+    await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
-    await acceptance.bot.chat(ALICE, "Cedar-120 legacy snapshot before the 0.5 upgrade.")
+    await acceptance.bot.chat(ALICE, "Cedar-120 snapshot before plugin reload.")
     legacy_turn = await detail((await turns())[0]["id"])
     assert str(acceptance.bot.message_id) == legacy_turn["message_id"]
     legacy_delivery = legacy_turn["deliveries"][0]
@@ -215,8 +215,8 @@ async def verify(acceptance, page, frame, bank):
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
     await reference_panel_e2e.verify_clipboard(page, frame, legacy_turn)
     await frame.locator('[data-close="usage-dialog"]').click()
-    acceptance.passed("native_040_json_reference_snapshot_upgrades_without_reformatting_its_exact_delivery_or_export")
-    await acceptance.install("baseline-install.zip")
+    acceptance.passed("native_reference_snapshot_survives_reload_without_reformatting_its_exact_delivery_or_export")
+    await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
     prepared = await acceptance.action(scope["scope_id"], "forget_prepare")
     await acceptance.action(scope["scope_id"], "forget_confirm", confirmation=prepared["confirmation"])
@@ -228,7 +228,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
     assert (await settings())["prompt"] == DEFAULT and not await turns() and await turns(bob_route)
-    acceptance.passed("forget_in_040_then_upgrade_removes_stale_snapshots_and_custom_prompt_before_read")
+    acceptance.passed("forget_then_reload_removes_stale_snapshots_and_custom_prompt_before_read")
 
     await acceptance.action(scope["scope_id"], "mode", mode="active")
     await asyncio.sleep(1.1)
@@ -243,7 +243,7 @@ async def verify(acceptance, page, frame, bank):
 
     retain_start = len(jsonl("retain-trace"))
     text = "Preserve my original message while reference settings are damaged."
-    with closing(sqlite3.connect(ROOT / "control-volume/control.sqlite3")) as control:
+    with closing(sqlite3.connect(acceptance.runtime)) as control:
         key, original_value = control.execute(
             "SELECT key,value FROM settings WHERE key GLOB 'reference:*' AND json_extract(value,'$.prompt')=?",
             (new_prompt,),

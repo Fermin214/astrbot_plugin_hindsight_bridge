@@ -20,7 +20,8 @@ async def verify(acceptance):
     async def erased():
         current = await acceptance.bootstrap()
         row = next(item for item in current["scopes"] if item["user_id"] == str(ALICE))
-        return row if row["bank"] != bank and not row["summary"].get("cleanup") else None
+        cleanup = database(acceptance.runtime, "SELECT phase FROM erasures WHERE old_bank=?", (bank,))
+        return row if row["bank"] != bank and cleanup and all(item["phase"] == "verified" for item in cleanup) else None
 
     current = await until(erased, timeout=180)
     assert not (await acceptance.memories(bank))["total"]

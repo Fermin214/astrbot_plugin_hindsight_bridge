@@ -98,6 +98,20 @@ class Gateway(unittest.TestCase):
         event.message_obj.raw_message["self_id"] = 1002
         self.assertIsNone(native_header(event, Plain))
 
+    def test_wake_prefix_mixed_message_keeps_original_text_and_matches_actual_host_history(self):
+        event = self.event([{"type": "text", "data": {"text": "小桥 看这张图"}},
+                            {"type": "image", "data": {"file": "synthetic.png"}}],
+                           [Plain("小桥 看这张图"), Image()], "看这张图")
+        event.is_at_or_wake_command = True
+        incoming = native_header(event, Plain, ["小桥"])
+        self.assertEqual(incoming.text, "小桥 看这张图[图片]")
+        self.assertEqual(incoming.host_text, "看这张图")
+        self.assertEqual(final_reply([
+            {"role": "user", "content": [{"type": "text", "text": "看这张图"},
+                                         {"type": "image_url", "image_url": {"url": "local-image"}}]},
+            {"role": "assistant", "content": "完整回答"},
+        ], incoming.host_text, incoming.media_types), "完整回答")
+
     def test_native_image_history_placeholders_need_verified_media_and_cannot_hide_extra_text(self):
         content = [{"type": "text", "text": "正文"},
                    {"type": "text", "text": "[Image Attachment: original path /tmp/native.png; not included in this request]"},
@@ -195,12 +209,20 @@ class RetentionAndRecords(unittest.TestCase):
         for delivery, expected in (({"status": "not_called"}, "on_demand"),
                                    ({"status": "no_match"}, "empty"),
                                    ({"status": "error", "code": "recall_timeout"}, "error"),
-                                   ({"status": "no_match", "pages": [{"page_id": "page"}]}, "background_only"),
+                                   ({"status": "no_match", "pages": [{"page_id": "page", "content": "page body"}]}, "background_only"),
                                    ({"status": "delivered", "items": [{"text": "fact"}]}, "success")):
             with self.subTest(expected=expected):
                 records.start(self.alice, "chat", "one", {"kind": "request", **delivery})
                 records.close()
                 self.assertEqual(records.latest(self.alice)["outcome"], expected)
+
+    def test_failed_page_then_successful_metadata_read_does_not_claim_page_delivery(self):
+        records = self.queue.references
+        identifier = records.start(self.alice, "chat", "one", {"kind": "request", "status": "not_called"})
+        records.append(self.alice, identifier, {"kind": "read_page", "status": "error", "code": "tool_read_timeout", "pages": [{}]})
+        records.append(self.alice, identifier, {"kind": "search_pages", "status": "delivered"})
+        self.assertEqual(records.latest(self.alice)["outcome"], "error")
+        self.assertEqual(records.latest(self.alice)["code"], "tool_read_timeout")
 
 
 class RemoteTotals(unittest.IsolatedAsyncioTestCase):

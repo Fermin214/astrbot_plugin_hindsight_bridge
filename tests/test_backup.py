@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
@@ -82,6 +83,29 @@ class BackupTests(unittest.TestCase):
             database.write(b"changed")
         with self.assertRaises(ValueError):
             BACKUP.restore(output, self.data)
+
+    def test_failed_main_replacement_preserves_pre_restore_committed_wal(self):
+        output = self.root / "snapshot"
+        BACKUP.backup(self.data, output)
+        self.queue.close()
+        database = sqlite3.connect(self.data / "bridge.sqlite3")
+        self.addCleanup(database.close)
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("PRAGMA wal_autocheckpoint=0")
+        database.execute("INSERT INTO settings VALUES ('restore-interruption','committed')")
+        database.commit()
+        replace_file = os.replace
+
+        def interrupted(source, target):
+            if Path(target).name == "bridge.sqlite3":
+                raise OSError("injected replacement failure")
+            return replace_file(source, target)
+
+        with patch.object(BACKUP.os, "replace", side_effect=interrupted), self.assertRaises(OSError):
+            BACKUP.restore(output, self.data)
+        database.close()
+        with closing(BACKUP.connect(self.data / "bridge.sqlite3")) as restored:
+            self.assertEqual(restored.execute("SELECT value FROM settings WHERE key='restore-interruption'").fetchone()[0], "committed")
 
     def test_missing_main_nested_output_and_invalid_database_refuse_backup(self):
         with self.assertRaises(ValueError):

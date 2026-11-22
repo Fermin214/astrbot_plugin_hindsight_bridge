@@ -158,7 +158,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
         messages = {
             "reference_turn_missing": "这轮使用记录已清除，请重新打开使用记录。",
             "reference_changed": "记忆参考设置已变化，请重新载入后保存。",
-            "reference_settings_invalid": "记忆参考设置损坏，请检查插件控制库。",
+            "reference_settings_invalid": "记忆参考设置损坏，请检查插件主库。",
             "reference_prompt_too_long": f"记忆提示超过 {PROMPT_TOKEN_LIMIT} token，请缩短后保存。",
             "reference_history_unavailable": "无法读取或保存使用记录，请检查插件数据目录权限与剩余空间。",
             "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试保存」。",

@@ -88,6 +88,25 @@ async def verify(acceptance, page, frame, bank):
     assert replies and replies[0]["text"] == "HB-TOOLS-ANSWER", replies
     acceptance.passed("native_image_and_face_round_keeps_user_document_tool_calls_and_associated_assistant")
 
+    assistant_action = next(index for index in reversed(range(len(acceptance.bot.actions)))
+                            if acceptance.bot.actions[index]["action"] in {"send_msg", "send_private_msg"})
+    assistant_message_id = str(assistant_action + 10001)
+    for capture_assistant in (True, False):
+        await references(capture_assistant=capture_assistant)
+        text_only = "HB-GATEWAY 引用助手消息 " + str(capture_assistant)
+        await acceptance.bot.chat(ALICE, text_only, segments=[
+            {"type": "reply", "data": {"id": assistant_message_id}},
+            {"type": "text", "data": {"text": text_only}},
+        ])
+        message_id = acceptance.bot.message_id
+        await acceptance.drained()
+        actual = json.dumps(await document(message_id), ensure_ascii=False)
+        assert "【引用背景" not in actual and "UNTRUSTED_NATIVE_QUOTE" not in actual
+        if not capture_assistant:
+            assert "HB-TOOLS-ANSWER" not in actual
+    await references(capture_assistant=True)
+    acceptance.passed("native_assistant_reply_id_without_public_send_receipt_cannot_fabricate_context_with_either_capture_setting")
+
     await acceptance.bot.chat(ALICE, "HB-GATEWAY 引用新话 https://example.invalid @朋友", segments=[
         {"type": "reply", "data": {"id": str(mixed_id)}},
         {"type": "text", "data": {"text": "HB-GATEWAY 引用新话 https://example.invalid @朋友"}},
