@@ -100,7 +100,7 @@ class Outbox:
         self.directory.mkdir(parents=True, exist_ok=True)
         control_directory = Path(control_directory or self.directory.with_name(self.directory.name + "-control"))
         try:
-            if (self.directory / "worker.lock").is_symlink():
+            if (self.directory / "worker.lock").is_symlink() or (self.directory / "worker.lock").is_dir():
                 raise QueueError("database_path_invalid")
             self.lock = (self.directory / "worker.lock").open("a+b")
             exclusive_lock(self.lock)

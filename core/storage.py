@@ -26,7 +26,7 @@ RUNTIME_TABLES = {
     "replies", "history_baselines",
 }
 MAIN_TABLES = (CONTROL_TABLES | RUNTIME_TABLES | {"history_prompts"}) - {"scopes"}
-IGNORED = {BACKUP, BACKUP + ".building"} | {
+IGNORED = {BACKUP, BACKUP + ".building", "worker.lock", "control.lock"} | {
     name + suffix for name in ("bridge.sqlite3", "bridge.sqlite3.migrating")
     for suffix in ("", "-wal", "-shm")
 }

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -268,7 +269,7 @@ class HindsightBridge(Star):
         if not directory.is_absolute():
             raise QueueError("control_directory_must_be_absolute")
         try:
-            return directory.resolve()
+            return Path(os.path.abspath(directory))
         except (OSError, RuntimeError):
             raise QueueError("control_directory_invalid") from None
 
