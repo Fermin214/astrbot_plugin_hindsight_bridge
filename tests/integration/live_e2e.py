@@ -287,7 +287,8 @@ class Acceptance:
         async def settings(selection):
             stored = await self.http("GET", route + "/references")
             await self.http("POST", route + "/references", payload={
-                **selection, "scope_revision": stored["scope_revision"], "config_revision": stored["config_revision"],
+                **selection, "revision": stored["selection"]["revision"],
+                "scope_revision": stored["scope_revision"], "config_revision": stored["config_revision"],
             })
 
         await settings({**original, "types": ["observation"], "detail_limit": 12, "exclude_assistant": False})
