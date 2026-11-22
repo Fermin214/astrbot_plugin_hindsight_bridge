@@ -13,7 +13,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -25,6 +28,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
+BROWSER_RUNS = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "hindsight-bridge/browser-runs"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -34,6 +38,70 @@ class NoRedirect(HTTPRedirectHandler):
 
 def run(*args, **options):
     return subprocess.run(list(args), check=True, **options)
+
+
+def run_cli(entrypoint):
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, terminate)
+    entrypoint()
+
+
+def browser_lease(owner):
+    if sys.platform != "linux":
+        return None
+    import fcntl
+    engine = subprocess.check_output(["docker", "info", "--format", "{{.ID}}"])
+    BROWSER_RUNS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with_fd = os.open(BROWSER_RUNS / owner, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    lease = os.fdopen(with_fd, "w+b")
+    fcntl.flock(lease, fcntl.LOCK_EX)
+    lease.write(engine)
+    lease.flush()
+    return lease
+
+
+def sweep_browsers():
+    import fcntl
+    if not BROWSER_RUNS.is_dir():
+        return 0
+    if BROWSER_RUNS.resolve() != BROWSER_RUNS:
+        raise ValueError(f"浏览器租约目录无效：{BROWSER_RUNS}")
+    engine = subprocess.check_output(["docker", "info", "--format", "{{.ID}}"]).strip()
+    failed = False
+    for path in BROWSER_RUNS.iterdir():
+        if not re.fullmatch(r"hb-live-[a-f0-9]{16}", path.name) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if os.fstat(lease.fileno()).st_mtime > time.time() - 86400 or lease.read().strip() != engine:
+                    continue
+                name = path.name + "-browser"
+                containers = subprocess.check_output(["docker", "ps", "-aq", "--no-trunc", "--filter",
+                    "label=hindsight-bridge.test=" + path.name, "--filter", f"name=^/{name}$"], text=True).split()
+                if containers:
+                    run("docker", "rm", "-fv", *containers)
+                remove_browser_image("hindsight-bridge-live-browser:" + path.name, path.name)
+                path.unlink()
+        except (BlockingIOError, FileNotFoundError):
+            continue
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"{path}：{error}", file=sys.stderr)
+            failed = True
+    return int(failed)
+
+
+def remove_browser_image(tag, owner):
+    if subprocess.check_output(["docker", "image", "ls", "-q", tag]).strip():
+        label = subprocess.check_output(["docker", "image", "inspect", "--format",
+            '{{index .Config.Labels "hindsight-bridge.test"}}', tag], text=True).strip()
+        if label != owner:
+            raise RuntimeError(f"浏览器镜像缺少匹配的验收标签：{tag}")
+        run("docker", "image", "rm", tag, stdout=subprocess.DEVNULL)
 
 
 def free_port():
@@ -299,7 +367,14 @@ class Environment:
             raise ValueError("Output must be a fresh directory outside the repository")
         self.output.mkdir(parents=True, mode=0o700)
         os.chmod(self.output, 0o700)
-        self.owner = "hb-live-" + secrets.token_hex(4)
+        self.owner = "hb-live-" + secrets.token_hex(8)
+        self.browser_image = None
+        self.browser_lease = None
+        free = shutil.disk_usage(self.output).free
+        if free < 10 * 1024**3:
+            raise ValueError("验收盘可用空间低于 10 GiB")
+        if free < 15 * 1024**3:
+            print("验收盘可用空间低于 15 GiB", file=sys.stderr)
         self.containers = []
         self.volume = self.owner + "-postgres"
         astrbot_version = getattr(args, "astrbot_version", "4.29.1")
@@ -467,14 +542,17 @@ class Environment:
         expected_tree = json.loads((self.output / "package-inventory.json").read_text())["tree_sha256"]
         if not isinstance(expected_tree, str) or len(expected_tree) != 64:
             raise ValueError("候选包清单缺少有效的树摘要")
+        tag = "hindsight-bridge-live-browser:" + self.owner
+        self.browser_lease = browser_lease(self.owner)
+        self.browser_image = tag
         with (self.output / "browser-build.log").open("w") as log:
-            self.docker("build", "-t", "hindsight-bridge-live-browser:1.56.0", "-f", str(ROOT / "tests/integration/Dockerfile.browser"),
+            self.docker("build", "-t", tag, "--label", "hindsight-bridge.test=" + self.owner, "-f", str(ROOT / "tests/integration/Dockerfile.browser"),
                         str(ROOT / "tests/integration"), stdout=log, stderr=subprocess.STDOUT)
         name = self.owner + "-browser"
         self.containers.append(name)
         self.docker("run", "--name", name, "--label", "hindsight-bridge.test=" + self.owner, "--network", "host", "--memory", "2g", "--shm-size", "512m",
                     "-e", "HOME=/tmp", "-v", str(ROOT) + ":/candidate-source:ro", "-v", str(self.output) + ":/delivery",
-                    "hindsight-bridge-live-browser:1.56.0", "python", "/candidate-source/tests/integration/" + self.driver)
+                    self.browser_image, "python", "/candidate-source/tests/integration/" + self.driver)
         report = json.loads((self.output / "live-e2e-report.json").read_text())
         passed = report.get("passed")
         if report.get("complete") is not True or not isinstance(passed, list) or not passed:
@@ -498,6 +576,12 @@ class Environment:
                 self.docker("volume", "rm", self.volume, stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             pass
+        if self.browser_image:
+            remove_browser_image(self.browser_image, self.owner)
+            self.browser_image = None
+            if self.browser_lease:
+                (BROWSER_RUNS / self.owner).unlink(missing_ok=True)
+                self.browser_lease.close()
 
 
 def main():
@@ -525,4 +609,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--sweep-browsers"]:
+        sys.exit(sweep_browsers())
+    else:
+        run_cli(main)

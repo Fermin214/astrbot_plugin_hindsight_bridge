@@ -90,7 +90,7 @@ Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list)
 - [User Guide](docs/USAGE.md): Panel controls, Knowledge Pages, On-Demand Tools, Reflect, and commands
 - [Compatibility](docs/SUPPORT.md): Versions, model providers, platforms, and limits
 - [Backup & Restore](docs/DATA-MAINTENANCE.md): Backups, disaster recovery, and companion upgrades
-- [Contributing](CONTRIBUTING.md): Architecture overview, test suites, and contribution rules
+- [Contributing](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/CONTRIBUTING.md): Architecture overview, test suites, and contribution rules
 
 Please report issues on [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) with versions, steps to reproduce, and error details.
 

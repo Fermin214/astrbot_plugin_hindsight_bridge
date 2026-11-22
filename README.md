@@ -90,7 +90,7 @@
 - [使用指南](docs/USAGE.md)：面板各项配置、知识页、按需工具、Reflect 与私聊命令
 - [兼容范围](docs/SUPPORT.md)：AstrBot/Hindsight 版本、模型供应商与平台限制
 - [备份与恢复](docs/DATA-MAINTENANCE.md)：数据备份、故障恢复与配套服务升级
-- [贡献指南](CONTRIBUTING.md)：架构入口、验证命令与提交规范
+- [贡献指南](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/CONTRIBUTING.md)：架构入口、验证命令与提交规范
 
 遇到问题请在 [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) 提交反馈，并附上版本、复现步骤与错误提示。
 

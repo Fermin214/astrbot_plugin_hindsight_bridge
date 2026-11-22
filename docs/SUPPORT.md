@@ -76,4 +76,4 @@ Dify、Coze、百炼、DeerFlow 等外部执行器，以及 AstrBot WebChat 和�
 
 - 浏览、修改或整库清除记忆的操作方法见 [使用指南](USAGE.md#在官方面板修改记忆)。
 - 控制库备份、故障恢复与异常排查见 [备份与恢复](DATA-MAINTENANCE.md#异常提示)。
-- 底层架构、来源校验与数据格式见 [实现说明](ARCHITECTURE.md)。
+- 底层架构、来源校验与数据格式见 [实现说明](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/ARCHITECTURE.md)。
