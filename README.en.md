@@ -10,7 +10,7 @@ During normal conversations, the plugin extracts private text messages from QQ, 
 
 - **Automatic Capture & Recall**: Conversations are saved automatically in the background and recalled semantically in later chats—either via **Auto Recall** or **On-Demand Agent Tools**.
 - **Knowledge Pages & Reflect**: Attach up to 8 ordered Knowledge Pages generated in Hindsight's Control Plane, or enable per-user Reflect synthesis for complex questions.
-- **Per-User Controls & Inspection**: Switch between Read/Write, Read-Only, and Paused modes per user, customize memory prompts, enable read-only recall on quoted messages or links, and inspect exact delivered context per turn.
+- **Per-User Controls & Inspection**: Switch between Read/Write, Read-Only, and Paused modes, customize memory prompts and assistant retention, and inspect exact delivered context and text-free skip records.
 - **Multi-Platform Isolation**: Supports OneBot v11, QQ Official C2C (WebSocket & Webhook), WeChat ClawBot, Telegram, and Feishu private chats, isolated by bot account and user.
 - **Hassle-Free Deployment & Queuing**: Generate a companion Docker deployment command on Linux that reuses AstrBot's configured models, or connect any existing Hindsight service on Windows/Linux. Unsent messages queue locally and retry once Hindsight comes back online.
 
@@ -51,7 +51,7 @@ See the [Installation Guide](docs/INSTALL.md), [Native Windows Deployment](docs/
 
 ## Upgrading
 
-> **Upgrading to 0.4.0**: Back up your plugin data, control directory, and config before upgrading (see [Backup & Restore](docs/DATA-MAINTENANCE.md)). **0.4.0 automatically migrates the control database to schema format 7 while preserving existing banks, settings, and pending records; direct downgrades to older plugin versions are not supported afterward.**
+> **Upgrading to 0.6.0**: The 0.5.0 runtime and control databases are backed up and merged into `bridge.sqlite3`, preserving settings, queued work and usage history. **Direct downgrades are not supported**; before first activation, stop the plugin and restore both directories from `legacy-v0.5-backup/`. Delete this old chat copy after stable operation. Whole-database recovery restores the snapshot's authorization and queue state, rather than combining old runtime data with newer control data. See [Backup & Restore](docs/DATA-MAINTENANCE.md). Quoted, linked and mixed-media private messages now retain their text by default.
 
 Update and reload the plugin in AstrBot's plugin manager; if prompted, re-confirm the bot identity. Updating the plugin does not touch your Hindsight containers. To upgrade a companion Hindsight service, follow the [Service Upgrade Guide](docs/DATA-MAINTENANCE.md#升级-hindsight-服务) (fresh companion installs default to 1.2.0).
 
@@ -60,7 +60,7 @@ Update and reload the plugin in AstrBot's plugin manager; if prompted, re-confir
 Normal chatting requires no commands. Open **Users & Memories** in the plugin panel to:
 
 - **Switch Memory Modes**: Toggle **Read/Write**, **Read-Only**, or **Paused** at the top overview card and monitor saved, pending, and failed counts alongside the latest recall result.
-- **Tune Chat Recall**: Switch between **Auto Recall** and **On-Demand Tools**, customize the memory prompt and retrieval budget, allow read-only recall on quoted replies or links, and inspect delivered context snapshots per turn.
+- **Tune Chat Recall**: Switch between **Auto Recall** and **On-Demand Tools**, customize the memory prompt and retrieval budget, and inspect delivered context snapshots and skip reasons. Fresh installations wait up to 15 seconds for recall and 3 seconds for Knowledge Pages; existing explicit values are preserved.
 - **Manage Knowledge Pages & Reflect**: Pick, order, and toggle up to 8 Knowledge Pages, or enable per-user Reflect synthesis.
 - **Edit Content in Control Plane**: Copy the Control Plane URL from **Plugin Settings → Hindsight Service Connection** and the user's **Bank ID** to browse, search, edit, or export memories directly in Hindsight (see [Deployment](deploy/README.md#五打开官方-control-plane) for login key retrieval).
 - **Recover or Clear Data**: Resolve upgrade or error pauses under **View Pause Status**, or permanently erase a user's bank via **Clear Memory**. Reflect timeouts do not block recovery or erasure; AstrBot's own chat history stays intact.
@@ -81,7 +81,8 @@ Version 0.5.0 retires `correct/view/show/export/recall/background/retry/cancel`.
 ## Scope
 
 - **Recorded**: Private text messages from enabled users and final assistant replies saved to AstrBot's conversation history.
-- **Excluded**: Group chats, media (images, audio, files, video), forwards, commands (starting with `/`), and chats from before installation. When read-only recall for quoted replies/links is enabled, those turns read existing memories without saving new ones.
+- **Included**: Private text with emoji, quoted replies, links or media attachments keeps its text and minimal media markers; quote context comes only from a verified local message ID.
+- **Excluded**: Pure media without text, group chats, forwards, commands (starting with `/`), and chats from before installation.
 - **Privacy**: Conversation text is sent only to your configured Hindsight instance and model providers.
 
 ## Documentation
