@@ -63,9 +63,7 @@ class PanelUpgrade:
         from astrbot.api.web import request
 
         payload = await self.body()
-        async with self.lock:
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.route(resources=False, timeout=None):
             self.check_revision(payload)
             self.ensure_no_upgrade()
             self.require_managed()
@@ -86,13 +84,11 @@ class PanelUpgrade:
         from astrbot.api.web import request
 
         payload = await self.body()
-        if not request.username:
-            raise PanelError("请使用 AstrBot 管理账号登录。")
         action = payload.get("action")
         recovery = action in ("verify", "resume", "cancel")
         if not recovery:
             self.ensure_local_installation()
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(60):
+        async with self.route(timeout=60):
             self.check_revision(payload)
             plugin, state = self.plugin, self.upgrade_state()
             status = await self.service_status()

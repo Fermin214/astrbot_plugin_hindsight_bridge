@@ -331,7 +331,7 @@ export function createApp(view) {
     () => view.copyValue("control-plane-url", "已复制")));
   view.$("scope-bank").addEventListener("focus", () => view.$("scope-bank").select());
   view.$("retry").addEventListener("click", () => void view.perform(view.$("retry"), "memory", async () => {
-    const response = await view.bridge.apiPost(view.endpoint("action"), { action: "retry" });
+    const response = await view.bridge.apiPost(view.endpoint("action"), { action: "retry", ...view.scopeWrite() });
     await view.refreshBootstrap();
     view.notify(response.message || "已安排重试。");
   }));
@@ -359,7 +359,10 @@ export function createApp(view) {
       view.$("forget-agree").disabled = true;
       view.$("cancel-forget").disabled = true;
       try {
-        const response = await view.bridge.apiPost(view.endpoint("action", pending.id), { action: "forget_confirm", confirmation: pending.confirmation });
+        const response = await view.bridge.apiPost(view.endpoint("action", pending.id), {
+          action: "forget_confirm", confirmation: pending.confirmation,
+          scope_revision: pending.scope_revision, config_revision: pending.config_revision,
+        });
         view.forgetState = null;
         view.$("forget-dialog").close();
         await view.refreshBootstrap();

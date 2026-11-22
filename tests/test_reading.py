@@ -345,14 +345,14 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         foreign.context = context.context
         foreign.messages = [SimpleNamespace(role="user", content=[SimpleNamespace(text="independent task", _no_save=False)])]
         turn = self.tools.tool_turns[event]
-        turn.context_ref = None
+        turn.binding.context = None
         with patch.object(self.tools, "read", AsyncMock()) as read:
             self.tools.begin(event, foreign)
-            self.assertIsNone(turn.context_ref)
+            self.assertIsNone(turn.binding.context)
             self.assertFalse(self.tools.finish(event, foreign))
             foreign.messages[0].content.append(context.messages[0].content[-1])
             self.tools.begin(event, foreign)
-            self.assertIsNone(turn.context_ref)
+            self.assertIsNone(turn.binding.context)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
             self.tools.begin(event, context)
             self.assertIn("tool_context_unavailable", await self.tools.execute(foreign, "recall", {"query": "q"}))
@@ -406,7 +406,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     async def test_native_light_schemas_preserve_request_ownership_and_retire_cached_source_tools(self):
         event, context = await self.ready()
         turn = self.tools.tool_turns[event]
-        turn.context_ref = None
+        turn.binding.context = None
         source = self.request.func_tool
         foreign = SimpleNamespace(name="foreign", description="foreign", active=True, handler_module_path="other.main")
         source.tools.append(foreign)
@@ -415,7 +415,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
             handler=None, handler_module_path=None, active=True,
         ) for tool in source.tools])
         self.tools.begin(event, context)
-        self.assertIs(turn.context_ref(), context)
+        self.assertIs(turn.binding.context, context)
         with patch.object(self.tools, "read", AsyncMock(return_value={"kind": "recall", "items": []})) as read:
             results = [await self.tools.execute(context, "recall", {"query": "q"}) for _ in range(5)]
         self.assertEqual(read.await_count, 4)

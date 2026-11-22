@@ -153,8 +153,7 @@ export function createMaintenance(view) {
       view.renderMaintenance();
       let response;
       try {
-        response = await view.bridge.apiPost(view.endpoint("action", id), { action, ...extra,
-          ...(["maintenance_begin", "bank_check"].includes(action) ? { config_revision: view.settingsRevision } : {}) });
+        response = await view.bridge.apiPost(view.endpoint("action", id), { action, ...extra, ...view.scopeWrite(id) });
       } catch (error) {
         if (action === "maintenance_begin") await view.refreshBootstrap({ automatic: true, pollMaintenance: false }).catch(() => {});
         throw error;
@@ -189,9 +188,10 @@ export function createMaintenance(view) {
 
   async function prepareForget(button, id) {
     await view.perform(button, "memory", async () => {
-      const response = await view.bridge.apiPost(view.endpoint("action", id), { action: "forget_prepare" });
+      const version = view.scopeWrite(id);
+      const response = await view.bridge.apiPost(view.endpoint("action", id), { action: "forget_prepare", ...version });
       if (!response.confirmation) throw new Error("无法准备清空操作，请重试。");
-      view.forgetState = { id, confirmation: response.confirmation };
+      view.forgetState = { id, confirmation: response.confirmation, ...version };
       view.$("forget-user").textContent = view.scopeName(view.data.scopes.find((item) => item.scope_id === id));
       view.$("forget-message").textContent = "清空后暂停记忆，完成后可切回读写模式。";
       view.$("forget-feedback").textContent = "";

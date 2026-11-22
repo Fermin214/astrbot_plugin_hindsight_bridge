@@ -1,7 +1,7 @@
 """AstrBot plugin-view connection, account and maintenance management."""
 
 import asyncio
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -94,6 +94,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             task = asyncio.current_task()
             try:
                 self.ensure_open()
+                self.require_login()
                 self.requests.add(task)
                 value = await handler(**kwargs)
                 if isinstance(value, dict):
@@ -111,6 +112,32 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             finally:
                 self.requests.discard(task)
         return invoke
+
+    @staticmethod
+    def require_login():
+        from astrbot.api.web import request
+
+        if not request.username:
+            raise PanelError("请使用 AstrBot 管理账号登录。")
+
+    @asynccontextmanager
+    async def route(self, *, resources=True, timeout=8):
+        async with self.lock, self.plugin.using_resources() if resources else nullcontext(), asyncio.timeout(timeout):
+            self.ensure_open()
+            self.require_login()
+            yield
+
+    def check_card(self, payload, scope, selection, code):
+        self.check_scope_revision(payload, scope, code)
+        if type(payload.get("revision")) is not int or payload["revision"] != selection["revision"]:
+            raise QueueError(code)
+
+    def check_scope_revision(self, payload, scope, code="scope_not_available"):
+        if (
+            type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
+            or payload.get("config_revision") != self.config_revision()
+        ):
+            raise QueueError(code)
 
     def ensure_open(self):
         if self.closed:

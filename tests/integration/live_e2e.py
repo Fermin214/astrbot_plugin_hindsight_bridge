@@ -316,7 +316,11 @@ class Acceptance:
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
     async def action(self, scope, action, **extra):
-        return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={"action": action, **extra})
+        state = await self.bootstrap()
+        row = next(item for item in state["scopes"] if item["scope_id"] == scope)
+        return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={
+            "action": action, "scope_revision": row["revision"], "config_revision": state["config_revision"], **extra,
+        })
 
     async def memories(self, bank):
         async with self.session.get(self.settings["hindsight_url"] + "/v1/default/banks/" + bank + "/memories/list?limit=100",
@@ -448,9 +452,12 @@ class Acceptance:
         await until(check, timeout=180)
 
     async def blocked_maintenance_resume(self, scope_id):
+        state = await self.bootstrap()
+        scope = next(row for row in state["scopes"] if row["scope_id"] == scope_id)
         async with self.session.post(
             self.dashboard + self.prefix + "/scopes/" + scope_id + "/action",
-            json={"action": "maintenance_resume"}, headers={"Authorization": "Bearer " + self.token},
+            json={"action": "maintenance_resume", "scope_revision": scope["revision"],
+                  "config_revision": state["config_revision"]}, headers={"Authorization": "Bearer " + self.token},
         ) as response:
             value = await response.json()
             assert response.status >= 400 or value.get("status") == "error"

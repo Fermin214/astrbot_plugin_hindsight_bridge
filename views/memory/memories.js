@@ -844,7 +844,7 @@ export function createMemories(view) {
     const id = view.scopeId;
     if (!view.modeLabels[mode]) return;
     await view.perform(button, "memory", async () => {
-      const response = await view.bridge.apiPost(view.endpoint("action", id), { action: "mode", mode });
+      const response = await view.bridge.apiPost(view.endpoint("action", id), { action: "mode", mode, ...view.scopeWrite(id) });
       await view.refreshBootstrap();
       view.notify(response.message || "记忆模式已更新。");
     });

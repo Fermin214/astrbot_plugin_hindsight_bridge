@@ -445,7 +445,7 @@ class Feedback(Acceptance):
                     await self.restart(move_business)
                     after_alias = await self.scope()
                     assert after_alias["bank"] == before_alias["bank"]
-                    assert after_alias["background"]["page_ids"] == before_alias["background"]["page_ids"]
+                    assert after_alias["background"]["pages"] == before_alias["background"]["pages"]
                     self.passed("native_single_main_directory_alias_preserves_identity_and_bank")
 
                 async def chat_status(expected, used):

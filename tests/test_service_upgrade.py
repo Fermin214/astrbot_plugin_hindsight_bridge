@@ -19,6 +19,9 @@ from plugins.astrbot_plugin_hindsight_bridge.core.panel import MemoryPanel, Pane
 
 class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        web = patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin"))})
+        web.start()
+        self.addCleanup(web.stop)
         support = patch("plugins.astrbot_plugin_hindsight_bridge.core.panel.local_installation_supported", return_value=True)
         self.installation_supported = support.start()
         self.addCleanup(support.stop)
@@ -62,6 +65,17 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.panel.body = AsyncMock(return_value={"action": action, "config_revision": self.panel.config_revision(), **extra})
         with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin"))}):
             return await self.panel.upgrade()
+
+    async def personal(self, row, action, **extra):
+        scope = self.queue.scope_owner(row["scope_id"])
+        self.panel.body = AsyncMock(return_value={
+            "action": action, "scope_revision": scope["revision"],
+            "config_revision": self.panel.config_revision(), **extra,
+        })
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
+            request=SimpleNamespace(method="POST", username="admin"),
+        )}):
+            return await self.panel.action(row["scope_id"])
 
     async def test_versions_are_actual_cached_per_identity_and_unknown_is_not_default(self):
         status = await self.panel.service_status(force=False)
@@ -133,21 +147,16 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
                 with patch.object(self.panel, "_save", new=AsyncMock(return_value={"saved": True})) as save:
                     self.assertTrue((await self.panel.save())["saved"])
                     save.assert_awaited_once()
-                request = SimpleNamespace(method="POST", username="admin")
-                with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}):
-                    for row in self.rows:
-                        self.panel.body = AsyncMock(return_value={"action": "maintenance_status"})
-                        self.assertTrue((await self.panel.action(row["scope_id"]))["maintenance"]["ready"])
-                        self.panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
-                        self.client.bank_exists.return_value = False
-                        with self.assertRaisesRegex(QueueError, "bank_missing"):
-                            await self.panel.action(row["scope_id"])
-                        self.assertTrue(self.queue.summary(row["scope_id"])["maintenance"])
-                        self.client.bank_exists.return_value = True
-                        await self.panel.action(row["scope_id"])
-                        self.assertIsNone(self.queue.summary(row["scope_id"])["maintenance"])
-                    self.panel.body = AsyncMock(return_value={"action": "forget_prepare"})
-                    self.assertIn("confirmation", await self.panel.action(self.rows[0]["scope_id"]))
+                for row in self.rows:
+                    self.assertTrue((await self.personal(row, "maintenance_status"))["maintenance"]["ready"])
+                    self.client.bank_exists.return_value = False
+                    with self.assertRaisesRegex(QueueError, "bank_missing"):
+                        await self.personal(row, "maintenance_resume")
+                    self.assertTrue(self.queue.summary(row["scope_id"])["maintenance"])
+                    self.client.bank_exists.return_value = True
+                    await self.personal(row, "maintenance_resume")
+                    self.assertIsNone(self.queue.summary(row["scope_id"])["maintenance"])
+                self.assertIn("confirmation", await self.personal(self.rows[0], "forget_prepare"))
                 self.assertEqual(self.queue.scope_owner(self.rows[0]["scope_id"])["mode"], "readonly")
                 self.assertEqual(self.panel.state(), state)
                 self.panel.ensure_no_upgrade()
@@ -169,11 +178,7 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         self.panel = self.reload_panel()
 
         async def personal(row, action, **extra):
-            self.panel.body = AsyncMock(return_value={"action": action, **extra})
-            with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
-                request=SimpleNamespace(method="POST", username="admin"),
-            )}):
-                return await self.panel.action(row["scope_id"])
+            return await self.personal(row, action, **extra)
 
         await personal(self.rows[0], "maintenance_resume")
         confirmation = await personal(self.rows[0], "forget_prepare")
@@ -407,14 +412,11 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
         await self.action("begin")
         await self.action("prepare", backup_confirmed=True)
         original_revision = self.panel.config_revision()
-        self.panel.body = AsyncMock(return_value={"action": "maintenance_begin", "config_revision": original_revision})
-        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin", method="POST"))}):
-            response = await self.panel.action(self.rows[0]["scope_id"])
+        response = await self.personal(self.rows[0], "maintenance_begin")
         self.assertNotEqual(response["config_revision"], original_revision)
         self.assertEqual(response["config_revision"], self.panel.config_revision())
-        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin", method="POST"))}):
-            with self.assertRaisesRegex(PanelError, "配置已被更新"):
-                await self.panel.action(self.rows[0]["scope_id"])
+        with self.assertRaises(QueueError):
+            await self.personal(self.rows[0], "maintenance_begin", config_revision=original_revision)
         self.assertEqual(len(self.panel.state()["upgrade_pauses"]["banks"]), 1)
         self.client.request.return_value = {"api_version": "1.2.0"}
         await self.action("verify")
@@ -425,18 +427,15 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
     async def test_personal_pause_intent_survives_failure_before_control_update(self):
         await self.action("begin")
         await self.action("prepare", backup_confirmed=True)
-        self.panel.body = AsyncMock(return_value={"action": "maintenance_begin",
-                                                  "config_revision": self.panel.config_revision()})
         revision = self.queue.control.setting("revision")
-        modules = {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin", method="POST"))}
-        with patch.dict(sys.modules, modules), patch.object(self.panel, "store_state", side_effect=OSError("setup interrupted")):
+        with patch.object(self.panel, "store_state", side_effect=OSError("setup interrupted")):
             with self.assertRaises(OSError):
-                await self.panel.action(self.rows[0]["scope_id"])
+                await self.personal(self.rows[0], "maintenance_begin")
         self.assertEqual(self.queue.control.setting("revision"), revision)
         self.assertEqual(len(self.panel.state()["upgrade_pauses"]["banks"]), 2)
-        with patch.dict(sys.modules, modules), patch.object(self.maintenance, "begin", side_effect=OSError("control interrupted")):
+        with patch.object(self.maintenance, "begin", side_effect=OSError("control interrupted")):
             with self.assertRaises(OSError):
-                await self.panel.action(self.rows[0]["scope_id"])
+                await self.personal(self.rows[0], "maintenance_begin")
         self.reopen_queue()
         self.panel = self.reload_panel()
         self.client.request.return_value = {"api_version": "1.2.0"}
@@ -472,10 +471,8 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
     async def test_pending_upgrade_blocks_resume_until_verified_or_cancelled(self):
         await self.action("begin")
         await self.action("prepare", backup_confirmed=True)
-        self.panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
-        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin", method="POST"))}):
-            with self.assertRaises(PanelError):
-                await self.panel.action(self.rows[0]["scope_id"])
+        with self.assertRaises(PanelError):
+            await self.personal(self.rows[0], "maintenance_resume")
         self.assertTrue(self.queue.summary(self.rows[0]["scope_id"])["maintenance"])
 
     async def test_repeated_begin_and_mode_change_do_not_invalidate_bank_identity(self):

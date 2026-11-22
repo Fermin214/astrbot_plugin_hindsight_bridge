@@ -180,7 +180,8 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(panel.managed_connection())
         self.assertIn("已暂停", await self.plugin.mode(self.event("/hb on", mid="on-paused"), "active"))
         self.assertTrue(queue.summary(scope["scope_id"])["maintenance"])
-        panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
+        panel.body = AsyncMock(return_value={"action": "maintenance_resume", "scope_revision": queue.scope_owner(scope["scope_id"])["revision"],
+                                            "config_revision": panel.config_revision()})
         with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
             request=SimpleNamespace(method="POST", username="admin"),
         )}):

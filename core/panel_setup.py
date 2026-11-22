@@ -127,7 +127,7 @@ class PanelSetup:
     async def prepare(self):
         self.ensure_local_installation()
         payload = await self.body()
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             self.check_revision(payload)
             self.ensure_no_upgrade()
             explicit = payload.get("mode") == "managed"
@@ -266,7 +266,7 @@ class PanelSetup:
             self.model_job.update(status="failed", message=message)
 
     async def apply_models(self, payload):
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             self.ensure_no_upgrade()
             self.check_revision(payload)
             state = self.require_managed()
@@ -303,7 +303,7 @@ class PanelSetup:
     async def prepare_uninstall(self):
         self.ensure_local_installation()
         payload = await self.body()
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             self.ensure_no_upgrade()
             self.check_revision(payload)
             state = self.require_managed()
@@ -313,7 +313,7 @@ class PanelSetup:
 
     async def save(self):
         payload = await self.body()
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             self.ensure_no_upgrade()
             self.check_revision(payload)
             revision = self.config_revision()
@@ -323,9 +323,7 @@ class PanelSetup:
         from astrbot.api.web import request
 
         payload = await self.body()
-        if not request.username:
-            raise PanelError("请使用 AstrBot 管理账号登录。")
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             if set(payload) != {"config_revision", "parameters"}:
                 raise PanelError("请只提交记忆参数，并重新加载记忆设置后保存。")
             self.check_revision(payload)
@@ -361,7 +359,7 @@ class PanelSetup:
 
     async def save_access(self):
         payload = await self.body()
-        async with self.lock:
+        async with self.route(resources=False, timeout=None):
             self.check_revision(payload)
             address = self.control_plane_url(payload.get("control_plane_url", ""))
             previous = copy.deepcopy(dict(self.plugin.config))
