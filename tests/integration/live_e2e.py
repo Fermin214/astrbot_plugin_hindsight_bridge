@@ -728,7 +728,10 @@ class Acceptance:
                     "config_revision": old["config_revision"], "api_url": self.settings["memory_url"], "api_key": "",
                     "allowed_accounts": [{"platform_instance_id": "delivery-onebot", "user_id": str(user)} for user in (ALICE, BOB)],
                 })
-                assert "__template_key" not in (await self.config())["allowed_accounts"][0]
+                saved_accounts = (await self.config())["allowed_accounts"]
+                assert [{key: row[key] for key in ("platform_instance_id", "user_id")} for row in saved_accounts] == [
+                    {"platform_instance_id": "delivery-onebot", "user_id": str(user)} for user in (ALICE, BOB)
+                ]
 
                 usage_route = self.prefix + "/scopes/" + alice["scope_id"] + "/usage"
                 old_turns = (await self.http("GET", usage_route))["turns"]
