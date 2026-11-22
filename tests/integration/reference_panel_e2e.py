@@ -22,7 +22,7 @@ async def verify_clipboard(page, frame, turn):
         if count:
             assert f"{count} {label}" in option, option
     tabs = frame.locator(".usage-tabs [role='tab']")
-    assert await tabs.all_inner_texts() == ["参考内容", "发给 AI 的原文", "原始 JSON"]
+    assert await tabs.all_inner_texts() == ["参考内容", "发给 AI 的原文", "原始 JSON", "跳过记录"]
     await frame.locator("#usage-tab-content").click()
     assert await frame.locator("#usage-panel-content").is_visible()
     assert await frame.locator(".usage-delivery").count() == len(turn["deliveries"])

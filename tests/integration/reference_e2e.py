@@ -128,7 +128,7 @@ async def verify(acceptance, page, frame, bank):
     assert json.dumps(await detail(legacy["id"]), ensure_ascii=False) == frozen_legacy
     await reference_panel_e2e.verify_clipboard(page, frame, legacy)
     await frame.locator('[data-close="usage-dialog"]').click()
-    acceptance.passed("native_040_snapshots_and_exact_json_stay_frozen_after_page_refresh_and_render_in_three_tabs")
+    acceptance.passed("native_040_snapshots_and_exact_json_stay_frozen_after_page_refresh_and_render_in_four_tabs")
     await acceptance.action((await acceptance.scope(BOB))["scope_id"], "mode", mode="readonly")
     await acceptance.bot.chat(BOB, "No memories yet.")
     bob_record = (await turns(bob_route))[0]
