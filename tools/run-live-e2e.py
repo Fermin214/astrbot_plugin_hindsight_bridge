@@ -166,6 +166,7 @@ class Gateway(ThreadingHTTPServer):
         self.reflect_gate = threading.Event()
         self.reflect_gate.set()
         self.drop_reflect = False
+        self.operation_override = None
         self.lock = threading.Lock()
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
@@ -263,6 +264,36 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 elif body["action"] == "extraction_status":
                     self.reply(200, json.dumps({"held": self.server.extraction_held}).encode())
                     return
+                elif body["action"] == "operation_override":
+                    mode = body.get("mode")
+                    if mode not in {None, "parent", "child"}:
+                        raise ValueError
+                    bank = body.get("bank", "")
+                    if mode and not bank.startswith("abm-v1-"):
+                        raise ValueError
+                    self.server.operation_override = {
+                        "mode": mode, "bank": bank,
+                        "operation_id": body.get("operation_id"), "child_id": body.get("child_id"),
+                    } if mode else None
+                elif body["action"] == "collect_hindsight_logs":
+                    name = state.owner + "-hindsight"
+                    state.owned(name)
+                    output = subprocess.run(["docker", "logs", "--timestamps", name], check=True, capture_output=True)
+                    value = output.stdout + output.stderr
+                    for setting, secret in state.settings.items():
+                        if isinstance(secret, str) and secret and any(
+                            token in setting for token in ("key", "token", "password")
+                        ):
+                            value = value.replace(secret.encode(), b"[redacted]")
+                    path = state.output / "hindsight-current.log"
+                    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as file:
+                        file.write(value)
+                    unauthorized = len(re.findall(
+                        rb'\b401\s+Unauthorized\b|\bhttp_401\b|\b(?:status|status_code)["\s:=]+401\b',
+                        value, re.IGNORECASE,
+                    ))
+                    self.reply(200, json.dumps({"at": time.time(), "unauthorized": unauthorized}).encode())
+                    return
                 elif body["action"] == "collect_astrbot_logs":
                     name = state.owner + "-astrbot"
                     state.owned(name)
@@ -328,6 +359,49 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.relay_chat_stream(response, json.loads(raw), started)
                     return
                 value = response.read(32 * 1024 * 1024 + 1)
+                if self.path.startswith("/memory/"):
+                    self.server.record("memory-http-trace", {
+                        "path": path, "method": self.command, "status": response.status, "at": time.time(),
+                        "real_key": hmac.compare_digest(
+                            headers.get("Authorization", ""), "Bearer " + state.settings["memory_key"],
+                        ),
+                    })
+                    override = self.server.operation_override
+                    if (
+                        override and self.command == "GET"
+                        and path.startswith("/v1/default/banks/" + override["bank"] + "/operations")
+                    ):
+                        result = json.loads(value)
+                        operations = result.get("operations", [result])
+                        changed = False
+                        for operation in operations:
+                            operation_id = operation.get("operation_id") or operation.get("id")
+                            root = not override["operation_id"] or operation_id == override["operation_id"]
+                            child = override["mode"] == "child" and operation_id == override["child_id"]
+                            if not root and not child:
+                                continue
+                            native = {
+                                "status": operation["status"],
+                                "child_operations": operation.get("child_operations", []),
+                            }
+                            native = json.loads(json.dumps(native))
+                            if override["mode"] == "parent" or child:
+                                operation["status"] = "native_checkpoint_v050"
+                                changed = True
+                            elif root:
+                                for item in operation.get("child_operations", []):
+                                    if item["operation_id"] == override["child_id"]:
+                                        item["status"] = "native_checkpoint_v050"
+                                        changed = True
+                            operation["v050_extension_metadata"] = {"checkpoint": True}
+                            self.server.record("operation-extension-trace", {
+                                "path": path, "at": time.time(), "operation_id": operation_id,
+                                "mode": override["mode"], "native": native,
+                                "status": operation["status"],
+                                "child_operations": operation.get("child_operations", []),
+                            })
+                        if changed:
+                            value = json.dumps(result).encode()
                 if state.settings.get("references") and self.path.startswith("/memory/") and self.path.endswith("/recall"):
                     self.server.record("recall-order", {"ids": [row["id"] for row in json.loads(value)["results"]]})
                 if self.path.startswith("/memory/") and self.path.endswith("/reflect"):
@@ -353,6 +427,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                                                       "seconds": round(time.monotonic() - started, 3)})
                 self.reply(response.status, value, response.headers.get("Content-Type", "application/json"))
         except HTTPError as error:
+            if self.path.startswith("/memory/"):
+                self.server.record("memory-http-trace", {
+                    "path": path, "method": self.command, "status": error.code, "at": time.time(),
+                    "real_key": hmac.compare_digest(
+                        headers.get("Authorization", ""), "Bearer " + state.settings["memory_key"],
+                    ),
+                })
+            if self.path == "/v1/chat/completions":
+                self.server.record("chat-failure-trace", {"model": json.loads(raw).get("model"), "status": error.code})
             with error:
                 self.reply(error.code, error.read(32 * 1024 * 1024))
         except (OSError, URLError):
@@ -503,7 +586,7 @@ class Environment:
     def start(self):
         run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--output", str(self.output))
         with (self.output / "released-install.zip").open("wb") as file:
-            run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/", "v0.1.0", cwd=ROOT, stdout=file)
+            run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/", "v0.4.0", cwd=ROOT, stdout=file)
         self.docker("volume", "create", "--label", "hindsight-bridge.test=" + self.owner, self.volume, stdout=subprocess.DEVNULL)
         self.launch("db", "hindsight-bridge-delivery-postgres:17", "--memory", "512m", "--shm-size", "128m",
                     "-e", "POSTGRES_USER=hindsight", "-e", "POSTGRES_DB=hindsight", "-e", "POSTGRES_PASSWORD=" + self.settings["database_password"],

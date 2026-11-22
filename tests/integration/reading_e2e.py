@@ -1,6 +1,7 @@
 """Actual Agent tool loops, native read APIs, persistence and owner modes."""
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 import zipfile
@@ -128,6 +129,45 @@ async def verify_assistant_capture(acceptance, frame):
         await acceptance.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + name)
 
 
+async def verify_fallbacks(acceptance, chat):
+    profile = (await acceptance.http("GET", "/api/v1/config-profiles/default"))["config"]
+    original = copy.deepcopy(profile)
+    source = (await acceptance.http("GET", "/api/v1/providers/by-id?provider_id=delivery-chat&merged=true"))["provider"]
+    provider_ids = []
+    primary = {**source, "id": "delivery-fallback-primary", "model": "fixture-primary", "modalities": ["tool_use"]}
+    backup = {**source, "id": "delivery-fallback-backup", "model": "fixture-backup", "modalities": ["tool_use"]}
+    try:
+        for candidate in (primary, backup):
+            await acceptance.http("POST", "/api/v1/providers", payload={"config": candidate})
+            provider_ids.append(candidate["id"])
+        profile["agent_runner"]["config"]["model"].update(
+            provider_id=primary["id"], fallback_provider_ids=[backup["id"]],
+        )
+        await acceptance.http("PUT", "/api/v1/config-profiles/default", payload=profile)
+        failures = len(jsonl("chat-failure-trace"))
+        flow = await chat("HB-TOOLS-FALLBACK")
+        failed = jsonl("chat-failure-trace")[failures:]
+        assert any(item["model"] == "fixture-primary" and item["status"] == 503 for item in failed), failed
+        assert flow and all(request["model"] == "fixture-backup" for request in flow), flow
+        values = results(flow)
+        assert {value.get("kind") for value in values} >= {"search_pages", "page", "recall"}, values
+        assert (await acceptance.scope())["reading"]["status"]["calls"] == 3
+        assert all(any(tool["function"]["name"].startswith(PREFIX) for tool in request.get("tools", [])) for request in flow)
+        acceptance.passed("real_primary_failure_switches_to_tool_capable_backup_with_the_same_owner_and_call_quota")
+        for modalities in (None, ["text"]):
+            candidate = {**backup, "modalities": modalities}
+            await acceptance.http("PUT", "/api/v1/providers/by-id", payload={"provider_id": backup["id"], "config": candidate})
+            flow = await chat("HB-TOOLS-FLOW unsupported fallback capability")
+            assert not any(tool["function"]["name"].startswith(PREFIX) for request in flow for tool in request.get("tools", []))
+            assert not results(flow)
+            assert not (await acceptance.scope())["reading"]["observed_available"]
+        acceptance.passed("unknown_or_unsupported_backup_capability_disables_owned_tools_while_chat_continues")
+    finally:
+        await acceptance.http("PUT", "/api/v1/config-profiles/default", payload=original)
+        for provider_id in reversed(provider_ids):
+            await acceptance.http("DELETE", "/api/v1/providers/by-id?provider_id=" + provider_id)
+
+
 async def verify(acceptance, page, frame, bank):
     acceptance.report["tool_schema_mode"] = acceptance.settings.get("tool_schema_mode", "full")
     scope = await acceptance.scope()
@@ -223,6 +263,8 @@ async def verify(acceptance, page, frame, bank):
     assert any(value.get("error") == "tool_budget_exhausted" for value in results(quota))
     assert not any(tool["function"]["name"].startswith(PREFIX) for tool in quota[-1].get("tools", []))
     acceptance.passed("all_native_tools_share_the_original_inbound_call_quota")
+
+    await verify_fallbacks(acceptance, chat)
 
     probe_name = await install_probe(acceptance)
     try:

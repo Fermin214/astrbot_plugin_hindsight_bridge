@@ -121,11 +121,13 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
         class Client:
             bank_path = staticmethod(module.HindsightClient.bank_path)
+            connection_fingerprint = staticmethod(module.HindsightClient.connection_fingerprint)
 
-            def __init__(self, url, key):
+            def __init__(self, url, key, *, auth_verified=False):
                 self.url = str(module.httpx.URL(url)).rstrip("/")
                 self.key = key
                 self.api_key = key
+                self.auth_verified = ""
 
             async def ensure_auth(self, **kwargs):
                 owner.auth_calls.append((self.url, self.key))
@@ -1095,45 +1097,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         maintenance.resume.assert_awaited_once_with("scope-1", management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "inactive", "ready": False})
         queue.can_recall.assert_not_called()
-
-    async def test_reflect_override_checks_confirmation_revision_owner_and_bank(self):
-        _, queue, _ = self.management_resources()
-        erasure = {"old_bank": "old-bank", "phase": "pending"}
-        queue.control.erasures = Mock(return_value=[erasure])
-        queue.control.reflection_pending = Mock(return_value=[
-            {"bank": "bank-1", "state": "unknown"}, {"bank": "old-bank", "state": "unknown"},
-            {"bank": "foreign-bank", "state": "unknown"},
-        ])
-        queue.control.override_unknown_reflections = Mock(return_value=1)
-        revision = self.panel.config_revision()
-        for values in (
-            {"confirm_override": False}, {"confirm_override": 1}, {"config_revision": "stale"}, {"config_revision": None},
-            {"bank": "foreign-bank"}, {"bank": ["bank-1"]},
-        ):
-            with self.subTest(values=values), self.assertRaises(module.PanelError):
-                await self.action("reflect_override", **{
-                    "bank": "bank-1", "confirm_override": True, "config_revision": revision, **values,
-                })
-        queue.control.override_unknown_reflections.assert_not_called()
-        with self.assertRaises(module.PanelError):
-            await self.action("reflect_override", bank="bank-1", confirm_override=True)
-        for bank in ("bank-1", "old-bank"):
-            result = await self.action("reflect_override", bank=bank, confirm_override=True, config_revision=revision)
-            self.assertEqual(result["overridden"], 1)
-            queue.control.override_unknown_reflections.assert_called_with("connection-1", bank, actor="admin")
-            queue.control.erasures.assert_called_with("connection-1", owner_id="owner-1")
-            queue.control.reflection_pending.assert_called_with("connection-1", owner_id="owner-1")
-            self.assertTrue(self.plugin.worker.wake.is_set())
-            self.assertEqual(erasure["phase"], "pending")
-        queue.forget.assert_not_called()
-        queue.control.reflection_pending.return_value = [{"bank": "bank-1", "state": "dispatched"}]
-        with self.assertRaises(module.PanelError):
-            await self.action("reflect_override", bank="bank-1", confirm_override=True, config_revision=revision)
-        self.assertEqual(queue.control.override_unknown_reflections.call_count, 2)
-        self.panel.body = AsyncMock(return_value={"action": "reflect_override"})
-        request = SimpleNamespace(method="POST", username="")
-        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}), self.assertRaises(module.PanelError):
-            await self.panel.action("scope-1")
 
     async def test_maintenance_defaults_to_drain_and_requires_boolean_discard(self):
         _, _, maintenance = self.management_resources()

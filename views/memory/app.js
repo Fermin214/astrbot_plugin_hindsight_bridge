@@ -62,9 +62,8 @@ export function createApp(view) {
     else view.renderReferences();
     const configured = new Set((view.data.config.allowed_accounts || []).map(view.accountKey));
     view.$("paused-banks-notice").hidden = !view.data.scopes.some((item) => (!configured.has(view.accountKey(item)) || item.historical)
-      && (item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length));
-    view.$("paused-banks-notice").querySelector("span").textContent = view.data.scopes.some((item) => item.summary?.reflect_unknown?.length)
-      ? "有 Reflect 请求需要解除阻塞" : "有记忆库暂停读写";
+      && (item.summary?.maintenance || item.summary?.bank_missing));
+    view.$("paused-banks-notice").querySelector("span").textContent = "有记忆库暂停读写";
     if (pollMaintenance) await view.readMaintenanceStatus();
     view.renderServiceVersion();
     view.$("settings-conflict").hidden = !view.settingsRevision || view.data.config_revision === view.settingsRevision;
@@ -305,7 +304,7 @@ export function createApp(view) {
     void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback")
       .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback"));
   });
-  view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback")
+  view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback", view.usageText)
     .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
   const usageTabs = ["content", "text", "json"];
   usageTabs.forEach((name, index) => {
@@ -324,16 +323,6 @@ export function createApp(view) {
   });
   for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", view.editReflect);
   view.$("reflect-save").addEventListener("click", () => void view.saveReflect());
-  view.$("reflect-override").addEventListener("click", () => view.openReflectOverride());
-  view.$("maintenance-reflect-override").addEventListener("click", () => view.openReflectOverride(view.maintenanceScope()?.scope_id));
-  view.$("reflect-override-confirm").addEventListener("change", () => {
-    view.$("reflect-override-submit").disabled = !view.$("reflect-override-confirm").checked;
-  });
-  view.$("reflect-override-submit").addEventListener("click", () => void view.confirmReflectOverride());
-  view.$("reflect-override-dialog").addEventListener("close", () => {
-    view.reflectOverrideState = null;
-    view.$("reflect-override-confirm").checked = false;
-  });
   view.$("copy-bank").addEventListener("click", () => void view.perform(view.$("copy-bank"), "copy",
     () => view.copyValue("scope-bank", "Bank ID 已复制。")));
   view.$("copy-control-plane").addEventListener("click", () => void view.perform(view.$("copy-control-plane"), "copy",
@@ -345,7 +334,7 @@ export function createApp(view) {
     view.notify(response.message || "已安排重试。");
   }));
   view.$("maintenance-view").addEventListener("click", () => view.openMaintenance(view.scopeId));
-  view.$("show-paused-banks").addEventListener("click", () => view.openMaintenance(view.data.scopes.find((item) => (item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length)
+  view.$("show-paused-banks").addEventListener("click", () => view.openMaintenance(view.data.scopes.find((item) => (item.summary?.maintenance || item.summary?.bank_missing)
     && (item.historical || !(view.data.config.allowed_accounts || []).some((account) => view.accountKey(account) === view.accountKey(item))))?.scope_id));
   view.$("maintenance-scope").addEventListener("change", () => { view.maintenanceScopeId = view.$("maintenance-scope").value; view.renderMaintenance(); void view.readMaintenanceStatus(); });
   view.$("maintenance-retry").addEventListener("click", () => void view.readMaintenanceStatus());

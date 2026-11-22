@@ -61,7 +61,7 @@ def bridge_tool_reply(body):
     history = [tool_value(message) for message in messages if message.get("role") == "tool"]
     page = next((value for value in reversed(history) if isinstance(value, dict) and value.get("kind") == "page"), {})
     kind, params = "", {}
-    if "HB-TOOLS-FLOW" in query or "HB-TOOLS-GUARDS" in query:
+    if "HB-TOOLS-FLOW" in query or "HB-TOOLS-GUARDS" in query or "HB-TOOLS-FALLBACK" in query:
         if not current:
             kind, params = "search_pages", {"query": "HB-TOOLS-PAGE"}
         elif len(current) == 1:
@@ -126,6 +126,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(401)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body.get("model") == "fixture-primary" and "HB-TOOLS-FALLBACK" in json.dumps(body.get("messages", [])):
+            self.send_error(503, "Synthetic primary model outage")
+            return
         if self.path.endswith("/embeddings"):
             self.server.counts["embedding"] += 1
             self.server.embedding_started.set()

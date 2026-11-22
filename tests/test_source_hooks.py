@@ -216,15 +216,15 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin.allowed(self.event()))
         self.assertFalse(self.plugin.outbox.scope(self.incoming)["allowed"])
 
-    async def test_replayed_pause_and_unseen_old_on_do_not_override_latest_mode(self):
+    async def test_command_message_key_is_idempotent_without_clock_high_watermark(self):
         pause = self.event("/hindsight pause", mid="pause")
         self.assertIn("已暂停", await self.plugin.mode(pause, "paused"))
         self.assertIn("command_already_applied", await self.plugin.mode(pause, "paused"))
         with patch.object(time, "time", return_value=103.25):
             self.plugin.outbox.set_mode(self.plugin.outbox.scope(self.incoming)["scope_id"], "readonly")
         late = self.event("/hindsight on", mid="late", timestamp=102)
-        self.assertIn("command_expired", await self.plugin.mode(late, "active"))
-        self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "readonly")
+        self.assertIn("已开启", await self.plugin.mode(late, "active"))
+        self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "active")
 
     async def test_rebinding_during_async_mode_check_prevents_old_command(self):
         event = self.event("/hindsight on", mid="on")

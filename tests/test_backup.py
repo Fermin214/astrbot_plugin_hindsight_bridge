@@ -23,7 +23,7 @@ SPEC.loader.exec_module(BACKUP)
 
 
 class BackupTests(unittest.TestCase):
-    def test_reflect_migration_override_and_backups_preserve_uncertainty_and_audit(self):
+    def test_reflect_startup_archival_advances_backup_revision_and_preserves_history(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data, control = self.fixture(root / "source", request=None)
@@ -48,21 +48,19 @@ class BackupTests(unittest.TestCase):
                     db.execute("UPDATE settings SET value=? WHERE key='revision'", (str(revision),))
                 return directory
 
+            old = fork("old-snapshot", "SELECT 1", 9)
             with closing(Control(control, "fixture", required=True)) as journal:
+                self.assertEqual(journal.setting("revision"), "10")
                 BACKUP.backup(data, control, root / "v7", latest)
+                BACKUP.backup(data, control, root / "repeat-v7", latest)
                 for name, change, revision, error in (
-                    ("lost-unknown", "DELETE FROM reflection_requests", 10, "evidence"),
-                    ("same-revision-override", "UPDATE reflection_requests SET state='overridden',overridden_at=124,overridden_by='admin'", 9, "revision"),
-                    ("foreign-connection", "UPDATE reflection_requests SET connection_id='other'", 10, "evidence"),
-                    ("foreign-bank", "UPDATE reflection_requests SET bank='other'", 10, "evidence"),
-                    ("empty-actor", "UPDATE reflection_requests SET state='overridden',overridden_at=124", 10, "evidence"),
+                    ("same-revision-archive", "UPDATE reflection_requests SET overridden_by='admin'", 10, "revision"),
+                    ("foreign-connection", "UPDATE reflection_requests SET connection_id='other'", 11, "evidence"),
+                    ("foreign-bank", "UPDATE reflection_requests SET bank='other'", 11, "evidence"),
+                    ("empty-actor", "UPDATE reflection_requests SET overridden_by=''", 11, "evidence"),
                 ):
                     with self.subTest(name=name), self.assertRaisesRegex(ValueError, rf"latest_control_{error}_conflict \(reflection_requests\)"):
                         BACKUP.backup(data, fork(name, change, revision), root / f"snapshot-{name}", latest)
-                old = fork("old-snapshot", "SELECT 1", 9)
-                self.assertEqual(journal.override_unknown_reflections("connection", "bank", actor="admin"), 1)
-                BACKUP.backup(data, control, root / "override", latest)
-                BACKUP.backup(data, control, root / "repeat-override", latest)
                 for name, change in (
                     ("lost-audit", "DELETE FROM reflection_requests"),
                     ("back-to-unknown", "UPDATE reflection_requests SET state='unknown',overridden_at=NULL,overridden_by=''"),
@@ -77,7 +75,9 @@ class BackupTests(unittest.TestCase):
                     BACKUP.backup(data, old, root / "rollback", latest)
                 with closing(BACKUP.connect(latest)) as db:
                     self.assertEqual(db.execute("SELECT state,overridden_by,error_code FROM reflection_requests").fetchone(),
-                                     ("overridden", "admin", "disconnect"))
+                                     ("overridden", "startup", "disconnect"))
+            with closing(Control(control, "fixture", required=True)) as journal:
+                self.assertEqual(journal.setting("revision"), "10")
 
     def fixture(self, root, *, deployment="fixture", control_id="control", revision=9, request="X"):
         data, control = root / "data", root / "control"

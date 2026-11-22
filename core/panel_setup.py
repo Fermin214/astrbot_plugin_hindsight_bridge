@@ -54,6 +54,7 @@ class PanelSetup:
         try:
             async with asyncio.timeout(10):
                 await client.ensure_auth(force=True)
+                self.remember_auth(client)
         finally:
             await client.close()
         self.connection_ready(client.url, key)
@@ -207,6 +208,7 @@ class PanelSetup:
             async with asyncio.timeout(10):
                 await client.ensure_auth(force=True)
                 response = await client.request("GET", "/v1/version")
+                self.remember_auth(client)
                 version = response.get("api_version")
                 if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
                     raise PanelError("服务版本响应无效，请检查 Hindsight 服务。")
@@ -442,6 +444,7 @@ class PanelSetup:
                         raise PanelError("请先选择模型并点击「保存模型」，服务启动成功后再保存连接。")
                 async with asyncio.timeout(10):
                     await client.ensure_auth(force=True)
+                    self.remember_auth(client)
         except (HindsightError, TimeoutError):
             raise PanelError("记忆服务连接检查失败，请检查服务地址、Key 与服务运行状态。") from None
         finally:

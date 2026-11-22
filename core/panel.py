@@ -258,6 +258,8 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
         """Opaque fingerprint of the plugin configuration and setup metadata."""
         state = dict(self.state() if setup is None else setup)
         state.pop("connection_job", None)
+        state.pop("auth_fingerprint", None)
+        state.pop("auth_fingerprints", None)
         return sha256(json.dumps(
             {"config": dict(self.plugin.config), "setup": state},
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -479,9 +481,21 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
     def supports_installation():
         return local_installation_supported()
 
-    @staticmethod
-    def new_client(url, key):
-        return HindsightClient(url, key)
+    def new_client(self, url, key):
+        fingerprint = HindsightClient.connection_fingerprint(url, key)
+        state = self.state()
+        verified = fingerprint == state.get("auth_fingerprint") or fingerprint in state.get("auth_fingerprints", [])
+        return HindsightClient(url, key, auth_verified=verified)
+
+    def remember_auth(self, client):
+        if not isinstance(client.auth_verified, str) or not client.auth_verified:
+            return
+        state = self.state()
+        verified = list(state.get("auth_fingerprints", []))
+        if client.auth_verified not in verified:
+            verified.append(client.auth_verified)
+            state["auth_fingerprints"] = verified
+            self.store_state(state)
 
     @staticmethod
     def installation_command(state, **options):

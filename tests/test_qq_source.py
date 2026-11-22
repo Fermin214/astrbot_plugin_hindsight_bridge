@@ -110,17 +110,20 @@ class QQSourceTests(unittest.TestCase):
     adapter_type = Adapter
     host_type = "qq_official"
 
-    def test_readonly_still_rejects_media_unknown_fields_and_invalid_quote_metadata(self):
+    def test_readonly_still_rejects_media_and_invalid_quote_metadata(self):
         for updates in (
             {"message_reference": {}},
             {"message_reference": {"message_id": "quoted"}, "attachments": [{"url": "https://example.invalid"}]},
-            {"message_reference": {"message_id": "quoted"}, "unknown_extension": {}},
             {"message_reference": {"message_id": "quoted"}, "msg_elements": {}},
             {"message_type": 103, "msg_elements": [{"unknown": "payload"}]},
         ):
             with self.subTest(updates=updates):
                 self.assertIsNone(qq.header(self.event(**updates), Plain, (), self.adapter, self.binding,
                                            allow_readonly=True))
+
+    def test_unrelated_outer_metadata_is_ignored_for_plain_text(self):
+        event = self.event(unknown_extension={"trace": "fixture"})
+        self.assertEqual(qq.header(event, Plain, (), self.adapter, self.binding).text, "  QQ original text  ")
 
     def setUp(self):
         self.clock = patch.object(time, "time", return_value=100.25)
@@ -223,15 +226,16 @@ class QQSourceTests(unittest.TestCase):
                     event.is_private_chat = lambda: False
                 self.assertIsNone(self.header(event))
 
-    def test_raw_media_reference_and_unknown_extensions_cannot_downgrade_to_plain(self):
+    def test_raw_media_reference_and_nonprivate_payloads_cannot_downgrade_to_plain(self):
         for fields in (
             {"attachments": [{"content_type": "image/png"}]},
             {"attachments": {}}, {"attachments": False},
             {"msg_elements": [{"type": 103}]}, {"msg_elements": ""},
             {"message_reference": {"message_id": "quoted"}}, {"message_reference": {}},
             {"message_type": 103}, {"message_type": False}, {"message_type": None},
-            {"unknown_content_extension": "hidden"}, {"channel_id": "channel"},
+            {"channel_id": "channel"},
             {"group_openid": "group"},
+            {"parallel_message": {"msg_nodes": [{"message_type": 0, "content": "second body"}]}},
         ):
             with self.subTest(fields=fields):
                 self.assertIsNone(self.header(self.event(**fields)))

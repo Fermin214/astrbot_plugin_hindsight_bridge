@@ -245,14 +245,23 @@ async def control_contracts(fixture, directory):
             rejected_command(queue, applied, "command_already_applied")
             conflict = await incoming(9, "/hindsight readonly", "already-applied-on")
             rejected_command(queue, conflict, "command_identity_conflict", mode="readonly")
-            rejected_command(queue, delayed, "command_expired")
-            assert queue.scope_owner(source.id)["mode"] == "paused"
-            assert queue.control.db.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 1
+            scope = queue.scope(delayed)
+            delayed_command = queue.access.command(delayed, source, scope, "mode", ("active",))
+            queue.access.run(delayed_command, scope, lambda: queue.set_mode(scope["scope_id"], "active", journal_only=True))
+            queue.apply_control()
+            assert queue.scope_owner(source.id)["mode"] == "active"
+            assert queue.control.db.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 2
         with patch.object(time, "time", return_value=baseline + 10):
             old_bank = queue.scope_owner(source.id)["bank"]
             queue.forget(source.id)
             assert queue.scope_owner(source.id)["bank"] != old_bank
-            rejected_command(queue, delayed, "command_expired")
+            rejected_command(queue, delayed, "command_already_applied")
+            try:
+                queue.access.run(delayed_command, scope, lambda: None)
+            except QueueError as error:
+                assert str(error) == "command_already_applied"
+            else:
+                raise AssertionError("duplicate message key applied after erasure")
             rejected_command(queue, applied, "command_already_applied")
             assert queue.scope_owner(source.id)["mode"] == "paused"
     finally:
@@ -260,7 +269,7 @@ async def control_contracts(fixture, directory):
     return [
         "native_queued_event_rejected_after_regrant_while_frozen_task_can_resume",
         "native_replayed_or_conflicting_command_cannot_override_newer_pause",
-        "native_first_seen_late_command_cannot_cross_pause_or_forget_generation",
+        "native_new_message_key_can_arrive_late_and_replays_remain_idempotent",
     ]
 
 
@@ -448,8 +457,8 @@ async def main():
     passed.append("channel_direct_message_not_misclassified_as_c2c")
 
     extra = await fixture.event(data={"unverified_extension": {"content": "synthetic"}})
-    assert fixture.header(extra) is None
-    passed.append("unverified_raw_extension_rejected")
+    assert fixture.header(extra) is not None
+    passed.append("unrelated_raw_extension_ignored")
 
     current = Fixture()
     await current.login()

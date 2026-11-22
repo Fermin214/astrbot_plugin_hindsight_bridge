@@ -19,7 +19,7 @@ def fits(value, *, tokens, chars, bytes_limit, tokenizer):
 
 def query_text(query, *, tokenizer, budget=380):
     if (
-        not isinstance(query, str) or not query.strip() or len(query) > 4000
+        not isinstance(query, str) or not query.strip()
         or token_count(query, tokenizer) > min(400, budget)
     ):
         raise HindsightError("invalid_query_budget", permanent=True)
@@ -43,7 +43,7 @@ async def search_pages(client, bank, query):
         identity = native_page_id(row.get("id"))
         score = row.get("score")
         if (
-            identity in seen or not isinstance(row.get("name"), str) or len(row["name"]) > 1024
+            identity in seen or not isinstance(row.get("name"), str)
             or not isinstance(row.get("snippet"), str)
             or type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 1
             or (row.get("updated_at") is not None and not isinstance(row["updated_at"], str))
@@ -278,7 +278,6 @@ async def page_history(client, bank, page):
     for row in rows:
         if (
             not isinstance(row, dict) or not isinstance(row.get("changed_at"), str)
-            or row.get("kind") not in (None, "refresh_failed")
             or (row.get("previous_content") is not None and not isinstance(row["previous_content"], str))
         ):
             raise HindsightError("invalid_background_response")

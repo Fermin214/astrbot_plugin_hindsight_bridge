@@ -22,6 +22,84 @@ from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_opt
 
 
 class ReadContracts(unittest.IsolatedAsyncioTestCase):
+    async def test_negative_authentication_check_runs_once_and_real_key_failures_keep_validation(self):
+        credentials = []
+        status = 200
+
+        async def service(request):
+            credential = request.headers.get("Authorization")
+            credentials.append(credential)
+            return httpx.Response(status if credential in {"Bearer key", "Bearer changed"} else 401, json={"banks": []})
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+        try:
+            await client.check_connection(force=True)
+            fingerprint = client.connection_fingerprint(client.url, client.api_key)
+            self.assertEqual(client.auth_verified, fingerprint)
+            await client.check_connection(force=True)
+            self.assertEqual(sum(value.startswith("Bearer invalid-") for value in credentials), 1)
+            status = 401
+            with self.assertRaisesRegex(HindsightError, "http_401"):
+                await client.check_connection(force=True)
+            self.assertEqual(client.auth_verified, fingerprint)
+            status = 200
+            await client.check_connection(force=True)
+            self.assertEqual(sum(value.startswith("Bearer invalid-") for value in credentials), 1)
+            client.api_key = "changed"
+            await client.check_connection()
+            self.assertEqual(sum(value.startswith("Bearer invalid-") for value in credentials), 2)
+            restarted = HindsightClient(client.url, "changed", transport=httpx.MockTransport(service), auth_verified=True)
+            try:
+                await restarted.check_connection(force=True)
+                self.assertEqual(sum(value.startswith("Bearer invalid-") for value in credentials), 2)
+            finally:
+                await restarted.close()
+        finally:
+            await client.close()
+
+    async def test_unprotected_service_is_rejected_without_marking_credentials_verified(self):
+        calls = []
+
+        async def service(request):
+            calls.append(request)
+            return httpx.Response(200, json={"banks": []})
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
+        try:
+            for _ in range(2):
+                with self.assertRaisesRegex(HindsightError, "server_auth_not_enforced"):
+                    await client.check_connection(force=True)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(client.auth_verified)
+        finally:
+            await client.close()
+
+    async def test_unknown_operation_states_and_extra_metadata_are_retained_for_followup(self):
+        parent = {"operation_id": "parent", "bank_id": "bank", "status": "waiting_for_embeddings",
+                  "child_operations": [{"operation_id": "child", "status": "checkpoint_pending", "new_metadata": {"key": ["future"]}}],
+                  "new_metadata": {"key": ["future"]}}
+
+        async def service(request):
+            if request.url.path.endswith("/operations"):
+                return httpx.Response(200, json={"operations": [parent], "total": 1, "extra": ["future"]})
+            return httpx.Response(200, json=parent)
+
+        client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service), auth_verified=True)
+        client.auth_until = time.monotonic() + 60
+        try:
+            operation = await client.operation("bank", "parent")
+            listed, = await client.list_operations("bank")
+            self.assertEqual(operation.status, "waiting_for_embeddings")
+            self.assertEqual(operation.children, (("child", "checkpoint_pending"),))
+            self.assertEqual(operation, listed)
+            parent["status"] = "completed"
+            self.assertEqual((await client.operation("bank", "parent")).children[0][1], "checkpoint_pending")
+            parent["child_operations"] = {}
+            with self.assertRaisesRegex(HindsightError, "invalid_operation_children"):
+                await client.operation("bank", "parent")
+        finally:
+            await client.close()
+
     def test_request_marker_is_inside_the_shared_background_budget(self):
         prefix = "<hb-read-request:" + "a" * 24 + ">\n"
         rows = [{"text": "complete fact " * 20}]

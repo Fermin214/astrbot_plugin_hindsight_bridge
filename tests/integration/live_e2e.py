@@ -6,6 +6,7 @@ plugin iframe, SDK and authenticated extension APIs. All messages are synthetic.
 
 import asyncio
 from contextlib import closing
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -119,12 +120,7 @@ class OneBot:
                 await self.replies.put({**params, "message": segments})
             await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
 
-    async def send(self, user, text, *, group=False, message_id=None, timestamp=None):
-        if any(text.startswith("/hindsight " + command) for command in (
-            "on", "readonly", "pause", "retry", "cancel", "forget",
-        )):
-            # OneBot seconds cannot order a command against a boundary in the same second.
-            await asyncio.sleep(1.05)
+    async def send(self, user, text, *, group=False, message_id=None, timestamp=None, metadata=None):
         type(self).sequence += 1
         self.message_id = type(self).sequence
         while not self.replies.empty():
@@ -138,11 +134,14 @@ class OneBot:
         }
         if group:
             event["group_id"] = 880001
+        if metadata:
+            assert not event.keys() & metadata.keys()
+            event.update(metadata)
         await self.socket.send_json(event)
         return event["message_id"]
 
-    async def chat(self, user, text, *, timestamp=None):
-        await self.send(user, text, timestamp=timestamp)
+    async def chat(self, user, text, *, timestamp=None, metadata=None):
+        await self.send(user, text, timestamp=timestamp, metadata=metadata)
         async with asyncio.timeout(100):
             while True:
                 reply = await self.replies.get()
@@ -200,13 +199,14 @@ class Acceptance:
                                         data=form, headers=headers, timeout=aiohttp.ClientTimeout(total=180)) as response:
             value = await response.json()
             if response.status >= 400 or value.get("status") == "error":
-                raise RuntimeError(f"{method} {path.split('?')[0]}: HTTP {response.status}, API error")
+                raise RuntimeError(f"{method} {path.split('?')[0]}: HTTP {response.status}, {str(value.get('message') or value.get('error') or 'API error')[:500]}")
             return value.get("data", value)
 
     async def control(self, action, **values):
         async with self.session.post(self.settings["gateway_url"] + "/control", json={"action": action, **values},
                                      headers={"X-Test-Token": self.settings["control_token"]}, timeout=aiohttp.ClientTimeout(total=120)) as response:
             assert response.status == 200
+            return await response.json()
 
     async def backend_ready(self):
         async def ready():
@@ -277,6 +277,124 @@ class Acceptance:
                 settled = (snapshot, time.monotonic())
             return time.monotonic() - settled[1] >= 1.5
         await until(check, timeout=180)
+
+    async def blocked_maintenance_resume(self, scope_id):
+        async with self.session.post(
+            self.dashboard + self.prefix + "/scopes/" + scope_id + "/action",
+            json={"action": "maintenance_resume"}, headers={"Authorization": "Bearer " + self.token},
+        ) as response:
+            value = await response.json()
+            assert response.status >= 400 or value.get("status") == "error"
+            assert "还有记录未处理完" in str(value.get("message") or value.get("error"))
+
+    async def extended_message_and_operations(self, scope):
+        marker = "Willow-Extension-180"
+        bank, scope_id = scope["bank"], scope["scope_id"]
+        started = time.time()
+        future = int(started) + 180
+        maintenance = False
+        await self.control("operation_override", mode="parent", bank=bank)
+        try:
+            await self.bot.chat(
+                ALICE, "Remember the separate compatibility marker " + marker + ". Reply briefly.",
+                timestamp=future, metadata={"gateway_extension_v050": {"delivery_attempt": 1}},
+            )
+
+            def retained():
+                return next((row for row in jsonl("retain-trace") if (
+                    row["path"] == "/v1/default/banks/" + bank + "/memories"
+                    and marker in row["body"]["items"][0]["content"]
+                    and row["body"]["items"][0]["document_id"].startswith("uw1-")
+                    and datetime.fromisoformat(row["body"]["items"][0]["timestamp"]).timestamp() >= future
+                )), None)
+
+            submitted = await until(retained, timeout=100, label="extended future message retain")
+            operation_id = submitted["body"]["operation_id"]
+            await self.control("operation_override", mode="parent", bank=bank, operation_id=operation_id)
+            task = next(row for row in self.tasks() if row["operation_id"] == operation_id)
+
+            def checkpoint(mode):
+                return next((row for row in reversed(jsonl("operation-extension-trace")) if (
+                    row["at"] >= started and row["operation_id"] == operation_id
+                    and row["mode"] == mode and row["native"]["status"] == "completed"
+                    and row["path"].endswith("/operations/" + operation_id)
+                )), None)
+
+            native = await until(lambda: checkpoint("parent"), timeout=180, label="native operation completed")
+
+            async def held(status_id):
+                current = next(row for row in self.tasks() if row["id"] == task["id"])
+                assert current["operation_id"] == operation_id and current["state"] != "cancelled"
+                nodes = database(self.runtime, "SELECT operation_id,status FROM operations WHERE task_id=?", (task["id"],))
+                return current if current["state"] == "tracking" and any(
+                    row["operation_id"] == status_id and row["status"] == "native_checkpoint_v050" for row in nodes
+                ) else None
+
+            await until(lambda: held(operation_id), timeout=30)
+            await self.action(scope_id, "maintenance_begin")
+            maintenance = True
+            state = (await self.action(scope_id, "maintenance_status"))["maintenance"]
+            assert not state["ready"] and state["phase"] == "draining" and state["pending"] > 0
+            await self.blocked_maintenance_resume(scope_id)
+            self.passed("real_native_unknown_parent_status_preserves_original_tracking_and_blocks_maintenance")
+
+            children = native["native"]["child_operations"]
+            if children:
+                child_id = children[0]["operation_id"]
+                await self.control("operation_override", mode="child", bank=bank,
+                                   operation_id=operation_id, child_id=child_id)
+                await until(lambda: held(child_id), timeout=30)
+                await self.blocked_maintenance_resume(scope_id)
+                self.passed("real_native_unknown_child_status_preserves_original_tracking_and_blocks_maintenance")
+            else:
+                self.report["not_covered"].append("native unknown child status: retain operation returned no child_operations")
+                self.save()
+
+            await self.control("operation_override")
+            await self.drained()
+
+            async def ready():
+                return (await self.action(scope_id, "maintenance_status"))["maintenance"]["ready"]
+
+            await until(ready, timeout=180, label="native operations finish without injected status")
+            await self.control("operation_override", mode="parent", bank=bank, operation_id=operation_id)
+            state = (await self.action(scope_id, "maintenance_status"))["maintenance"]
+            assert not state["ready"] and state["remote_active"] > 0 and state["pending"] == 0
+            await self.blocked_maintenance_resume(scope_id)
+            self.passed("real_native_unknown_remote_operation_blocks_maintenance_with_empty_local_queue")
+        finally:
+            await self.control("operation_override")
+            if maintenance:
+                await self.drained()
+                await self.action(scope_id, "maintenance_resume")
+        rows = await self.memories(bank)
+        assert marker in json.dumps(rows)
+        assert next(row for row in self.tasks() if row["id"] == task["id"])["state"] == "done"
+        self.passed("real_astrbot_unknown_outer_metadata_and_180_second_future_message_reaches_hindsight")
+
+    async def daily_auth_polls(self, baseline):
+        def polls():
+            rows = [row for row in jsonl("memory-http-trace") if (
+                row["at"] >= baseline["at"] + 45 and row["path"] == "/v1/default/banks"
+                and row["method"] == "GET" and row["status"] == 200 and row["real_key"]
+            )]
+            if len(rows) >= 2 and rows[-1]["at"] - rows[0]["at"] >= 55:
+                return rows
+            return None
+
+        observed = await until(polls, timeout=max(1, 140 - (time.time() - baseline["at"])),
+                               label="two actual 60-second health polls")
+        final = await self.control("collect_hindsight_logs")
+        traffic = [row for row in jsonl("memory-http-trace") if baseline["at"] <= row["at"] <= final["at"]]
+        assert not any(row["status"] == 401 for row in traffic)
+        assert all(row["real_key"] for row in traffic if row["path"] == "/v1/default/banks")
+        assert final["unauthorized"] == baseline["unauthorized"]
+        self.report["measurements"]["daily_auth"] = {
+            "window_started_at": baseline["at"], "window_ended_at": final["at"],
+            "actual_health_poll_at": [row["at"] for row in observed],
+            "http_401_delta": 0, "native_log_401_delta": final["unauthorized"] - baseline["unauthorized"],
+        }
+        self.passed("real_two_60_second_health_polls_use_real_key_without_http_or_hindsight_log_401")
 
     def requests(self):
         return [row["request"] for row in jsonl("chat-trace") if row["request"].get("max_tokens") == 512]
@@ -486,15 +604,31 @@ class Acceptance:
                 })
                 assert "__template_key" not in (await self.config())["allowed_accounts"][0]
 
+                usage_route = self.prefix + "/scopes/" + alice["scope_id"] + "/usage"
+                old_turns = (await self.http("GET", usage_route))["turns"]
+                assert old_turns
+                old_turn_id = old_turns[0]["id"]
+                old_snapshot = (await self.http("GET", usage_route + "/" + old_turn_id))["turn"]
+                await self.control("stop_hindsight")
+                await self.bot.chat(ALICE, "Remember the upgrade backlog marker Birch-50. Reply briefly.")
+                await asyncio.sleep(1)
+                backlog = [row["id"] for row in self.tasks() if row["state"] not in {"done", "discarded"}]
+                assert backlog
+                candidate_auth_started = time.time()
                 await self.install("candidate-upgrade.zip")
+                await self.control("start_hindsight")
+                await self.backend_ready()
                 current = await self.config()
-                assert current["recall_timeout"] == configuration["recall_timeout"] == 4
+                assert current["recall_timeout"] == configuration["recall_timeout"]
                 assert all(account["__template_key"] == "account" for account in current["allowed_accounts"])
                 state = await self.usable()
                 alice = next(row for row in state["scopes"] if row["user_id"] == str(ALICE))
                 assert alice["bank"] == bank
+                await self.drained()
                 assert all(row["state"] == "done" for row in self.tasks())
-                self.passed("real_upgrade_from_public_v0_1_0_preserves_config_bank_and_outbox")
+                assert all(any(row["id"] == identity for row in self.tasks()) for identity in backlog)
+                assert (await self.http("GET", usage_route + "/" + old_turn_id))["turn"] == old_snapshot
+                self.passed("real_upgrade_from_public_v0_4_0_preserves_backlog_config_bank_and_frozen_usage_snapshot")
 
                 snapshot = await self.bootstrap()
                 await self.http("POST", self.prefix + "/settings/save", payload={
@@ -504,6 +638,15 @@ class Acceptance:
                 await self.config(recall_timeout=10)
                 self.passed("real_plugin_settings_save_then_native_timeout_config_save")
                 await self.usable()
+                daily_auth = await self.control("collect_hindsight_logs")
+                initial_probes = [row for row in jsonl("memory-http-trace") if (
+                    candidate_auth_started <= row["at"] <= daily_auth["at"]
+                    and row["path"] == "/v1/default/banks" and not row["real_key"]
+                )]
+                assert len(initial_probes) == 1 and initial_probes[0]["status"] in {401, 403}
+                self.report["measurements"]["candidate_initial_negative_auth_probe_count"] = len(initial_probes)
+                self.passed("real_candidate_initial_connection_checks_negative_auth_once")
+                await self.extended_message_and_operations(alice)
                 await self.bot.chat(ALICE, "/new")
                 answer = await self.bot.chat(ALICE, "Which tea do I prefer, and what is my notebook code? Answer briefly.")
                 if TIMEOUT in self.latest_wire():
@@ -562,7 +705,9 @@ class Acceptance:
                 await self.control("delay_recall", seconds=0)
                 self.passed("real_total_deadline_agent_notice_and_consecutive_failure_visibility")
                 await self.browser(failure_status=True)
+                await self.daily_auth_polls(daily_auth)
 
+                invalid_auth_started = time.time()
                 await self.config(api_key="invalid-live-test-key")
                 async def rejected():
                     value = await self.bootstrap()
@@ -573,6 +718,8 @@ class Acceptance:
                 assert FAILED in self.latest_wire() and TIMEOUT not in self.latest_wire()
                 rejected_state = await self.bootstrap()
                 assert next(row for row in rejected_state["scopes"] if row["user_id"] == str(ALICE))["summary"]["recall"]["code"] == "http_401"
+                assert any(row["status"] == 401 and row["at"] >= invalid_auth_started
+                           for row in jsonl("memory-http-trace"))
                 await self.config(api_key=self.settings["memory_key"])
                 await self.usable()
                 self.passed("real_initial_auth_probe_distinguishes_bad_key_from_recall_timeout")

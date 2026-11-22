@@ -99,56 +99,6 @@ function parameterHarness() {
   return context;
 }
 
-test("Reflect override requires confirmation and retains its original scope and configuration", async () => {
-  const context = harness();
-  loadFunctions(context, ["renderReflect", "openReflectOverride", "confirmReflectOverride", "perform"]);
-  context.scopeId = "one";
-  context.data = { config_revision: "original", scopes: [{ scope_id: "one", bank: "active",
-    reflect: { enabled: true, revision: 1 }, summary: { reflect_unknown: ["active", "old"] } }] };
-  context.renderReflect();
-  assert.equal(context.$("reflect-override").hidden, false);
-  context.openReflectOverride();
-  assert.equal(context.$("reflect-override-submit").disabled, true);
-  assert.equal(context.$("reflect-override-confirm").checked, false);
-  let calls = 0;
-  context.bridge = { apiPost: async (route, payload) => {
-    calls++;
-    assert.equal(route, "scopes/one/action");
-    assert.deepEqual(payload, { action: "reflect_override", bank: "old", config_revision: "original", confirm_override: true });
-    return { message: "已解除" };
-  } };
-  await context.confirmReflectOverride();
-  assert.equal(calls, 0);
-  context.$("reflect-override-confirm").checked = true;
-  context.$("reflect-override-bank").value = "foreign";
-  await context.confirmReflectOverride();
-  assert.equal(calls, 0);
-  context.$("reflect-override-bank").value = "old";
-  context.scopeId = "two";
-  context.data.config_revision = "changed";
-  await context.confirmReflectOverride();
-  assert.equal(calls, 1);
-  assert.equal(context.$("reflect-override-dialog").open, false);
-  context.scopeId = "one";
-  context.data = { scopes: [{ scope_id: "one", reflect: {}, summary: {} }] };
-  context.renderReflect();
-  assert.equal(context.$("reflect-override").hidden, true);
-});
-
-test("retained user scopes expose unknown Reflect requests through the pause dialog", () => {
-  const context = harness();
-  context.data = { config: { allowed_accounts: [] }, scopes: [{ scope_id: "old-user", historical: true,
-    summary: { reflect_unknown: ["old-bank"] } }] };
-  context.openMaintenance = implementations.get(context).openMaintenance;
-  context.openMaintenance();
-  assert.equal(context.maintenanceScopeId, "old-user");
-  assert.equal(context.$("maintenance-reflect-override").hidden, false);
-  assert.equal(context.$("maintenance-scope").options.length, 1);
-  context.data.scopes[0].summary.reflect_unknown = [];
-  context.renderMaintenance();
-  assert.equal(context.$("maintenance-reflect-override").hidden, true);
-});
-
 test("Windows setup displays the existing-service form without managed controls", () => {
   const context = harness();
   context.document.querySelector = () => ({ value: "managed" });

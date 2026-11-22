@@ -8,10 +8,6 @@ from datetime import datetime
 from .identity import Incoming
 
 
-MESSAGE_FIELDS = frozenset({
-    "message_id", "date", "chat", "from", "text", "entities", "has_protected_content",
-    "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
-})
 PLAIN_ENTITIES = frozenset({
     "bot_command", "bold", "italic", "underline", "strikethrough", "spoiler",
     "code", "pre", "blockquote", "expandable_blockquote", "url", "email",
@@ -22,6 +18,14 @@ REPLY_FIELDS = frozenset({"reply_to_message", "external_reply", "quote", "reply_
 MEDIA_FIELDS = frozenset({
     "animation", "audio", "contact", "dice", "document", "game", "location", "paid_media",
     "photo", "poll", "sticker", "story", "venue", "video", "video_note", "voice",
+})
+NONORDINARY_FIELDS = REPLY_FIELDS | MEDIA_FIELDS | frozenset({
+    "forward_origin", "forward_from", "forward_from_chat", "forward_sender_name", "forward_date",
+    "edit_date", "via_bot", "sender_chat", "business_connection_id", "sender_business_bot",
+    "is_automatic_forward", "paid_star_count", "invoice", "successful_payment", "web_app_data",
+    "passport_data", "new_chat_members", "left_chat_member", "new_chat_title", "new_chat_photo",
+    "pinned_message", "migrate_to_chat_id", "migrate_from_chat_id", "message_auto_delete_timer_changed",
+    "caption", "caption_entities",
 })
 
 
@@ -162,18 +166,20 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     received = getattr(event, "created_at", None)
     valid_time = (
         occurred is not None and math.isfinite(occurred) and 0 < occurred <= time.time() + 300
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
     )
     if inspect is not None:
         inspect(login.bot_id, occurred if valid_time else None, received, lambda: message_shape(msg))
     quoted = msg.reply_to_message is not None
     linked = any(entity.type in READONLY_ENTITIES for entity in msg.entities or ())
     readonly = quoted or linked
-    allowed_fields = MESSAGE_FIELDS | ({"reply_to_message"} if allow_readonly else set())
+    blocked_fields = NONORDINARY_FIELDS - ({"reply_to_message"} if allow_readonly else set())
     allowed_entities = PLAIN_ENTITIES | (READONLY_ENTITIES if allow_readonly else set())
     if (
-        not valid_time or set(raw.to_dict()) - {"update_id", "message"}
-        or set(msg.to_dict()) - allowed_fields or msg.api_kwargs
+        not valid_time or any(getattr(raw, name, None) is not None for name in (
+            "edited_message", "channel_post", "edited_channel_post", "business_message", "edited_business_message",
+        ))
+        or any(msg.to_dict().get(name) not in (None, False, (), []) for name in blocked_fields)
         or any(getattr(msg, name, False) for name in (
             "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
         ))

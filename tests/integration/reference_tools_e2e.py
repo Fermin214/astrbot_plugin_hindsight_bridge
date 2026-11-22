@@ -41,6 +41,10 @@ async def verify(acceptance, frame, bank):
                     if message["role"] == "user" and scenario in message_text(message))
         actual = [message_text(message) for message in last[start + 1:] if message["role"] == "tool"]
         assert [item["text"] for item in tools] == actual, (tools, actual)
+        summary = turns[0]["summary"]
+        assert summary["tools"] == len(tools)
+        assert summary["pages"] == sum(len(delivery.get("pages", [])) for delivery in snapshot["deliveries"])
+        assert summary["memories"] == sum(len(delivery.get("items", [])) for delivery in snapshot["deliveries"])
         return tools, [json.loads(text) for text in actual]
 
     await configure("/reading", mode="tools")
@@ -57,6 +61,12 @@ async def verify(acceptance, frame, bank):
     assert excerpt["content"] == "".join(native["body"].splitlines(keepends=True)[:excerpt["end_line"]])
     assert all("HB-TOOLS-V1-LINE-199" not in delivery["text"] for delivery in tools)
     assert values[2]["kind"] == "recall" and tools[2]["status"] != "error"
+    assert tools[0]["arguments"] == {"query": "HB-TOOLS-PAGE"}
+    assert tools[1]["arguments"] == {"page_id": selected, "start_line": 1, "version": excerpt["version"]}
+    assert tools[1]["pages"][0]["content"] == excerpt["content"]
+    assert tools[1]["pages"][0]["page_id"] == selected
+    assert tools[2]["arguments"] == {"query": "Cedar-120"}
+    assert tools[2]["items"] == values[2]["items"]
     acceptance.passed("tool_snapshot_matches_ordered_wire_and_keeps_only_delivered_page_lines")
 
     await configure("/reflect", enabled=True, timeout=8)
@@ -66,6 +76,7 @@ async def verify(acceptance, frame, bank):
     assert answer.get("kind") == "reflect" and "HB-REFLECT-ANSWER" in answer.get("text", ""), answer
     assert answer["sources"]["available"]
     assert any(answer["sources"][key] for key in ("memories", "mental_models", "directives"))
+    assert tools[0]["arguments"] == {"query": "HB-REFLECT-QUESTION Cedar-120 constraints"}
     acceptance.passed("reflect_snapshot_matches_wire_answer_and_its_native_sources")
     await configure("/reflect", enabled=False, timeout=8)
 

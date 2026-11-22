@@ -165,7 +165,7 @@ class Worker:
             statuses = {node["status"] for node in nodes.values()}
             if statuses == {"completed"}:
                 self.outbox.update(task_id, "done", attempts=0, retry_requested=0)
-            elif statuses & {"pending", "processing"}:
+            elif statuses - {"completed", "failed", "cancelled", "not_found"}:
                 self.outbox.update(
                     task_id,
                     "cancel_requested" if "cancelled" in statuses else "tracking",

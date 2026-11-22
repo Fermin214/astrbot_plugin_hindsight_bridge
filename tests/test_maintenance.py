@@ -106,7 +106,28 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(QueueError, "bank_missing"):
             self.queue.set_mode(first.scope_id, "active")
 
-    async def test_override_resumes_active_bank_and_old_bank_still_requires_full_erasure(self):
+    async def test_unknown_parent_or_child_state_blocks_maintenance_and_keeps_erasure_in_progress(self):
+        first = await self.seed()
+        root = self.queue.get(first.task_id)["operation_id"]
+        for children in (False, True):
+            with self.subTest(children=children):
+                self.service.operations[root]["status"] = "completed" if children else "checkpointing"
+                self.service.operations[root]["child_operations"] = ([{"operation_id": "new-child", "status": "checkpointing"}]
+                                                                   if children else [])
+                self.worker.maintenance.begin(first.scope_id)
+                state = await self.worker.maintenance.status(first.scope_id)
+                self.assertFalse(state["ready"])
+                with self.assertRaisesRegex(QueueError, "maintenance_pending"):
+                    await self.worker.maintenance.resume(first.scope_id)
+        erasure = self.queue.forget(first.scope_id)
+        self.assertFalse(await self.worker.maintenance.erase(erasure))
+        record = self.queue.control.erasures(self.queue.connection_id)[0]
+        self.assertEqual(record["last_error"], "operation_state_unknown")
+        self.assertNotEqual(record["phase"], "verified")
+        self.assertTrue(await self.client.bank_exists(first.bank))
+        self.assertNotIn(first.bank, self.service.deleted)
+
+    async def test_legacy_reflect_states_do_not_block_maintenance_or_erasure(self):
         first = await self.seed()
         scope = self.queue.scope(self.source)
         control = self.queue.control
@@ -115,26 +136,16 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
                                "VALUES (?,?,?,?,?,'unknown',1)",
                                ("active", self.queue.connection_id, scope["owner_id"], first.bank, scope["generation"]))
         self.worker.maintenance.begin(first.scope_id)
-        self.assertFalse((await self.worker.maintenance.status(first.scope_id))["ready"])
-        with self.assertRaises(QueueError):
-            await self.worker.maintenance.resume(first.scope_id)
-        control.override_unknown_reflections(self.queue.connection_id, first.bank, actor="admin")
         self.assertTrue((await self.worker.maintenance.status(first.scope_id))["ready"])
         await self.worker.maintenance.resume(first.scope_id)
         self.assertTrue(self.queue.can_recall(self.queue.scope(self.source)))
-        with control.transaction():
-            control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
-                               "VALUES (?,?,?,?,?,'unknown',2)",
-                               ("old", self.queue.connection_id, scope["owner_id"], first.bank, scope["generation"]))
         erasure = self.queue.forget(first.scope_id)
-        self.assertFalse(await self.worker.maintenance.erase(erasure))
-        control.override_unknown_reflections(self.queue.connection_id, first.bank, actor="admin")
         self.assertNotEqual(control.erasures(self.queue.connection_id)[0]["phase"], "verified")
         self.assertTrue(await self.client.bank_exists(first.bank))
         self.assertTrue(await self.worker.maintenance.erase(erasure))
         self.assertEqual(control.erasures(self.queue.connection_id)[0]["phase"], "verified")
         self.assertFalse(await self.client.bank_list_contains(first.bank))
-        self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests WHERE state='overridden'").fetchone()[0], 2)
+        self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests WHERE state='unknown'").fetchone()[0], 1)
 
     async def test_maintenance_waits_for_inflight_acceptance_and_blocks_late_callbacks(self):
         self.service.admit_gate = asyncio.Event()

@@ -163,12 +163,11 @@ class HindsightBridge(Star):
             "tool_read_failed": "按需读取失败，请检查服务后重试，或使用官方面板查看",
             "reflect_settings_invalid": "Reflect 设置异常，请检查控制数据目录",
             "reflect_changed": "Reflect 设置或记忆范围已变化，请刷新后重试",
-            "reflect_timeout": "Reflect 等待超时，服务可能仍在处理。请等待结果，不要重复发送",
-            "reflect_busy": "已有 Reflect 请求尚未结束，请稍后查看状态；不要重复发送",
-            "reflect_execution_unknown": "上次 Reflect 请求未确认结束，相关记忆操作已暂停。请管理员确认 Hindsight 已重启或没有残留请求后，在插件页解除 Reflect 阻塞",
-            "reflect_transport_timeout": "Reflect 连接超时，暂时无法确认请求是否结束。旧记忆库的清空会保持暂停",
+            "reflect_timeout": "Reflect 等待超时，请稍后重试",
+            "reflect_busy": "Reflect 并发请求已满，请稍后重试",
+            "reflect_transport_timeout": "Reflect 连接超时，请稍后重试",
             "reflect_no_answer": "Reflect 没有返回答案，可调整问题或使用 Recall 查找事实",
-            "reflect_response_too_large": "Reflect 回答过长，请缩小问题范围。请求状态不明时，旧记忆库的清空会保持暂停",
+            "reflect_response_too_large": "Reflect 回答过长，请缩小问题范围",
             "invalid_reflect_response": "Reflect 响应无法识别，请检查 Hindsight 版本及接口响应",
             "bank_not_created": "记忆库尚未建立，请先在读写记忆模式下保存一条普通聊天",
             "invalid_query_budget": "查询问题过长，请缩短后重试",
@@ -209,7 +208,11 @@ class HindsightBridge(Star):
             await load_encoding(tokenizer)
             if self.panel.closed or self.stopping:
                 return
-            self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer)
+            fingerprint = HindsightClient.connection_fingerprint(url, key)
+            saved_setup = self.panel.state()
+            self.client = HindsightClient(url, key, timeout=max(15, timeout), tokenizer=tokenizer,
+                                          auth_verified=fingerprint == saved_setup.get("auth_fingerprint")
+                                          or fingerprint in saved_setup.get("auth_fingerprints", []))
             self.recall_outcomes.clear()
             self.skip_outcomes.clear()
             self.background_outcomes.clear()
@@ -543,6 +546,7 @@ class HindsightBridge(Star):
             try:
                 await self.prepare_sources()
                 await client.check_connection(force=True)
+                self.panel.remember_auth(client)
                 if queue.connection_error():
                     queue.pause_connection("")
                     self.worker.wake.set()
@@ -912,8 +916,8 @@ class HindsightBridge(Star):
         if turn.snapshot_id:
             extra = {}
             if isinstance(delivery, dict):
-                if isinstance(delivery.get("results"), list):
-                    extra["items"] = delivery["results"]
+                if kind == "recall" and isinstance(delivery.get("items"), list):
+                    extra["items"] = delivery["items"]
                 if kind == "read_page":
                     extra["pages"] = [{key: delivery[key] for key in (
                         "page_id", "mental_model_id", "version", "last_refreshed_at", "name", "is_stale", "content", "text",
@@ -1050,6 +1054,8 @@ class HindsightBridge(Star):
                             content = ReferenceBudget(limits["tokens"], limits["chars"], self.client.tokenizer, request_prefix).wrap(
                                 recall_notice(code) if code else "", read_guard.settings["prompt"] if read_guard else "",
                             )
+                            if read_guard and read_guard.settings["prompt"] and content:
+                                delivered["prompt"] = read_guard.settings["prompt"]
                         text = request_prefix + content
                         req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
                         if read_guard:

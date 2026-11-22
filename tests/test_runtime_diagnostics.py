@@ -95,6 +95,10 @@ def bridge_class(directory, logger):
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, modules):
         spec.loader.exec_module(module)
+    class TestPanel(module.MemoryPanel):
+        def directory(self):
+            return directory / "runtime"
+    module.MemoryPanel = TestPanel
     module.Worker = Mock(return_value=SimpleNamespace(run=AsyncMock()))
     return module.HindsightBridge
 
@@ -665,7 +669,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             if self.plugin.client.check_connection.await_count == 1:
                 raise HindsightError("connection_error")
             checked.set()
-        self.plugin.client = SimpleNamespace(check_connection=AsyncMock(side_effect=probe), close=AsyncMock())
+        self.plugin.client = SimpleNamespace(check_connection=AsyncMock(side_effect=probe), close=AsyncMock(), auth_verified="")
         sleep = asyncio.sleep
         async def quick_sleep(seconds):
             await sleep(0.001)
@@ -693,7 +697,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             while self.plugin.client.connection["connected"] is not True:
                 await asyncio.sleep(0.001)
         await asyncio.wait_for(wait_connected(), 1)
-        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(len(self.requests), 2)
         self.assertFalse(self.plugin.outbox.recovering)
 
     async def test_upgrade_adds_account_template_marker_without_changing_identity_or_timeout(self):
@@ -889,7 +893,7 @@ class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
         client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
         try:
             await client.recall("bank", "hello", timestamp="2026-11-03T12:00:00Z", timeout=30)
-            self.assertEqual(observed, [30] * 4)
+            self.assertEqual(observed, [30] * 3)
             self.assertEqual(client.http.timeout.read, 15)
         finally:
             await client.close()
@@ -922,7 +926,7 @@ class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
         client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
         try:
             await asyncio.gather(client.check_connection(force=True), client.check_connection(force=True))
-            self.assertEqual(count, 3)
+            self.assertEqual(count, 2)
             self.assertTrue(client.connection["connected"])
         finally:
             await client.close()

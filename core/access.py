@@ -88,10 +88,9 @@ class Access:
             )
             if account:
                 control.db.execute(
-                    "UPDATE owners SET revision=revision+1,command_from=MAX(command_from,?),"
-                    "command_received_from=MAX(command_received_from,?) "
+                    "UPDATE owners SET revision=revision+1 "
                     "WHERE connection_id=? AND owner_id=?",
-                    (lower, lower, self.connection, account["owner_id"]),
+                    (self.connection, account["owner_id"]),
                 )
             control.bump()
         return self.authorization(source.platform_instance_id, source.user_id)
@@ -139,7 +138,6 @@ class Access:
         row = self.authorization(source.platform_instance_id, source.user_id)
         if not self.permitted(source):
             raise QueueError("authorization_changed")
-        owner = self.control.owner(self.connection, scope["owner_id"])
         command = Command(
             source.id, source.event_key(incoming.message_id),
             sha256(canonical([name, list(arguments), sha256(incoming.text)])),
@@ -149,13 +147,6 @@ class Access:
         if previous:
             code = "command_identity_conflict" if previous["digest"] != command.digest else "command_already_applied"
             raise QueueError(code)
-        if (
-            incoming.received_at <= max(row["accept_from"], owner["command_received_from"])
-            or incoming.timestamp < math.ceil(max(
-                row["accept_from"], owner["command_from"], owner["accept_from"],
-            ))
-        ):
-            raise QueueError("command_expired")
         return command
 
     def receipt(self, command):
@@ -180,12 +171,6 @@ class Access:
                 not authorization or not owner or owner["bank"] != command.bank
                 or owner["generation"] != command.generation
                 or owner["revision"] != scope["revision"]
-                or command.received_at <= max(
-                    authorization["accept_from"], owner["command_received_from"],
-                )
-                or command.occurred_at < math.ceil(max(
-                    authorization["accept_from"], owner["command_from"], owner["accept_from"],
-                ))
             ):
                 raise QueueError("command_expired")
             control.db.execute(
@@ -193,15 +178,6 @@ class Access:
                 (self.connection, command.source_id, command.event_key, command.digest,
                  command.occurred_at, command.authorization_revision, command.bank,
                  command.generation, "registered"),
-            )
-            control.db.execute(
-                "UPDATE owners SET command_from=MAX(command_from,?),"
-                "command_received_from=MAX(command_received_from,?) "
-                "WHERE connection_id=? AND owner_id=?",
-                # OneBot timestamps have second precision. The next command
-                # must prove it belongs to a later second, even with clock skew.
-                (max(time.time(), math.floor(command.occurred_at) + 1),
-                 max(time.time(), command.received_at), self.connection, scope["owner_id"]),
             )
             result = operation()
             control.db.execute(

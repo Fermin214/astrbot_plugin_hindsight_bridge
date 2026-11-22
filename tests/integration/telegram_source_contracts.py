@@ -131,7 +131,6 @@ async def main(output):
                 ("edited", {"edit_date": int(time.time())}),
                 ("business", {"business_connection_id": "synthetic-connection"}),
                 ("via_bot", {"via_bot": {"id": 777, "is_bot": True, "first_name": "Inline"}}),
-                ("unknown", {"future_protocol_field": {"text": "synthetic"}}),
             ):
                 sample = await fixture.event(changes=changes)
                 assert fixture.header(sample) is None, label
@@ -146,7 +145,9 @@ async def main(output):
                     assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
                                           inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
                     assert reasons == ["quoted_or_reply" if label == "reply" else "media_or_non_text"]
-            passed.append("nonordinary_private_media_reply_forward_edit_business_and_unknown_fields_rejected")
+            metadata = await fixture.event(changes={"future_protocol_field": {"trace": "synthetic"}})
+            assert fixture.header(metadata) is not None
+            passed.append("nonordinary_private_payloads_rejected_and_unrelated_metadata_ignored")
 
             for entity in ("bold", "italic", "code", "bot_command"):
                 formatted = await fixture.event(changes={"entities": [{"type": entity, "offset": 0, "length": 4}]})

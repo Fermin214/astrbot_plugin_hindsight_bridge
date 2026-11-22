@@ -71,12 +71,7 @@ Bridge 仅通过 AstrBot 的公开钩子/插件接口与 Hindsight 的公开 HTT
 
 `core/reflection.py` 按连接与用户保存 `reflect:` 开关与等待时长（默认关闭，等待 3–30 秒，默认 12 秒）。每次触发都会固定使用 low budget 与受限输出额度向 Hindsight 发起一次综合推理（每轮最多 1 次，计入上述 4 次工具配额）。
 
-由于 Hindsight 1.1.0 / 1.2.0 缺少查询单个 Reflect 请求是否完成的公开接口，Bridge 从控制库格式 7 起新增 `reflection_requests` 表来保证一致性：
-
-1. HTTP 发送前先记录 `prepared`，紧接着与范围复核同事务推进为 `dispatched`。
-2. 请求传输线程最长跟踪 120 秒（即使前端工具已因超时返回给聊天，后台仍继续等待结果以确认终点，晚到正文不再回填聊天）。
-3. 拿到明确响应或确定未发出时结束等待；若因进程重启、断网或超时无法确认终点，状态转为 `unknown`。
-4. 处于 `unknown` 状态时，对应 Bank 的后续 Reflect、解除维护暂停和清空删库都会阻塞等待；直到管理员确认 Hindsight 已重启或无残留任务后，在面板手动解除阻塞将其标记为 `overridden`（保留原记录、操作人与时间，不重放请求）。
+Reflect 请求在内存中追踪，传输最长等待 120 秒，聊天按用户设置的等待时长继续。断网和超时只记录诊断，不阻塞后续 Reflect、解除暂停或清空；迟到结果经身份、代次和请求归属复核后丢弃。控制库保留格式 7 和 `reflection_requests` 表，启动将历史 `prepared/dispatched/unknown` 归档为 `overridden`，保留兼容数据。
 
 ## 暂停与 Bank 协调
 

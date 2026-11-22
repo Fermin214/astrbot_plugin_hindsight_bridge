@@ -252,46 +252,24 @@ class AuthorizationTests(unittest.TestCase):
         self.assertIsNone(self.queue.access.receipt(command))
         self.assertEqual(self.queue.control.owner("service", scope["owner_id"])["mode"], "active")
 
-    def test_unseen_old_command_and_same_second_cannot_override_newer_boundary(self):
+    def test_new_message_keys_can_apply_in_the_same_second_or_arrive_out_of_order(self):
         scope = self.authorize()
         with patch.object(time, "time", return_value=103.25):
             self.queue.set_mode(scope["scope_id"], "paused")
         scope = self.queue.scope(self.incoming)
         source = self.incoming.scope(self.queue.deployment_id)
-        for timestamp in (100, 101, 102, 103):
-            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(QueueError, "command_expired"):
-                self.queue.access.command(
-                    replace(self.incoming, timestamp=timestamp), source, scope, "mode", ("active",),
-                )
-        self.queue.access.command(
-            replace(self.incoming, timestamp=104, received_at=104.5), source, scope, "mode", ("active",),
-        )
-
-    def test_command_original_time_advances_boundary_with_platform_clock_ahead(self):
-        self.authorize()
-        source = self.incoming.scope(self.queue.deployment_id)
-        for pause_at in (101, 105):
+        for index, timestamp in enumerate((103, 103, 101)):
             scope = self.queue.scope(self.incoming)
             command = self.queue.access.command(
-                replace(
-                    self.incoming, message_id=f"pause-{pause_at}", timestamp=pause_at,
-                    received_at=pause_at + 0.5,
-                ),
-                source, scope, "mode", ("paused",),
+                replace(self.incoming, message_id=f"new-{index}", timestamp=timestamp), source, scope, "mode", ("active",),
             )
             self.queue.access.run(command, scope, lambda: self.queue.set_mode(
-                scope["scope_id"], "paused", journal_only=True,
+                scope["scope_id"], "active", journal_only=True,
             ))
             self.queue.apply_control()
-            for late_at in (pause_at - 1, pause_at):
-                with self.assertRaisesRegex(QueueError, "command_expired"):
-                    self.queue.access.command(
-                        replace(self.incoming, message_id=f"on-{late_at}", timestamp=late_at),
-                        source, self.queue.scope(self.incoming), "mode", ("active",),
-                    )
-            self.assertEqual(self.queue.scope(self.incoming)["mode"], "paused")
+            self.assertEqual(self.queue.scope(self.incoming)["mode"], "active")
 
-    def test_resume_and_forget_do_not_backfill_messages_before_original_command(self):
+    def test_resume_and_forget_keep_message_boundaries_without_command_clock_high_water(self):
         self.authorize()
         source = self.incoming.scope(self.queue.deployment_id)
         for mode, stamp in (("paused", 103), ("active", 105)):
@@ -300,9 +278,10 @@ class AuthorizationTests(unittest.TestCase):
                 replace(self.incoming, message_id=mode, timestamp=stamp, received_at=stamp + 0.5),
                 source, scope, "mode", (mode,),
             )
-            self.queue.access.run(command, scope, lambda: self.queue.set_mode(
-                scope["scope_id"], mode, journal_only=True,
-            ))
+            with patch.object(time, "time", return_value=stamp + 0.5):
+                self.queue.access.run(command, scope, lambda: self.queue.set_mode(
+                    scope["scope_id"], mode, journal_only=True,
+                ))
             self.queue.apply_control()
         self.assertEqual(self.queue.scope(self.incoming)["accept_from"], 106)
         for stamp in (103, 104, 105):
@@ -310,90 +289,6 @@ class AuthorizationTests(unittest.TestCase):
                 self.queue.capture(replace(self.incoming, timestamp=stamp), "conversation")
         self.queue.forget(self.queue.scope(self.incoming)["scope_id"])
         self.assertGreaterEqual(self.queue.scope(self.incoming)["accept_from"], 106)
-
-    def test_observed_host_command_time_survives_rollback_modes_forget_and_restart(self):
-        for index, action in enumerate(("active", "paused", "forget")):
-            with self.subTest(action=action):
-                incoming = replace(self.incoming, user_id=str(2010 + index))
-                scope = self.authorize(incoming)
-                newer = replace(incoming, message_id="newer", timestamp=105, received_at=100.9)
-                with patch.object(time, "time", return_value=99):
-                    command = self.queue.access.command(
-                        newer, newer.scope(self.queue.deployment_id), scope, action,
-                    )
-                    operation = (
-                        lambda: self.queue.forget(scope["scope_id"], journal_only=True)
-                    ) if action == "forget" else (
-                        lambda: self.queue.set_mode(scope["scope_id"], action, journal_only=True)
-                    )
-                    self.queue.access.run(command, scope, operation)
-                    self.queue.apply_control()
-                with patch.object(time, "time", return_value=99.1):
-                    self.queue.set_mode(scope["scope_id"], "active")
-                owner = self.queue.control.owner(self.queue.connection_id, scope["owner_id"])
-                self.assertEqual(owner["command_received_from"], 100.9)
-                self.assertEqual(owner["receive_from"], 100.9)
-                self.assertEqual(owner["generation"], int(action == "forget"))
-                old = replace(incoming, message_id="old", timestamp=106, received_at=100.8)
-                for mode in ("active", "paused"):
-                    with self.assertRaisesRegex(QueueError, "command_expired"):
-                        self.queue.access.command(
-                            old, old.scope(self.queue.deployment_id),
-                            self.queue.scope(incoming), "mode", (mode,),
-                        )
-                with self.assertRaisesRegex(QueueError, "message_before_accept_from"):
-                    self.queue.capture(old, "conversation")
-                self.queue.close()
-                self.open()
-                self.queue.sync_permissions([(incoming.platform_instance_id, incoming.user_id)])
-                self.assertFalse(self.queue.accepts(old))
-                fresh = replace(old, message_id="fresh", received_at=101)
-                self.assertIsNotNone(self.queue.capture(fresh, "conversation"))
-
-    def test_maintenance_resume_inherits_observed_host_time_after_clock_rollback(self):
-        scope = self.authorize()
-        newer = replace(self.incoming, message_id="pause", timestamp=105, received_at=100.9)
-        with patch.object(time, "time", return_value=99):
-            command = self.queue.access.command(
-                newer, newer.scope(self.queue.deployment_id), scope, "mode", ("paused",),
-            )
-            self.queue.access.run(command, scope, lambda: self.queue.set_mode(
-                scope["scope_id"], "paused", journal_only=True,
-            ))
-            self.queue.apply_control()
-            self.queue.control.begin_maintenance(self.queue.connection_id, scope["owner_id"])
-            self.queue.control.finish_maintenance(self.queue.connection_id, scope["owner_id"])
-            self.queue.set_mode(scope["scope_id"], "active")
-        owner = self.queue.control.owner(self.queue.connection_id, scope["owner_id"])
-        self.assertEqual(owner["command_received_from"], 100.9)
-        self.assertEqual(owner["receive_from"], 100.9)
-        self.assertFalse(self.queue.accepts(replace(
-            self.incoming, message_id="old", timestamp=106, received_at=100.8,
-        )))
-        self.assertTrue(self.queue.accepts(replace(
-            self.incoming, message_id="new", timestamp=106, received_at=101,
-        )))
-
-    def test_host_queue_time_blocks_unseen_commands_before_panel_controls(self):
-        self.authorize()
-        scope = self.queue.scope(self.incoming)
-        source = self.incoming.scope(self.queue.deployment_id)
-        queued = replace(self.incoming, timestamp=105, received_at=100.3)
-        with patch.object(time, "time", return_value=100.5):
-            self.queue.set_mode(scope["scope_id"], "paused")
-        for received in (100.3, 100.5):
-            with self.assertRaisesRegex(QueueError, "command_expired"):
-                self.queue.access.command(
-                    replace(queued, received_at=received), source,
-                    self.queue.scope(self.incoming), "mode", ("active",),
-                )
-        with patch.object(time, "time", return_value=100.6):
-            self.queue.forget(scope["scope_id"])
-        with self.assertRaisesRegex(QueueError, "command_expired"):
-            self.queue.access.command(queued, source, self.queue.scope(self.incoming), "mode", ("active",))
-        with patch.object(time, "time", return_value=100.7):
-            self.queue.set_mode(scope["scope_id"], "active")
-        self.assertFalse(self.queue.accepts(queued))
 
     def test_host_queue_time_blocks_platform_clock_ahead_before_authorization(self):
         before_grant = replace(self.incoming, timestamp=105, received_at=99.5)
@@ -420,8 +315,8 @@ class AuthorizationTests(unittest.TestCase):
         self.queue.forget(scope["scope_id"], now=102.25)
         with self.assertRaisesRegex(QueueError, "command_expired"):
             self.queue.access.run(command, scope, lambda: None)
-        with self.assertRaisesRegex(QueueError, "command_expired"):
-            self.queue.access.command(self.incoming, source, self.queue.scope(self.incoming), "mode", ("active",))
+        fresh = self.queue.access.command(self.incoming, source, self.queue.scope(self.incoming), "mode", ("active",))
+        self.assertNotEqual(fresh.generation, command.generation)
 
     def test_historical_management_never_grants_chat_or_submit_access(self):
         scope = self.authorize()
@@ -489,6 +384,8 @@ class SourceContracts(unittest.TestCase):
             event.created_at = 100.75
             self.assertEqual(native_header(event, self.Plain).timestamp, 105)
             event.created_at = 101.5
+            self.assertEqual(native_header(event, self.Plain).timestamp, 105)
+            event.created_at = 400.5
             self.assertIsNone(native_header(event, self.Plain))
 
     def test_host_removed_wake_prefix_requires_exact_public_configuration(self):

@@ -1,9 +1,7 @@
-"""Native Reflect settings and durable Bank-creation barriers."""
+"""Native Reflect settings and request-scoped results."""
 
 import asyncio
 import json
-import time
-import uuid
 
 from .client import HindsightError
 from .control import QueueError
@@ -131,13 +129,12 @@ class Reflection:
 
     def public(self, scope):
         queue = self.plugin.outbox
-        pending = queue.control.reflection_pending(queue.connection_id, owner_id=scope["owner_id"])
-        unknown = sum(item["state"] == "unknown" for item in pending)
+        pending = sum(guard.queue is queue and guard.scope["bank"] == scope["bank"] for guard in self.tasks.values())
         options = runtime_options(queue, scope)
         status = self.outcomes.get((queue.connection_id, scope["owner_id"]), {})
         if status.get("bank") != scope["bank"] or status.get("revision") != options["revision"]:
             status = {}
-        return {**options, "pending": len(pending), "unknown": unknown,
+        return {**options, "pending": pending,
                 "status": {**{key: status[key] for key in ("state", "calls", "code") if key in status},
                            **({"message": self.plugin.diagnostic(status["code"])} if status.get("code") else {})}}
 
@@ -162,65 +159,40 @@ class Reflection:
         if not await client.bank_exists(scope["bank"]):
             raise HindsightError("bank_not_created" if queue.control.bank_state(queue.connection_id, scope["bank"]) == "new" else "bank_missing")
         await recheck()
-        with queue.control.transaction():
-            if self.closed or not turn.guard.valid(self.plugin):
-                raise QueueError("reflect_changed")
-            pending = queue.control.reflection_pending(queue.connection_id, bank=scope["bank"])
-            if pending:
-                raise QueueError("reflect_execution_unknown" if pending[0]["state"] == "unknown" else "reflect_busy")
-            if len(self.tasks) >= 4:
-                raise QueueError("reflect_busy")
-            request_id = str(uuid.uuid4())
-            queue.control.db.execute(
-                "INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
-                "VALUES (?,?,?,?,?,'prepared',?)",
-                (request_id, queue.connection_id, scope["owner_id"], scope["bank"], scope["generation"], time.time()),
-            )
+        if self.closed or not turn.guard.valid(self.plugin):
+            raise QueueError("reflect_changed")
+        if len(self.tasks) >= 4:
+            raise QueueError("reflect_busy")
         task = asyncio.create_task(self._native(
-            turn, query, request_id, recheck, max_tokens=max(64, limits["tokens"] - 160),
+            turn, query, recheck, max_tokens=max(64, limits["tokens"] - 160),
         ), name="hindsight-reflect")
-        self.tasks[task] = (queue.control, request_id)
+        self.tasks[task] = turn.guard
         task.add_done_callback(self.finished)
         value = await asyncio.shield(task)
         await recheck()
         return project_response(value, scope["bank"], **limits)
 
     def finished(self, task):
-        control, request_id = self.tasks.pop(task)
-        with control.transaction():
-            control.db.execute("DELETE FROM reflection_requests WHERE request_id=? AND state='prepared'", (request_id,))
+        self.tasks.pop(task)
         if not task.cancelled():
             task.exception()
 
-    async def _native(self, turn, query, request_id, recheck, *, max_tokens):
+    async def _native(self, turn, query, recheck, *, max_tokens):
         queue, control, client = turn.guard.queue, turn.guard.queue.control, turn.guard.client
 
         def settled():
-            with control.transaction():
-                control.db.execute("DELETE FROM reflection_requests WHERE request_id=? AND state<>'overridden'", (request_id,))
             self.plugin.worker.wake.set()
 
         try:
             async with self.plugin.using_resources(), asyncio.timeout(120):
                 await recheck()
-                with control.transaction():
-                    if not turn.guard.valid(self.plugin) or read_options(queue, turn.guard.scope) != turn.reflect_options:
-                        raise QueueError("reflect_changed")
-                    if control.db.execute(
-                        "UPDATE reflection_requests SET state='dispatched' WHERE request_id=? AND state='prepared'", (request_id,),
-                    ).rowcount != 1:
-                        raise QueueError("reflect_changed")
+                if not turn.guard.valid(self.plugin) or read_options(queue, turn.guard.scope) != turn.reflect_options:
+                    raise QueueError("reflect_changed")
                 value = await client.reflect(
                     turn.guard.scope["bank"], query, max_tokens=max_tokens,
                     settled=settled,
                 )
                 return value
         finally:
-            # Disconnects and process loss have no native operation ID to reconcile.
-            with control.transaction():
-                control.db.execute("DELETE FROM reflection_requests WHERE request_id=? AND state='prepared'", (request_id,))
-                control.db.execute(
-                    "UPDATE reflection_requests SET state='unknown',error_code='reflect_execution_unknown' "
-                    "WHERE request_id=? AND state='dispatched'", (request_id,),
-                )
+            control.retired_request_returned(queue.connection_id, turn.guard.scope["bank"])
             self.plugin.worker.wake.set()

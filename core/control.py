@@ -173,8 +173,10 @@ class Control:
                     ON reflection_requests(connection_id,bank) WHERE state IN ('prepared','dispatched','unknown')
                 """)
                 self.db.execute("PRAGMA user_version=7")
-                self.db.execute("DELETE FROM reflection_requests WHERE state='prepared'")
-                self.db.execute("UPDATE reflection_requests SET state='unknown',error_code='reflect_execution_unknown' WHERE state='dispatched'")
+                archived = self.db.execute(
+                    "UPDATE reflection_requests SET state='overridden',overridden_at=?,overridden_by='startup' "
+                    "WHERE state IN ('prepared','dispatched','unknown')", (time.time(),),
+                ).rowcount
                 if version < 4:
                     self.db.execute(
                         "UPDATE owners SET command_from=MAX(accept_from,?)",
@@ -193,6 +195,8 @@ class Control:
                     self.db.execute(
                         "INSERT OR IGNORE INTO settings VALUES (?,?)", (key, value)
                     )
+                if archived:
+                    self.bump()
             if deployment_id and deployment_id != self.setting("deployment_id"):
                 raise QueueError("recovery_required:deployment_mismatch")
             if os.name != "nt":
@@ -302,21 +306,20 @@ class Control:
             raise QueueError("memory_owner_missing")
         lower = (
             max(
-                row["accept_from"], math.ceil(row["command_from"]),
+                row["accept_from"],
                 math.ceil(time.time() if now is None else now),
             )
             if mode == "active"
             else row["accept_from"]
         )
         stamp = time.time() if now is None else now
-        received = max(stamp, row["command_received_from"], row["receive_from"])
+        received = max(stamp, row["receive_from"])
         with self.transaction():
             self.db.execute(
                 "UPDATE owners SET mode=?,accept_from=?,revision=revision+1,"
-                "command_from=MAX(command_from,?),command_received_from=MAX(command_received_from,?),"
                 "receive_from=CASE WHEN ? THEN MAX(receive_from,?) ELSE receive_from END "
                 "WHERE connection_id=? AND owner_id=?",
-                (mode, lower, stamp, received, mode == "active", received, connection, owner_id),
+                (mode, lower, mode == "active", received, connection, owner_id),
             )
             self.bump()
         return self.owner(connection, owner_id)
@@ -326,10 +329,10 @@ class Control:
         if row is None:
             raise QueueError("memory_owner_missing")
         stamp = time.time() if now is None else now
-        received = max(stamp, row["command_received_from"], row["receive_from"])
+        received = max(stamp, row["receive_from"])
         fid, generation = str(uuid.uuid4()), row["generation"] + 1
         bank = f"abm-v1-{uuid.uuid4().hex}-g{generation}"
-        lower = max(row["accept_from"], math.ceil(row["command_from"]), math.ceil(stamp))
+        lower = max(row["accept_from"], math.ceil(stamp))
         with self.transaction():
             self.db.execute(
                 "INSERT INTO erasures(forget_id,connection_id,owner_id,principal_id,"
@@ -355,10 +358,9 @@ class Control:
             )
             self.db.execute(
                 "UPDATE owners SET bank=?,generation=?,mode='paused',accept_from=?,"
-                "revision=revision+1,command_from=MAX(command_from,?),"
-                "command_received_from=MAX(command_received_from,?),receive_from=MAX(receive_from,?) "
+                "revision=revision+1,receive_from=MAX(receive_from,?) "
                 "WHERE connection_id=? AND owner_id=?",
-                (bank, generation, lower, stamp, received, received, connection, owner_id),
+                (bank, generation, lower, received, connection, owner_id),
             )
             forget_settings(self, connection, owner_id)
             self.bump()
@@ -422,10 +424,9 @@ class Control:
                 (connection, owner["bank"], time.time(), int(discard_pending)),
             )
             self.db.execute(
-                "UPDATE owners SET revision=revision+1,command_from=MAX(command_from,?),"
-                "command_received_from=MAX(command_received_from,?) "
+                "UPDATE owners SET revision=revision+1 "
                 "WHERE connection_id=? AND owner_id=?",
-                (time.time(), time.time(), connection, owner_id),
+                (connection, owner_id),
             )
             self.bump()
         return self.maintenance(connection, owner["bank"])
@@ -435,7 +436,7 @@ class Control:
         if not owner:
             raise QueueError("memory_owner_missing")
         stamp = time.time()
-        received = max(stamp, owner["command_received_from"], owner["receive_from"])
+        received = max(stamp, owner["receive_from"])
         with self.transaction():
             self.db.execute(
                 "DELETE FROM maintenance WHERE connection_id=? AND bank=?",
@@ -443,13 +444,9 @@ class Control:
             )
             self.db.execute(
                 "UPDATE owners SET revision=revision+1,accept_from=MAX(accept_from,?),"
-                "command_from=MAX(command_from,?),command_received_from=MAX(command_received_from,?),"
                 "receive_from=MAX(receive_from,?) "
                 "WHERE connection_id=? AND owner_id=?",
-                (
-                    max(math.ceil(stamp), math.ceil(owner["command_from"])),
-                    stamp, received, received, connection, owner_id,
-                ),
+                (math.ceil(stamp), received, connection, owner_id),
             )
             self.bump()
 
@@ -531,27 +528,6 @@ class Control:
         return self.db.execute(
             "SELECT * FROM requests WHERE operation_id=?", (operation_id,)
         ).fetchone()
-
-    def reflection_pending(self, connection, *, bank=None, owner_id=None):
-        return self.db.execute(
-            "SELECT * FROM reflection_requests WHERE connection_id=? "
-            "AND state IN ('prepared','dispatched','unknown') "
-            "AND (? IS NULL OR bank=?) AND (? IS NULL OR owner_id=?) ORDER BY created_at",
-            (connection, bank, bank, owner_id, owner_id),
-        ).fetchall()
-
-    def override_unknown_reflections(self, connection, bank, *, actor):
-        if not isinstance(actor, str) or not actor.strip():
-            raise QueueError("reflect_override_actor_required")
-        with self.transaction():
-            changed = self.db.execute(
-                "UPDATE reflection_requests SET state='overridden',overridden_at=?,overridden_by=? "
-                "WHERE connection_id=? AND bank=? AND state='unknown'",
-                (time.time(), actor, connection, bank),
-            ).rowcount
-            if changed:
-                self.bump()
-        return changed
 
     def record_request(
         self, row, owner_id, *, dispatched=False, accepted=False, cancel=False

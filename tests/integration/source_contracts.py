@@ -163,16 +163,15 @@ async def main():
                     scope["scope_id"], "active", journal_only=True,
                 ))
                 queue.apply_control()
-                assert not queue.accepts(old_text)
-                try:
-                    queue.access.command(
-                        old_command, old_command.scope(queue.deployment_id),
-                        queue.scope(header), "mode", ("paused",),
-                    )
-                except QueueError as error:
-                    assert str(error) == "command_expired"
-                else:
-                    raise AssertionError("clock rollback lost observed host queue high-water mark")
+                next_scope = queue.scope(header)
+                next_command = queue.access.command(
+                    old_command, old_command.scope(queue.deployment_id), next_scope, "mode", ("paused",),
+                )
+                queue.access.run(next_command, next_scope, lambda: queue.set_mode(
+                    next_scope["scope_id"], "paused", journal_only=True,
+                ))
+                queue.apply_control()
+                assert queue.scope(header)["mode"] == "paused"
         finally:
             queue.close()
         queue = Outbox(
@@ -185,19 +184,16 @@ async def main():
             queued_command = native_header(await event(host, "/hindsight on", mid=10), Plain)
             queued_message = native_header(await event(host, "queued text", mid=11), Plain, adapter=host)
             scope = queue.scope(queued_command)
-            queue.set_mode(scope["scope_id"], "paused")
-            for forget in (False, True):
-                if forget:
-                    queue.forget(scope["scope_id"])
-                try:
-                    queue.access.command(
-                        queued_command, queued_command.scope(queue.deployment_id),
-                        queue.scope_owner(scope["scope_id"]), "mode", ("active",),
-                    )
-                except QueueError as error:
-                    assert str(error) == "command_expired"
-                else:
-                    raise AssertionError("host queued command crossed a later control boundary")
+            prepared = queue.access.command(
+                queued_command, queued_command.scope(queue.deployment_id), scope, "mode", ("active",),
+            )
+            queue.forget(scope["scope_id"])
+            try:
+                queue.access.run(prepared, scope, lambda: None)
+            except QueueError as error:
+                assert str(error) == "command_expired"
+            else:
+                raise AssertionError("prepared command crossed erasure generation")
             queue.set_mode(scope["scope_id"], "active")
             assert not queue.accepts(queued_message)
         finally:
@@ -209,13 +205,13 @@ async def main():
             "actual_onebot_adapter_conversion_and_event_client",
             "native_raw_event_required_and_ambiguous_api_login_rejected",
             "host_public_created_at_and_pre_authorization_event_rejection",
-            "actual_host_queued_commands_cannot_override_panel_pause_or_forget",
+            "actual_host_command_prepared_before_erasure_cannot_change_new_generation",
             "actual_host_queued_text_cannot_enter_resumed_new_generation",
             "host_removed_wake_prefix_keeps_original_command_id_time_text",
             "queued_event_from_replaced_client_rejected",
             "queued_event_with_original_recipient_rejected_after_rebinding",
             "frozen_old_bank_and_operation_preserved",
-            "host_clock_rollback_preserves_observed_command_and_ingress_boundaries",
+            "host_clock_rollback_does_not_reject_new_command_message_keys",
         ],
     }, indent=2))
 
