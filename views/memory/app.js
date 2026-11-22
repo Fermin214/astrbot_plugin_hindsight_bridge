@@ -160,11 +160,7 @@ export function createApp(view) {
     });
   });
   view.$("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void (view.managedMode() ? view.saveAccess() : view.saveSettings()).catch((error) => view.notify(view.errorMessage(error), true)); });
-  view.$("parameters-form").addEventListener("input", () => {
-    if (view.parameterDraft) view.parameterDraft.dirty = true;
-    view.$("parameters-feedback").hidden = true;
-    view.renderParameters();
-  });
+  view.$("parameters-form").addEventListener("input", view.editParameters);
   view.$("parameters-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void view.saveParameters().catch((error) => view.notify(view.errorMessage(error), true, "parameters-feedback"));
@@ -294,20 +290,10 @@ export function createApp(view) {
   view.$("bank-picker").addEventListener("change", () => view.selectScope(view.$("bank-picker").value));
   for (const button of view.document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void view.setMode(button, button.dataset.mode));
   view.$("background-page").addEventListener("change", view.changeBackground);
-  view.$("reading-mode").addEventListener("change", () => {
-    if (view.readingDraft) view.readingDraft.dirty = true;
-    view.$("reading-feedback").hidden = true;
-    view.renderReading();
-  });
+  view.$("reading-mode").addEventListener("change", view.editReading);
   view.$("reading-save").addEventListener("click", () => void view.saveReading());
   view.$("reference-form").addEventListener("submit", (event) => { event.preventDefault(); void view.saveReferences(); });
-  view.$("reference-form").addEventListener("input", (event) => {
-    if (!view.referenceDraft?.selection) return;
-    view.referenceDraft.dirty = true;
-    view.$("reference-feedback").hidden = true;
-    if (event.target.id === "reference-prompt") view.countPrompt(view.referenceDraft);
-    view.renderReferences();
-  });
+  view.$("reference-form").addEventListener("input", view.editReferences);
   view.$("reference-reload").addEventListener("click", () => {
     view.clearReferenceDraft();
     void view.refreshBootstrap().catch((error) => view.notify(view.errorMessage(error), true, "reference-feedback"));
@@ -320,10 +306,7 @@ export function createApp(view) {
     void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback").then(() => { view.$("usage-json").hidden = true; })
       .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback"));
   });
-  for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", () => {
-    if (view.reflectDraft) view.reflectDraft.dirty = true;
-    view.renderReflect();
-  });
+  for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", view.editReflect);
   view.$("reflect-save").addEventListener("click", () => void view.saveReflect());
   view.$("reflect-override").addEventListener("click", () => view.openReflectOverride());
   view.$("maintenance-reflect-override").addEventListener("click", () => view.openReflectOverride(view.maintenanceScope()?.scope_id));

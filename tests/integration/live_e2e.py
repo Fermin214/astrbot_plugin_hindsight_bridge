@@ -623,17 +623,13 @@ class Acceptance:
                 self.passed("real_hindsight_recall_without_optional_rerank")
 
                 await self.browser_maintenance(alice["scope_id"])
-                listing = await self.bot.chat(ALICE, "/hindsight view")
-                assert "本人记忆" in listing and "记忆ID" in listing
                 record = (await self.memories(bank))["items"][0]
-                detail = await self.bot.chat(ALICE, "/hindsight show " + record["id"])
-                assert record["id"] in detail
-                exported = await self.bot.chat(ALICE, "/hindsight export")
-                assert "已发送记忆 JSON 文件" in exported and self.bot.files
-                artifact = self.bot.files[-1]
-                assert artifact["format"] == "astrbot-hindsight-memory-export" and artifact["bank_id"] == bank
-                assert artifact["total"] == len(artifact["memories"]) and artifact["documents"]
-                self.passed("actual_onebot_memory_list_detail_and_bank_scoped_json_file_export")
+                async with self.session.get(self.settings["hindsight_url"] + "/v1/default/banks/" + bank + "/memories/" + record["id"],
+                                            headers={"Authorization": "Bearer " + self.settings["memory_key"]}) as response:
+                    assert response.status == 200
+                    detail = await response.json()
+                assert detail["id"] == record["id"] and detail["text"]
+                self.passed("official_bank_scoped_memory_list_and_detail")
 
                 await self.action(alice["scope_id"], "maintenance_begin")
                 async def maintenance_ready():
@@ -654,11 +650,6 @@ class Acceptance:
                 await asyncio.sleep(1)
                 pending = [row for row in self.tasks() if row["state"] not in {"done", "discarded"}]
                 assert pending
-                response = await self.bot.chat(ALICE, "/hindsight cancel " + str(pending[0]["id"]))
-                assert str(pending[0]["id"]) in response
-                row = database(self.runtime, "SELECT cancel_intent FROM outbox WHERE id=?", (pending[0]["id"],))[0]
-                assert row["cancel_intent"] == 1
-                self.passed("actual_onebot_cancel_command_records_durable_cancel_intent")
                 control = ROOT / "verification/data/plugin_data" / (NAME + "_control") / "control.sqlite3"
                 backup = ROOT / "business-before-forget"
                 process = await asyncio.create_subprocess_exec("python", "/candidate-source/scripts/backup.py", "--data-dir", str(self.runtime.parent),

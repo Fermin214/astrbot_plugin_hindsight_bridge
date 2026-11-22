@@ -163,6 +163,7 @@ export function createSetup(view) {
         view.$("memory-" + key).value = key === "command_prefixes"
           ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join(", ") : "") : String(snapshot.values[key] ?? "");
       }
+      view.parameterDraft.baseline = JSON.stringify(view.parameterPayload().parameters);
     }
     view.$("parameters-fields").disabled = view.locks.has("parameters");
     view.$("parameters-conflict").hidden = view.parameterDraft.revision === view.data.config_revision;
@@ -203,6 +204,13 @@ export function createSetup(view) {
       }
     }
     return { config_revision: view.parameterDraft.revision, parameters };
+  }
+
+  function editParameters() {
+    if (!view.parameterDraft) return;
+    try { view.updateDirty(view.parameterDraft, view.parameterPayload().parameters, "parameters-feedback"); }
+    catch { view.parameterDraft.dirty = true; view.clearFeedback("parameters-feedback"); }
+    view.renderParameters();
   }
 
   async function saveParameters() {
@@ -384,5 +392,5 @@ export function createSetup(view) {
     view.notify("设置已重新加载。");
   }
 
-  return { providerSelect, updateProviderHelp, clearUninstall, managedMode, loadManagedSetup, updateConnectionMode, renderServiceVersion, versionCheckIdentity, checkServiceVersion, hydrateConfig, renderParameters, renderParameterLimits, parameterPayload, saveParameters, connectionPayload, settingsPayload, checkConnection, watchModels, saveSettings, saveAccess, prepareInstallation, copyCommand, reloadSettings };
+  return { editParameters, providerSelect, updateProviderHelp, clearUninstall, managedMode, loadManagedSetup, updateConnectionMode, renderServiceVersion, versionCheckIdentity, checkServiceVersion, hydrateConfig, renderParameters, renderParameterLimits, parameterPayload, saveParameters, connectionPayload, settingsPayload, checkConnection, watchModels, saveSettings, saveAccess, prepareInstallation, copyCommand, reloadSettings };
 }

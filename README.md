@@ -69,10 +69,8 @@
 
 | 想做什么 | 私聊命令 |
 | --- | --- |
-| 查看本人记忆列表 | `/hindsight view` |
-| 查看已选知识页 | `/hindsight background [序号]` |
+| 查看命令说明 | `/hindsight help` |
 | 查看状态与错误诊断 | `/hindsight status` |
-| 导出个人记忆 JSON | `/hindsight export` |
 | 切为只读（停止保存，继续召回） | `/hindsight readonly` |
 | 暂停（停止保存与自动召回） | `/hindsight pause` |
 | 恢复读写 | `/hindsight on` |

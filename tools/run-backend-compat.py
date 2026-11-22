@@ -218,7 +218,7 @@ class Acceptance:
             assert (await client.operation(bank, identity)).status == "completed"
             await client.submit(bank, payload)
             await self.completed(client, bank, identity)
-            assert len((await client.list_memories(bank))["items"]) == 1
+            assert len((await client.request("GET", client.bank_path(bank) + "/memories/list?offset=0&limit=20"))["items"]) == 1
             self.record("unmodified_installer_upgrade_preserves_credentials_models_bank_document_operation_page_and_idempotency")
             rows = await client.recall(bank, "Cedar-120", timestamp="2026-11-04T12:00:00Z")
             assert rows and MARKER in json.dumps(rows)

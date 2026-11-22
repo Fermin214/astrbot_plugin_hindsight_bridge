@@ -243,34 +243,6 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "active")
         self.assertFalse(self.plugin.outbox.access.authorization("qq", "2001")["enabled"])
 
-    async def test_show_rechecks_login_after_private_read(self):
-        async def read(bank, memory_id):
-            self.bot.get_login_info.return_value = {"user_id": 1002}
-            return {"text": "PRIVATE_TEST_CONTENT"}
-        self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), get_memory=read)
-        results = [text async for text in self.plugin.memory_show(
-            self.event("/hindsight show test"), "test",
-        )]
-        self.assertNotIn("PRIVATE_TEST_CONTENT", str(results))
-        self.assertFalse(self.plugin.outbox.access.authorization("qq", "2001")["enabled"])
-
-    async def test_manual_recall_uses_original_query_and_rechecks_authorization(self):
-        self.plugin.recall_text = AsyncMock(return_value="found")
-        event = self.event("/hindsight recall original full question")
-        results = [text async for text in self.plugin.memory_recall(event, "truncated")]
-        self.assertEqual(results, ["found"])
-        self.assertEqual(self.plugin.recall_text.call_args.args[1], "original full question")
-        async def revoked(*args, **kwargs):
-            self.bot.get_login_info.return_value = {"user_id": 1002}
-            return "PRIVATE_TEST_CONTENT"
-        self.plugin.recall_text.side_effect = revoked
-        results = [text async for text in self.plugin.memory_recall(event, "ignored")]
-        self.assertNotIn("PRIVATE_TEST_CONTENT", str(results))
-        calls = self.plugin.recall_text.await_count
-        results = [text async for text in self.plugin.memory_recall(event, "ignored")]
-        self.assertIn("未开放", str(results))
-        self.assertEqual(self.plugin.recall_text.await_count, calls)
-
     async def test_panel_authorization_prepares_ingress_before_success(self):
         self.plugin.outbox.sync_permissions([])
         self.plugin.outbox.sync_permissions([("qq", "2001")])

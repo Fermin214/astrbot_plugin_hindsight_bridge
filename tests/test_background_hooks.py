@@ -328,30 +328,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req.extra_user_content_parts, [])
         self.assertEqual(self.plugin.hooks, 0)
 
-    async def test_personal_view_is_explicit_read_only_and_allows_paused_owner(self):
-        self.select(enabled=True)
-        self.plugin.outbox.set_mode(self.scope()["scope_id"], "paused")
-        self.assertFalse(self.plugin.outbox.can_recall(self.scope()))
-        event, _ = self.turn()
-        event.plain_result = lambda text: text
-        self.plugin.command_scope = lambda event: self.scope()
-        results = [result async for result in self.plugin.memory_background(event)]
-        self.assertEqual(len(results), 1)
-        self.assertIn("Native background marker.", results[0])
-        self.assertIn("聊天时使用所选知识页（开关设置）：开启", results[0])
-        self.assertTrue(all(call.method == "GET" for call in self.requests))
-        self.assertEqual(self.plugin.outbox.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
-
-    async def test_personal_view_does_not_truncate_large_content_as_complete(self):
-        self.select()
-        self.page_content = "private large native content " * 300
-        event, _ = self.turn()
-        event.plain_result = lambda text: text
-        self.plugin.command_scope = lambda event: self.scope()
-        results = [result async for result in self.plugin.memory_background(event)]
-        self.assertNotIn("private large native content", results[0])
-        self.assertIn("background_view_too_large", results[0])
-
     def panel(self, request):
         panel = InMemoryPanel(self.plugin)
         panel.saved_state = None

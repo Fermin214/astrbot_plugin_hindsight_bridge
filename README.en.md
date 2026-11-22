@@ -69,10 +69,8 @@ Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list)
 
 | Action | Command |
 | --- | --- |
-| List personal memories | `/hindsight view` |
-| Read selected knowledge page | `/hindsight background [index]` |
+| Show command help | `/hindsight help` |
 | Check status & diagnostics | `/hindsight status` |
-| Export personal memories as JSON | `/hindsight export` |
 | Switch to read-only (keep recalling, stop saving) | `/hindsight readonly` |
 | Pause saving and automatic recall | `/hindsight pause` |
 | Resume read/write | `/hindsight on` |

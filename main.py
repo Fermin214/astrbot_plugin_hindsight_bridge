@@ -4,21 +4,19 @@ import asyncio
 import json
 import secrets
 import sqlite3
-import tempfile
 import time
 import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import File, Plain
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .core.catalog import export_bytes, render_memory, render_page
 from .core.background import ReadGuard, ReferenceBudget, compose_backgrounds, context_limits, reference
 from .core.agent_tools import MemoryTools, belongs_to_event, matches_request, request_marker
 from .core.client import HindsightClient, HindsightError
@@ -513,6 +511,7 @@ class HindsightBridge(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
+        """识别私聊来源，记录可保存的用户原话。"""
         queue = self.outbox
         if queue is not None and not self.stopping and event not in self.incoming:
             if event.get_platform_name() == "aiocqhttp":
@@ -764,10 +763,12 @@ class HindsightBridge(Star):
 
     @filter.on_agent_begin()
     async def bind_memory_tools(self, event, run_context):
+        """为主对话绑定已启用的记忆读取工具。"""
         self.read_tools.begin(event, run_context)
 
     @filter.on_agent_done()
     async def remember_assistant(self, event, run_context, response):
+        """保存主助手的完整回复。"""
         self.read_tools.finish(event, run_context)
         turn = self.pending_assistant_captures.get(event)
         if (
@@ -909,6 +910,7 @@ class HindsightBridge(Star):
 
     @filter.on_llm_request()
     async def add_memory(self, event: AstrMessageEvent, req: ProviderRequest):
+        """向聊天请求加入用户选择的记忆参考。"""
         original_tools = self.read_tools.filter_request(event, req)
         if self.outbox is None or self.client is None or event in self.handled:
             return
@@ -1062,7 +1064,7 @@ class HindsightBridge(Star):
 
     @filter.command_group("hindsight")
     def hindsight(self):
-        """个人记忆查看、导出、模式、任务控制与完整遗忘。"""
+        """查看记忆状态、切换读写模式或清空个人记忆。"""
 
     def command_scope(self, event):
         incoming = self.authorized_source(event)
@@ -1107,9 +1109,6 @@ class HindsightBridge(Star):
             if not self.hooks:
                 self.idle.set()
 
-    def readable(self, event, scope):
-        return self.allowed(event) and self.outbox.can_recall(scope, manual=True)
-
     def unavailable_message(self, scope):
         summary = self.outbox.summary(scope["scope_id"])
         if summary.get("bank_missing"):
@@ -1120,133 +1119,17 @@ class HindsightBridge(Star):
 
     @hindsight.command("help")
     async def memory_help(self, event: AstrMessageEvent):
+        """查看六个记忆命令及常用操作入口。"""
         yield event.plain_result(
             "正常聊天即可保存和查找长期记忆。命令前缀：/hindsight\n"
             "status：查看连接、模式和保存进度\n"
-            "view [页码]：查看本人记忆，每页 10 条\n"
-            "show 记忆ID：查看详情和来源\n"
-            "recall 问题：查找记忆；background [序号]：查看已选知识页\n"
-            "export：导出记忆和来源（JSON）\n"
+            "help：查看命令说明\n"
             "on：读写记忆；readonly：只读记忆\n"
-            "pause：停止保存和自动检索，仍可手动查看\n"
-            "retry：重试失败记录；cancel 任务编号：取消上传，已形成的记忆保留\n"
+            "pause：暂停记忆读写，正常聊天继续\n"
             "forget：清空本人全部记忆，需再次确认，无法撤销\n"
-            "知识页和聊天参考在插件页设置。修改记忆前请管理员暂停保存和查询，"
-            "等待已接收的记录处理完后再到 Hindsight 官方面板操作。普通聊天继续。"
+            "知识页、使用记录和重试在插件记忆管理页操作；"
+            "查找、修改或导出记忆请使用 Hindsight Control Plane。"
         )
-
-    @hindsight.command("view")
-    async def memory_view(self, event: AstrMessageEvent, page: int = 1):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        if not 1 <= page <= 1000:
-            yield event.plain_result("页码须在 1 到 1000 之间。")
-            return
-        async with self.using_resources():
-            if not self.readable(event, scope):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            try:
-                async with asyncio.timeout(8):
-                    await self.client.ensure_auth()
-                    offset = (page - 1) * 10
-                    data = await self.client.memory_page(scope["bank"], page=page)
-                await self.prepare_sources()
-                if not self.readable(event, scope):
-                    yield event.plain_result(self.unavailable_message(scope))
-                    return
-                yield event.plain_result(
-                    render_page(data, offset=offset)
-                    + (
-                        f"\n下一页：/hindsight view {page + 1}"
-                        if offset + len(data["items"]) < data["total"]
-                        else ""
-                    )
-                )
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
-
-    @hindsight.command("background")
-    async def memory_background(self, event: AstrMessageEvent, page: int = 1):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        async with self.using_resources():
-            if not self.readable(event, scope):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            try:
-                guard = ReadGuard.freeze(self, scope, manual=True)
-                selected = guard.selection["pages"]
-                if not selected:
-                    yield event.plain_result(
-                        "尚未选择知识页（Knowledge Page）。记忆检索按所选记忆模式运行。\n"
-                        "知识页由 Hindsight 从已有记忆按主题生成，可让新会话参考项目目标等资料。"
-                        "请管理员在官方面板准备知识页，再到插件页「聊天知识页」选择。"
-                    )
-                    return
-                if type(page) is not int or not 1 <= page <= len(selected):
-                    yield event.plain_result(f"知识页序号须为 1 到 {len(selected)}。")
-                    return
-                position = page
-                selected_page = selected[position - 1]
-                async with asyncio.timeout(8):
-                    await guard.client.ensure_auth()
-                    if not guard.valid(self, event):
-                        raise QueueError("background_changed")
-                    page = await guard.client.background_page(scope["bank"], selected_page["mental_model_id"])
-                await self.prepare_sources()
-                if not guard.valid(self, event):
-                    raise QueueError("background_changed")
-                if not page["content"].strip():
-                    yield event.plain_result(self.diagnostic("background_empty"))
-                    return
-                # One whole bounded response; larger documents remain in the official panel.
-                position_label = f"第 {position}/{len(selected)} 篇"
-                if position < len(selected):
-                    position_label += f"；下一篇：/hindsight background {position + 1}"
-                content = (
-                    f"知识页（Knowledge Page）：{selected_page['page_id']}\n"
-                    f"{position_label}\n"
-                    f"聊天时使用所选知识页（开关设置）：{'开启' if guard.selection['enabled'] else '关闭'}\n"
-                    f"刷新时间：{page['last_refreshed_at'] or '未知'}\n"
-                    f"最近刷新失败：{page['last_refresh_failed_at'] or '无记录'}\n"
-                    "内容是否过期：未知；请在官方面板核对内容更新。\n\n" + page["content"]
-                )
-                if len(content) > 3500 or len(content.encode("utf-8")) > 12000:
-                    yield event.plain_result(self.diagnostic("background_view_too_large"))
-                else:
-                    yield event.plain_result(content)
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
-
-    @hindsight.command("show")
-    async def memory_show(self, event: AstrMessageEvent, memory_id: str):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        async with self.using_resources():
-            if not self.readable(event, scope):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            try:
-                async with asyncio.timeout(8):
-                    await self.client.ensure_auth()
-                    record = await self.client.get_memory(scope["bank"], memory_id)
-                await self.prepare_sources()
-                if not self.readable(event, scope):
-                    yield event.plain_result(self.unavailable_message(scope))
-                    return
-                yield event.plain_result(render_memory(record))
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
 
     @staticmethod
     def error_code(exc):
@@ -1254,65 +1137,9 @@ class HindsightBridge(Star):
             return exc.code
         return "timeout" if isinstance(exc, TimeoutError) else str(exc)
 
-    @hindsight.command("export")
-    async def memory_export(self, event: AstrMessageEvent):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        async with self.using_resources():
-            if not self.readable(event, scope):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            try:
-                async with asyncio.timeout(30):
-                    await self.client.ensure_auth()
-                    payload = await self.client.export_memories(scope["bank"])
-                await self.prepare_sources()
-                if not self.readable(event, scope):
-                    yield event.plain_result(self.unavailable_message(scope))
-                    return
-                data = export_bytes(payload)
-                if len(data) > 8 * 1024 * 1024:
-                    raise HindsightError("export_too_large")
-                with tempfile.TemporaryDirectory(
-                    prefix="export-", dir=self.outbox.directory
-                ) as directory:
-                    path = Path(directory) / "hindsight-memory.json"
-                    path.write_bytes(data)
-                    path.chmod(0o600)
-                    await event.send(
-                        MessageChain([File(name=path.name, file=str(path))])
-                    )
-                yield event.plain_result(
-                    "已发送记忆 JSON 文件，包含记忆事实、整合结果和来源文档。"
-                    "插件待保存记录和 AstrBot 聊天历史不在文件中。"
-                )
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
-            except Exception as exc:
-                self.warning("export_" + type(exc).__name__)
-                yield event.plain_result(
-                    "文件发送失败，请检查平台的私聊文件上传能力后重试。"
-                )
-
-    @hindsight.command("correct")
-    async def memory_correct(
-        self, event: AstrMessageEvent, memory_id: str = "", text: str = ""
-    ):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        yield event.plain_result(
-            "请联系管理员修改记忆：在 AstrBot 插件页暂停保存和查询，"
-            "等记录处理完成后，到 Hindsight 官方面板按记忆库 ID找到并修改记忆。"
-        )
-
     @hindsight.command("status")
     async def memory_status(self, event: AstrMessageEvent):
+        """查看记忆服务连接、读写模式和保存进度。"""
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:
@@ -1414,38 +1241,6 @@ class HindsightBridge(Star):
             lines.append("常用操作：/hindsight help")
             yield event.plain_result("\n".join(lines))
 
-    @hindsight.command("recall")
-    async def memory_recall(self, event: AstrMessageEvent, query: str):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("当前私聊未开放记忆。")
-            return
-        source = self.source_header(event)
-        arguments = source.text.split(None, 2) if source else []
-        if len(arguments) == 3:
-            query = arguments[2]
-        async with self.using_resources():
-            if not self.outbox.can_recall(scope, manual=True):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            try:
-                from .core.materials import utc_timestamp
-
-                result = await self.recall_text(
-                    scope["bank"], query, timestamp=utc_timestamp(),
-                    recall_budget=reference_options(self.outbox, scope)["recall_budget"],
-                )
-                await self.prepare_sources()
-                if not self.outbox.can_recall(scope, manual=True) or not self.allowed(
-                    event
-                ):
-                    yield event.plain_result(self.unavailable_message(scope))
-                    return
-                yield event.plain_result(result or "没有找到相关记忆。")
-            except (HindsightError, QueueError, TimeoutError) as exc:
-                yield event.plain_result(self.diagnostic(self.error_code(exc)))
-
     async def mode(self, event, mode):
         await self.prepare_sources()
         scope = self.command_scope(event)
@@ -1486,60 +1281,22 @@ class HindsightBridge(Star):
 
     @hindsight.command("on")
     async def memory_on(self, event: AstrMessageEvent):
+        """开启读写记忆，保存新对话并自动召回。"""
         yield event.plain_result(await self.mode(event, "active"))
 
     @hindsight.command("readonly")
     async def memory_readonly(self, event: AstrMessageEvent):
+        """只召回已有记忆，不保存新对话。"""
         yield event.plain_result(await self.mode(event, "readonly"))
 
     @hindsight.command("pause")
     async def memory_pause(self, event: AstrMessageEvent):
+        """暂停记忆读写，正常聊天继续。"""
         yield event.plain_result(await self.mode(event, "paused"))
-
-    @hindsight.command("retry")
-    async def memory_retry(self, event: AstrMessageEvent):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        try:
-            command = self.prepare_command(event, scope, "retry")
-            summary = self.outbox.summary(scope["scope_id"])
-            if summary.get("maintenance") or summary.get("bank_missing"):
-                yield event.plain_result(self.unavailable_message(scope))
-                return
-            count = self.apply_command(
-                event, scope, command,
-                lambda: self.outbox.request_retry(scope["scope_id"], journal_only=True),
-            )
-            self.worker.wake.set()
-            yield event.plain_result(f"已安排重新保存 {count} 条失败记录。")
-        except QueueError as exc:
-            yield event.plain_result("无法重试：" + self.diagnostic(str(exc)))
-
-    @hindsight.command("cancel")
-    async def memory_cancel(self, event: AstrMessageEvent, task_id: int):
-        await self.prepare_sources()
-        scope = self.command_scope(event)
-        if scope is None:
-            yield event.plain_result("此私聊未开放记忆。")
-            return
-        try:
-            command = self.prepare_command(event, scope, "cancel", (task_id,))
-            self.apply_command(
-                event, scope, command,
-                lambda: self.outbox.request_cancel(scope["scope_id"], task_id, journal_only=True),
-            )
-            self.worker.wake.set()
-            yield event.plain_result(
-                f"正在取消任务 {task_id}，可用 /hindsight status 查看进度。已经生成的记忆保留。"
-            )
-        except QueueError as exc:
-            yield event.plain_result("无法取消：" + self.diagnostic(str(exc)))
 
     @hindsight.command("forget")
     async def memory_forget(self, event: AstrMessageEvent, confirmation: str = ""):
+        """二次确认后清空个人全部长期记忆。"""
         await self.prepare_sources()
         scope = self.command_scope(event)
         if scope is None:

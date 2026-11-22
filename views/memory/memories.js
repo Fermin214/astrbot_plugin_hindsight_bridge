@@ -1,4 +1,41 @@
 export function createMemories(view) {
+  function referenceValues() {
+    return { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
+      capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
+      recall_on_quoted_or_link: view.$("reference-quoted").checked,
+      types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
+      detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber };
+  }
+
+  function readingValues() {
+    return { mode: view.$("reading-mode").value };
+  }
+
+  function reflectValues() {
+    return { enabled: view.$("reflect-enabled").checked, timeout: Number(view.$("reflect-timeout").value) };
+  }
+
+  function backgroundValues(draft) {
+    return { enabled: draft.enabled, page_ids: draft.selected.map((page) => page.page_id) };
+  }
+
+  function editReading() {
+    if (view.readingDraft) view.updateDirty(view.readingDraft, view.readingValues(), "reading-feedback");
+    view.renderReading();
+  }
+
+  function editReflect() {
+    if (view.reflectDraft) view.updateDirty(view.reflectDraft, view.reflectValues(), "reflect-feedback");
+    view.renderReflect();
+  }
+
+  function editReferences(event) {
+    if (!view.referenceDraft?.selection) return;
+    view.updateDirty(view.referenceDraft, view.referenceValues(), "reference-feedback");
+    if (event.target.id === "reference-prompt") view.countPrompt(view.referenceDraft);
+    view.renderReferences();
+  }
+
   function refreshAccountPlatforms() {
     const select = view.$("account-platform");
     const previous = select.value;
@@ -199,6 +236,7 @@ export function createMemories(view) {
       view.$("reference-budget").value = saved.recall_budget ?? "mid";
       view.$("reference-limit").value = saved.detail_limit;
       view.$("reference-history").value = saved.history_limit;
+      draft.baseline = JSON.stringify(view.referenceValues());
     } catch (error) {
       if (view.referenceDraft !== draft || revision !== draft.revision) return;
       draft.failed = true;
@@ -227,11 +265,7 @@ export function createMemories(view) {
     view.renderReferences();
     const draft = view.referenceDraft;
     if (!draft?.selection || view.$("reference-save").disabled || !view.$("reference-form").reportValidity()) return;
-    const payload = { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
-      capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
-      recall_on_quoted_or_link: view.$("reference-quoted").checked,
-      types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
-      detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber,
+    const payload = { ...view.referenceValues(),
       revision: draft.revision, scope_revision: draft.scopeRevision, config_revision: draft.configRevision };
     await view.perform(view.$("reference-save"), "memory", async () => {
       const response = await view.bridge.apiPost(view.endpoint("references", draft.id), payload);
@@ -239,6 +273,7 @@ export function createMemories(view) {
       draft.dirty = false;
       draft.revision = response.selection.revision;
       draft.selection = response.selection;
+      draft.baseline = JSON.stringify(view.referenceValues());
       view.data.scopes.find((item) => item.scope_id === draft.id).reference_revision = draft.revision;
       view.$("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
       view.notify("已保存", false, "reference-feedback");
@@ -345,6 +380,7 @@ export function createMemories(view) {
       view.readingDraft = { snapshot, id: view.scopeId, bank: scope?.bank, revision: saved.revision,
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
       view.$("reading-mode").value = saved.mode || "automatic";
+      view.readingDraft.baseline = JSON.stringify(view.readingValues());
     }
     const select = view.$("reading-mode");
     select.disabled = !scope || !!scope.pending || !!scope.historical || !!view.data?.status?.recovering
@@ -391,6 +427,7 @@ export function createMemories(view) {
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
       view.$("reflect-enabled").checked = !!saved.enabled;
       view.$("reflect-timeout").value = String(saved.timeout ?? 12);
+      view.reflectDraft.baseline = JSON.stringify(view.reflectValues());
       if (discard || changedScope) view.$("reflect-feedback").hidden = true;
     }
     const conflict = view.reflectDraft.snapshot !== snapshot;
@@ -481,6 +518,7 @@ export function createMemories(view) {
         revision: saved.revision, scope_revision: saved.scope_revision, config_revision: view.data?.config_revision,
         selected: view.backgroundPages(saved).map((page) => ({ ...page })), dirty: false,
         pages: [], checks: [], loaded: false, loading: false, attempted: false };
+      view.backgroundDraft.baseline = JSON.stringify(view.backgroundValues(view.backgroundDraft));
       view.$("background-feedback").hidden = true;
     }
     const unavailable = !scope || scope.pending || scope.historical || view.data?.status?.recovering || saved.error;
@@ -529,8 +567,7 @@ export function createMemories(view) {
           else [draft.selected[index], draft.selected[index + direction]] = [draft.selected[index + direction], draft.selected[index]];
           draft.page_id = draft.selected[0]?.page_id || "";
           draft.enabled = draft.enabled && draft.selected.length > 0;
-          draft.dirty = true;
-          view.$("background-feedback").hidden = true;
+          view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
           view.renderBackground();
         });
         actions.append(button);
@@ -582,8 +619,7 @@ export function createMemories(view) {
     if (!draft) return;
     draft.enabled = !!view.$("background-enabled")?.checked && draft.selected.length > 0;
     draft.page_id = draft.selected[0]?.page_id || "";
-    draft.dirty = true;
-    view.$("background-feedback").hidden = true;
+    view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
     view.renderBackground();
   }
 
@@ -601,8 +637,7 @@ export function createMemories(view) {
     }
     draft.enabled = !!pageId;
     draft.page_id = draft.selected[0]?.page_id || "";
-    draft.dirty = true;
-    view.$("background-feedback").hidden = true;
+    view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
     view.renderBackground();
   }
 
@@ -751,5 +786,5 @@ export function createMemories(view) {
     });
   }
 
-  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }
