@@ -189,7 +189,7 @@ class QQSourceTests(unittest.TestCase):
 
     def test_commands_keep_raw_prefix_after_native_wake_stripping(self):
         event = self.event("/hb status")
-        event.get_message_str = lambda: "hindsight status"
+        event.get_message_str = lambda: "hb status"
         self.assertIsNone(self.header(event, ["/"]))
         event.is_at_or_wake_command = True
         self.assertEqual(self.header(event, ["/"]).text, "/hb status")

@@ -390,7 +390,7 @@ class SourceContracts(unittest.TestCase):
 
     def test_host_removed_wake_prefix_requires_exact_public_configuration(self):
         event = self.event()
-        event.get_message_str = lambda: "hindsight pause"
+        event.get_message_str = lambda: "hb pause"
         event.is_at_or_wake_command = True
         self.assertIsNone(native_header(event, self.Plain))
         self.assertEqual(native_header(event, self.Plain, ["/"]).text, "/hb pause")
