@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -263,7 +264,10 @@ class Acceptance:
         })
         scope = next(row for row in (await self.bootstrap())["scopes"]
                      if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
-        boundary = database(self.runtime, "SELECT accept_from FROM scopes WHERE scope_id=?", (scope["scope_id"],))[0]["accept_from"]
+        configuration = await self.config()
+        control_directory = Path(configuration.get("control_state_dir") or self.runtime.parent.parent / (NAME + "_control"))
+        boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE source_id=?", (scope["scope_id"],))[0]["accept_from"]
+        boundary = math.ceil(boundary)
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
     async def action(self, scope, action, **extra):
