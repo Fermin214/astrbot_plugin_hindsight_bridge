@@ -74,8 +74,7 @@ class Maintenance:
                 (queue.connection_id, scope["bank"]),
             )
         }
-        reflections = queue.control.reflection_pending(queue.connection_id, bank=scope["bank"])
-        inflight = bool(bank_tasks & queue.in_flight) or bool(reflections)
+        inflight = bool(bank_tasks & queue.in_flight)
         remote_active = []
         operations = []
         if not pending and not inflight:
@@ -83,7 +82,8 @@ class Maintenance:
                 await self.client.ensure_auth()
                 operations = await self.client.list_operations(scope["bank"])
                 for op in operations:
-                    if op.status not in {"pending", "processing", "cancelled"}:
+                    child_active = any(status not in {"completed", "failed", "not_found"} for _, status in op.children)
+                    if op.status in {"completed", "failed", "not_found"} and not child_active:
                         continue
                     if op.status == "cancelled" and op.kind == "consolidation":
                         current = await self.client.operation(scope["bank"], op.id)
@@ -110,8 +110,6 @@ class Maintenance:
             "pending": len(pending), "in_flight": inflight,
             "remote_active": len(remote_active),
             "remote_operations": len(operations),
-            "reflect_pending": len(reflections),
-            "reflect_unknown": sum(item["state"] == "unknown" for item in reflections),
             "bank_missing": queue.control.bank_state(queue.connection_id, scope["bank"]) == "missing",
         }
 
@@ -180,6 +178,12 @@ class Maintenance:
                     control.add_refs(
                         fid, (("operation", child) for child, _ in operation.children)
                     )
+                if operation.status not in {"pending", "processing", "completed", "failed", "cancelled", "not_found"} or any(
+                    status not in {"pending", "processing", "completed", "failed", "cancelled", "not_found"}
+                    for _, status in operation.children
+                ):
+                    control.cleanup_state(fid, "cleaning", "operation_state_unknown", delay=1, epoch=epoch)
+                    return False
                 await self.cancel_active(bank, operation)
                 if not control.cleanup_ref_done(fid, "operation", oid, pass_number, epoch):
                     return False
@@ -247,11 +251,6 @@ class Maintenance:
             progress = control.db.execute(
                 "SELECT * FROM erasures WHERE forget_id=?", (fid,)
             ).fetchone()
-            reflections = control.reflection_pending(self.outbox.connection_id, bank=bank)
-            if reflections:
-                code = "reflect_execution_unknown" if any(item["state"] == "unknown" for item in reflections) else "reflect_busy"
-                control.cleanup_state(fid, "cleaning", code, epoch=progress["cleanup_epoch"])
-                return False
             if progress["cleanup_step"] == 7:
                 # Verified Banks are checked again, including references no longer listed remotely.
                 with control.transaction():
@@ -328,10 +327,7 @@ class Maintenance:
                 owner = self.outbox.control.owner(self.outbox.connection_id, item["owner_id"])
                 if (
                     not owner or owner["bank"] == item["old_bank"] or owner["generation"] <= item["old_generation"]
-                    or (
-                        item["last_error"] != "reference_history_unavailable"
-                        and not self.outbox.control.reflection_pending(self.outbox.connection_id, bank=item["old_bank"])
-                    )
+                    or item["last_error"] != "reference_history_unavailable"
                 ):
                     return False
         # Apply the newest control records before allowing either recall or queue submission.

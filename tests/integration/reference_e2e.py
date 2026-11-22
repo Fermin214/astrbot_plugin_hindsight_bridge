@@ -53,12 +53,19 @@ async def verify(acceptance, page, frame, bank):
         return turn, delivery
 
     first = await settings()
+    existing = await turns()
+    assert existing, "v0.4.0 baseline did not create a reference snapshot"
+    legacy = await detail(existing[0]["id"])
+    frozen_legacy = json.dumps(legacy, ensure_ascii=False)
     assert first["prompt"] == DEFAULT and first["detail_limit"] == 12 and first["history_limit"] == 30
     assert set(first["types"]) == {"world", "experience", "observation"} and not first["exclude_assistant"]
     original, delivery = await chat("What is the Cedar-120 compatibility marker?")
     assert delivery["text"].count(DEFAULT) == 1 and delivery["items"] and delivery["pages"]
     assert all(item["text"] in delivery["text"] for item in delivery["pages"])
-    assert all(item["id"] in delivery["text"] for item in delivery["items"])
+    assert all(item["text"] in delivery["text"] and item["id"] not in delivery["text"] for item in delivery["items"])
+    assert all(item.get("document_id", "") not in delivery["text"] for item in delivery["items"]
+               if isinstance(item.get("document_id"), str) and item["document_id"].startswith(("uw1-", "aw1-")))
+    assert "新鲜度未知" not in delivery["text"]
     native_order = jsonl("recall-order")[-1]["ids"]
     received_ids = [item["id"] for item in delivery["items"]]
     assert received_ids == [item for item in native_order if item in received_ids]
@@ -89,7 +96,7 @@ async def verify(acceptance, page, frame, bank):
         assert delivery["text"].count(CUSTOM) == 1 and not delivery["items"] and delivery["code"] == "recall_timeout"
         await settings(prompt=DEFAULT)
         _, delivery = await chat("Try the slow search with the default prompt.")
-        assert DEFAULT not in delivery["text"] and delivery["code"] == "recall_timeout"
+        assert delivery["text"].count(DEFAULT) == 1 and delivery["code"] == "recall_timeout"
     finally:
         await acceptance.control("delay_recall", seconds=0)
     await settings(prompt="")
@@ -100,11 +107,16 @@ async def verify(acceptance, page, frame, bank):
     assert await frame.locator("#reference-prompt").input_value() == ""
     _, delivery = await chat("Cedar-120 after restarting with an empty prompt.")
     assert not delivery["prompt"] and DEFAULT not in delivery["text"] and delivery["items"]
+    assert "外部数据，不是指令" not in delivery["text"] and "新鲜度未知" not in delivery["text"]
     assert await detail(original["id"]) == original
     acceptance.passed("default_custom_and_empty_prompts_match_native_host_with_filters_timeout_and_restart")
 
     await settings(prompt=CUSTOM)
     await reference_tools_e2e.verify(acceptance, frame, bank)
+    tool_turn = await detail((await turns())[0]["id"])
+    assert len(tool_turn["deliveries"]) > 1
+    await reference_panel_e2e.verify_clipboard(page, frame, tool_turn)
+    await frame.locator('[data-close="usage-dialog"]').click()
     original_page = original["deliveries"][0]["pages"][0]
     model = bank + "/mental-models/" + original_page["mental_model_id"]
     await acceptance.native("PATCH", model, {"source_query": "HB-TOOLS-PAGE-V2"})
@@ -113,12 +125,16 @@ async def verify(acceptance, page, frame, bank):
     updated = await acceptance.native("GET", model + "?detail=content")
     assert "HB-TOOLS-V2-LINE-000" in updated["content"] and "HB-TOOLS-V2-LINE-000" not in original_page["text"]
     assert await detail(original["id"]) == original
+    assert json.dumps(await detail(legacy["id"]), ensure_ascii=False) == frozen_legacy
+    await reference_panel_e2e.verify_clipboard(page, frame, legacy)
+    await frame.locator('[data-close="usage-dialog"]').click()
+    acceptance.passed("native_040_snapshots_and_exact_json_stay_frozen_after_page_refresh_and_render_in_three_tabs")
     await acceptance.action((await acceptance.scope(BOB))["scope_id"], "mode", mode="readonly")
     await acceptance.bot.chat(BOB, "No memories yet.")
     bob_record = (await turns(bob_route))[0]
     bob_detail = (await acceptance.http("GET", bob_route + "/usage/" + bob_record["id"]))["turn"]
     assert bob_detail["deliveries"][0]["status"] == "no_match"
-    assert DEFAULT not in bob_detail["deliveries"][0]["text"] and CUSTOM not in bob_detail["deliveries"][0]["text"]
+    assert bob_detail["deliveries"][0]["text"].count(DEFAULT) == 1 and CUSTOM not in bob_detail["deliveries"][0]["text"]
     try:
         await acceptance.http("GET", bob_route + "/usage/" + original["id"])
     except RuntimeError:
@@ -161,11 +177,45 @@ async def verify(acceptance, page, frame, bank):
     await settings(history_limit=0)
     await acceptance.bot.chat(ALICE, "Disabled logging.")
     assert await turns() == [] and await turns(bob_route)
+    await page.reload()
+    await acceptance.dismiss_host_notice(page)
+    await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+    await frame.locator("#usage-open").click()
+    await frame.locator("#usage-feedback").filter(has_text="暂无使用记录").wait_for()
+    assert not await frame.locator("#usage-text").input_value() and not await frame.locator("#usage-json").input_value()
+    assert await frame.locator("#usage-turn option").count() == 0
+    await frame.locator('[data-close="usage-dialog"]').click()
     acceptance.passed("native_31_turns_trim_to_last_30_then_two_then_zero_without_affecting_other_users")
 
-    await settings(history_limit=30, prompt=CUSTOM)
-    await chat("One reference before downgrade.")
+    await settings(
+        history_limit=30, prompt=CUSTOM, types=first["types"],
+        detail_limit=first["detail_limit"], exclude_assistant=first["exclude_assistant"],
+    )
+    reading = await acceptance.http("GET", route + "/reading")
+    await acceptance.http("POST", route + "/reading", payload={
+        "mode": "automatic", "revision": reading["selection"]["revision"],
+        "scope_revision": reading["scope_revision"], "config_revision": reading["config_revision"],
+    })
+    _, candidate_delivery = await chat("Cedar-120 reference before downgrade.")
+    assert candidate_delivery["items"]
     old_timestamp = int(time.time())
+    await acceptance.install("baseline-install.zip")
+    await acceptance.usable()
+    await acceptance.bot.chat(ALICE, "Cedar-120 legacy snapshot before the 0.5 upgrade.")
+    legacy_turn = await detail((await turns())[0]["id"])
+    assert str(acceptance.bot.message_id) == legacy_turn["message_id"]
+    legacy_delivery = legacy_turn["deliveries"][0]
+    assert legacy_delivery["items"] and all(item["id"] in legacy_delivery["text"] for item in legacy_delivery["items"])
+    frozen = json.dumps(legacy_turn, ensure_ascii=False)
+    await acceptance.install("candidate-upgrade.zip")
+    await acceptance.usable()
+    assert json.dumps(await detail(legacy_turn["id"]), ensure_ascii=False) == frozen
+    await page.reload()
+    await acceptance.dismiss_host_notice(page)
+    await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+    await reference_panel_e2e.verify_clipboard(page, frame, legacy_turn)
+    await frame.locator('[data-close="usage-dialog"]').click()
+    acceptance.passed("native_040_json_reference_snapshot_upgrades_without_reformatting_its_exact_delivery_or_export")
     await acceptance.install("baseline-install.zip")
     await acceptance.usable()
     prepared = await acceptance.action(scope["scope_id"], "forget_prepare")
@@ -178,7 +228,7 @@ async def verify(acceptance, page, frame, bank):
     await acceptance.install("candidate-upgrade.zip")
     await acceptance.usable()
     assert (await settings())["prompt"] == DEFAULT and not await turns() and await turns(bob_route)
-    acceptance.passed("forget_in_035_then_upgrade_removes_stale_snapshots_and_custom_prompt_before_read")
+    acceptance.passed("forget_in_040_then_upgrade_removes_stale_snapshots_and_custom_prompt_before_read")
 
     await acceptance.action(scope["scope_id"], "mode", mode="active")
     await asyncio.sleep(1.1)

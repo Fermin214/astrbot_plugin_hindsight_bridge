@@ -142,10 +142,8 @@ async def main():
             await conversations.update_conversation(incoming.unified_msg_origin, cid, history=stored)
             assert plugin.outbox.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
             checks.append("installed_real_host_uses_real_native_page_in_temp_request_without_capture_or_history")
-            replies = [result async for result in plugin.memory_background(await event(adapter, 3))]
-            assert any("Native generated background marker." in part.text
-                       for result in replies for part in result.chain if isinstance(part, Plain))
-            checks.append("personal_read_uses_real_native_page")
+            assert (await plugin.client.background_page(bank, created["mental_model_id"]))["content"] == page["content"]
+            checks.append("official_read_uses_real_native_page")
             selection = reference(plugin.outbox, scope)
             closed = save_reference(plugin.outbox, scope, revision=selection["revision"],
                                     page_id=created["page_id"], model_id=created["mental_model_id"], enabled=False)
@@ -182,8 +180,10 @@ async def main():
             plugin.worker.maintenance.begin(scope["scope_id"])
             state = await plugin.worker.maintenance.status(scope["scope_id"])
             assert state["ready"], state
-            blocked = [str(result) async for result in plugin.memory_background(await event(adapter, 4))]
-            assert "Native generated background marker." not in json.dumps(blocked)
+            blocked_event = await event(adapter, 4)
+            blocked_request = ProviderRequest(prompt="An unrelated new conversation.")
+            await plugin.add_memory(blocked_event, blocked_request)
+            assert "Native generated background marker." not in json.dumps(await blocked_request.assemble_context())
             await plugin.worker.maintenance.resume(scope["scope_id"])
             checks.append("maintenance_drains_native_refresh_and_blocks_personal_read")
             scope = plugin.outbox.scope_owner(scope["scope_id"])

@@ -18,6 +18,7 @@ import httpx
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core import diagnostics
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming, sha256
+from plugins.astrbot_plugin_hindsight_bridge.core.materials import DEFAULT_MEMORY_PROMPT
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 from plugins.astrbot_plugin_hindsight_bridge.core.permissions import pairs
 from plugins.astrbot_plugin_hindsight_bridge.core.reference import reference_options, save_reference_options
@@ -95,6 +96,10 @@ def bridge_class(directory, logger):
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, modules):
         spec.loader.exec_module(module)
+    class TestPanel(module.MemoryPanel):
+        def directory(self):
+            return directory / "runtime"
+    module.MemoryPanel = TestPanel
     module.Worker = Mock(return_value=SimpleNamespace(run=AsyncMock()))
     return module.HindsightBridge
 
@@ -220,6 +225,26 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(str(row.url.path).endswith("/memories") and row.method == "POST" for row in self.requests))
         for table in ("events", "outbox", "window", "replies"):
             self.assertEqual(queue.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    async def test_request_snapshot_records_actual_prompt_for_automatic_and_on_demand_delivery(self):
+        plugin, queue = self.plugin, self.plugin.outbox
+        for mode in ("automatic", "tools"):
+            for prompt in (DEFAULT_MEMORY_PROMPT, "  Custom memory prompt\r\nKeep the original names.  ", ""):
+                with self.subTest(mode=mode, prompt=prompt):
+                    scope = queue.scope(self.incoming)
+                    save_reference_options(queue, scope, **{**reference_options(queue, scope), "prompt": prompt})
+                    event, request = self.turn(f"prompt-{mode}-{len(queue.references.list(scope))}")
+                    with patch.object(plugin.read_tools, "prepare", AsyncMock(return_value={"mode": mode})):
+                        await plugin.add_memory(event, request)
+                    turn = queue.references.list(scope)[0]
+                    delivery = queue.references.detail(scope, turn["id"])["deliveries"][0]
+                    self.assertEqual(delivery["prompt"], prompt)
+                    self.assertEqual(delivery["text"], request.extra_user_content_parts[0].text)
+                    self.assertEqual(delivery["status"], "not_called" if mode == "tools" else "no_match")
+                    if prompt:
+                        self.assertEqual(delivery["text"].count(prompt), 1)
+                    else:
+                        self.assertNotIn(DEFAULT_MEMORY_PROMPT, delivery["text"])
 
     async def test_status_is_short_when_healthy_and_keeps_diagnostics_after_an_error(self):
         plugin = self.plugin
@@ -665,7 +690,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             if self.plugin.client.check_connection.await_count == 1:
                 raise HindsightError("connection_error")
             checked.set()
-        self.plugin.client = SimpleNamespace(check_connection=AsyncMock(side_effect=probe), close=AsyncMock())
+        self.plugin.client = SimpleNamespace(check_connection=AsyncMock(side_effect=probe), close=AsyncMock(), auth_verified="")
         sleep = asyncio.sleep
         async def quick_sleep(seconds):
             await sleep(0.001)
@@ -693,7 +718,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             while self.plugin.client.connection["connected"] is not True:
                 await asyncio.sleep(0.001)
         await asyncio.wait_for(wait_connected(), 1)
-        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(len(self.requests), 2)
         self.assertFalse(self.plugin.outbox.recovering)
 
     async def test_upgrade_adds_account_template_marker_without_changing_identity_or_timeout(self):
@@ -889,7 +914,7 @@ class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
         client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
         try:
             await client.recall("bank", "hello", timestamp="2026-11-03T12:00:00Z", timeout=30)
-            self.assertEqual(observed, [30] * 4)
+            self.assertEqual(observed, [30] * 3)
             self.assertEqual(client.http.timeout.read, 15)
         finally:
             await client.close()
@@ -922,7 +947,7 @@ class ClientDiagnostics(unittest.IsolatedAsyncioTestCase):
         client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
         try:
             await asyncio.gather(client.check_connection(force=True), client.check_connection(force=True))
-            self.assertEqual(count, 3)
+            self.assertEqual(count, 2)
             self.assertTrue(client.connection["connected"])
         finally:
             await client.close()

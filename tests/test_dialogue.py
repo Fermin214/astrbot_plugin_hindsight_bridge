@@ -176,7 +176,7 @@ class DialogueDurability(unittest.TestCase):
         self.assertEqual(item["metadata"]["delivery"], "unknown")
         self.assertEqual(item["metadata"]["time_source"], "history_observed_at")
         self.assertTrue(item["document_id"].startswith("aw1-0-"))
-        self.assertIn("不能证明操作实际执行", item["content"])
+        self.assertIn("不等于操作实际执行或结果发生", item["content"])
         self.assertEqual(self.queue.get(user.task_id)["payload"], original)
         self.assertFalse(
             self.queue.capture_assistant(

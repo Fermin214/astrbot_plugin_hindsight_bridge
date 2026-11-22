@@ -14,12 +14,6 @@ RFC3339 = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?"
     r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
 )
-TEXT_FIELDS = frozenset({
-    "author", "id", "timestamp", "content", "message_type", "message_scene",
-    "attachments", "msg_elements", "message_reference",
-})
-
-
 def native_types(host_type):
     if host_type not in {"qq_official", "qq_official_webhook"}:
         return None
@@ -173,6 +167,8 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     data = getattr(raw, "raw_data", None)
     if not isinstance(data, Mapping):
         return None
+    if any(data.get(name) for name in ("channel_id", "guild_id", "group_openid")):
+        return None
     author = data.get("author")
     if not isinstance(author, Mapping) or author.get("bot") is not False:
         return None
@@ -190,7 +186,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     valid_time = (
         occurred is not None and data["timestamp"] == getattr(raw, "timestamp", None)
         and type(received) in (int, float) and math.isfinite(received)
-        and 0 < received <= time.time() + 1
+        and 0 < received <= time.time() + 300
     )
     if inspect is not None:
         inspect(login.appid, occurred if valid_time else None, received, lambda: message_shape(data))
@@ -217,7 +213,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
         elif data.get("message_type") == 103:
             return None
     if (
-        set(data) - TEXT_FIELDS or type(data.get("message_type")) is not int
+        data.get("parallel_message") is not None or type(data.get("message_type")) is not int
         or data["message_type"] not in ((0, 103) if quoted else (0,)) or not isinstance(original, str)
         or original != getattr(raw, "content", None) or not original.strip() or len(original) > 8000
     ):

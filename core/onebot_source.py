@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from .identity import Incoming
 
 
-HOST_CLOCK_TOLERANCE = 1.0
+HOST_CLOCK_TOLERANCE = 300.0
 
 
 def native_types():

@@ -81,7 +81,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_command_uses_same_original_identity_and_time_as_capture(self):
-        event = self.event("/hindsight pause")
+        event = self.event("/hb pause")
         self.assertIsNone(self.plugin.snapshot(event))
         scope = self.plugin.command_scope(event)
         self.assertEqual(scope["scope_id"], self.plugin.outbox.scope(self.incoming)["scope_id"])
@@ -100,8 +100,8 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
             "platform": [{"id": "qq", "type": "aiocqhttp"}], "wake_prefix": ["!"],
         }
         self.config["command_prefixes"] = ["!"]
-        status = self.event("!hindsight status extra")
-        status.get_message_str = lambda: "hindsight status extra"
+        status = self.event("!hb status extra")
+        status.get_message_str = lambda: "hb status extra"
         status.is_at_or_wake_command = True
         self.assertIsNone(self.plugin.snapshot(status))
         self.plugin.record_skip(status, queue)
@@ -132,7 +132,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.config.update(api_url="http://memory.test", api_key="valid-key")
         owned = {"id": "012345abcdef", "api_url": self.config["api_url"], "api_key": self.config["api_key"]}
         scope = dict(self.plugin.outbox.scope(self.incoming))
-        awaitable = self.plugin.memory_forget(self.event("/hindsight forget", mid="forget-prepare"))
+        awaitable = self.plugin.memory_forget(self.event("/hb forget", mid="forget-prepare"))
         replies = [text async for text in awaitable]
         self.assertIn("120 秒", str(replies))
         token = self.plugin.confirmations[scope["owner_id"]]["token"]
@@ -142,7 +142,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         for index, confirmation in enumerate(("", token)):
             replies = [text async for text in self.plugin.memory_forget(
                 self.event(
-                    "/hindsight forget" + (" " + confirmation if confirmation else ""),
+                    "/hb forget" + (" " + confirmation if confirmation else ""),
                     mid="forget-blocked-" + str(index), timestamp=102 + index,
                 ), confirmation,
             )]
@@ -152,7 +152,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
             "connection_id": self.plugin.outbox.connection_id, "verified": True,
         }})
         replies = [text async for text in self.plugin.memory_forget(
-            self.event("/hindsight forget " + token, mid="forget-confirm", timestamp=104), token,
+            self.event("/hb forget " + token, mid="forget-confirm", timestamp=104), token,
         )]
         self.assertIn("正在清空", str(replies))
         self.assertNotEqual(self.plugin.outbox.scope(self.incoming)["bank"], scope["bank"])
@@ -178,7 +178,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
             "upgrade_pauses": {"connection_id": queue.connection_id, "banks": []},
         })
         self.assertFalse(panel.managed_connection())
-        self.assertIn("已暂停", await self.plugin.mode(self.event("/hindsight on", mid="on-paused"), "active"))
+        self.assertIn("已暂停", await self.plugin.mode(self.event("/hb on", mid="on-paused"), "active"))
         self.assertTrue(queue.summary(scope["scope_id"])["maintenance"])
         panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
         with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
@@ -187,15 +187,15 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
             await panel.action(scope["scope_id"])
         self.assertIsNone(queue.summary(scope["scope_id"])["maintenance"])
         self.assertIn("已开启", await self.plugin.mode(
-            self.event("/hindsight on", mid="on-resumed", timestamp=102), "active",
+            self.event("/hb on", mid="on-resumed", timestamp=102), "active",
         ))
         replies = [text async for text in self.plugin.memory_forget(
-            self.event("/hindsight forget", mid="forget-after-upgrade", timestamp=103),
+            self.event("/hb forget", mid="forget-after-upgrade", timestamp=103),
         )]
         self.assertIn("120 秒", str(replies))
         token = self.plugin.confirmations[scope["owner_id"]]["token"]
         replies = [text async for text in self.plugin.memory_forget(
-            self.event("/hindsight forget " + token, mid="forget-after-upgrade-confirm", timestamp=104), token,
+            self.event("/hb forget " + token, mid="forget-after-upgrade-confirm", timestamp=104), token,
         )]
         self.assertIn("正在清空", str(replies))
         self.assertNotEqual(queue.scope(self.incoming)["bank"], scope["bank"])
@@ -216,18 +216,18 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin.allowed(self.event()))
         self.assertFalse(self.plugin.outbox.scope(self.incoming)["allowed"])
 
-    async def test_replayed_pause_and_unseen_old_on_do_not_override_latest_mode(self):
-        pause = self.event("/hindsight pause", mid="pause")
+    async def test_command_message_key_is_idempotent_without_clock_high_watermark(self):
+        pause = self.event("/hb pause", mid="pause")
         self.assertIn("已暂停", await self.plugin.mode(pause, "paused"))
         self.assertIn("command_already_applied", await self.plugin.mode(pause, "paused"))
         with patch.object(time, "time", return_value=103.25):
             self.plugin.outbox.set_mode(self.plugin.outbox.scope(self.incoming)["scope_id"], "readonly")
-        late = self.event("/hindsight on", mid="late", timestamp=102)
-        self.assertIn("command_expired", await self.plugin.mode(late, "active"))
-        self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "readonly")
+        late = self.event("/hb on", mid="late", timestamp=102)
+        self.assertIn("已开启", await self.plugin.mode(late, "active"))
+        self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "active")
 
     async def test_rebinding_during_async_mode_check_prevents_old_command(self):
-        event = self.event("/hindsight on", mid="on")
+        event = self.event("/hb on", mid="on")
         async def changed(**kwargs):
             self.bot.get_login_info.return_value = {"user_id": 1002}
             return True
@@ -237,39 +237,11 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin.outbox.access.authorization("qq", "2001")["enabled"])
 
     async def test_same_client_login_change_rejects_first_old_command(self):
-        event = self.event("/hindsight readonly")
+        event = self.event("/hb readonly")
         self.bot.get_login_info.return_value = {"user_id": 1002}
         self.assertIn("未开放", await self.plugin.mode(event, "readonly"))
         self.assertEqual(self.plugin.outbox.scope(self.incoming)["mode"], "active")
         self.assertFalse(self.plugin.outbox.access.authorization("qq", "2001")["enabled"])
-
-    async def test_show_rechecks_login_after_private_read(self):
-        async def read(bank, memory_id):
-            self.bot.get_login_info.return_value = {"user_id": 1002}
-            return {"text": "PRIVATE_TEST_CONTENT"}
-        self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), get_memory=read)
-        results = [text async for text in self.plugin.memory_show(
-            self.event("/hindsight show test"), "test",
-        )]
-        self.assertNotIn("PRIVATE_TEST_CONTENT", str(results))
-        self.assertFalse(self.plugin.outbox.access.authorization("qq", "2001")["enabled"])
-
-    async def test_manual_recall_uses_original_query_and_rechecks_authorization(self):
-        self.plugin.recall_text = AsyncMock(return_value="found")
-        event = self.event("/hindsight recall original full question")
-        results = [text async for text in self.plugin.memory_recall(event, "truncated")]
-        self.assertEqual(results, ["found"])
-        self.assertEqual(self.plugin.recall_text.call_args.args[1], "original full question")
-        async def revoked(*args, **kwargs):
-            self.bot.get_login_info.return_value = {"user_id": 1002}
-            return "PRIVATE_TEST_CONTENT"
-        self.plugin.recall_text.side_effect = revoked
-        results = [text async for text in self.plugin.memory_recall(event, "ignored")]
-        self.assertNotIn("PRIVATE_TEST_CONTENT", str(results))
-        calls = self.plugin.recall_text.await_count
-        results = [text async for text in self.plugin.memory_recall(event, "ignored")]
-        self.assertIn("未开放", str(results))
-        self.assertEqual(self.plugin.recall_text.await_count, calls)
 
     async def test_panel_authorization_prepares_ingress_before_success(self):
         self.plugin.outbox.sync_permissions([])

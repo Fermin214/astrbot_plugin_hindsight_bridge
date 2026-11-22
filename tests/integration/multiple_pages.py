@@ -147,7 +147,10 @@ async def verify(acceptance, page, frame, bank, short):
     assert not by_id[long]["used"] and by_id[long]["code"] == "background_too_large"
     selection = (await acceptance.scope())["background"]
     models = {item["page_id"]: item["mental_model_id"] for item in selection["pages"]}
-    assert wire.index(models[medium]) < wire.index(models[short])
+    assert wire.index("【知识页：HB-BUDGET-MEDIUM｜更新于 ") < wire.index("【知识页：Short background｜更新于 ")
+    assert "neutral neutral" in wire
+    assert models[medium] not in wire and models[short] not in wire
+    assert "新鲜度未知" not in wire and "last_refreshed_at" not in wire
     assert "HB-FEEDBACK-LONG complete paragraph." not in wire
     await frame.locator("#background-selected > li").nth(2).filter(has_text="知识页太长").wait_for()
     acceptance.passed("real_chat_injects_whole_pages_in_saved_order_and_reports_skipped_page")
@@ -165,7 +168,7 @@ async def verify(acceptance, page, frame, bank, short):
     try:
         wire, status = await chat()
         assert all(item["code"] == "background_timeout" and not item["used"] for item in status["pages"]), status
-        assert "Hindsight 知识页" not in wire
+        assert "【知识页" not in wire
     finally:
         await acceptance.control("delay_background", seconds=0)
     await save_parameters(acceptance, frame, recall_timeout=10, background_timeout=1)
@@ -183,15 +186,24 @@ async def verify(acceptance, page, frame, bank, short):
     await until(lambda: selected([medium, short]), timeout=20)
     retained = await acceptance.native("GET", bank + "/knowledge-base/pages/" + long)
     assert retained["id"] == long
-    command = await acceptance.bot.chat(ALICE, "/hindsight background 2")
-    assert short in command and "第 2/2 篇" in command
-    acceptance.passed("reload_keeps_order_removal_preserves_native_content_and_personal_command_reads_by_position")
+    wire, status = await chat()
+    assert [item["page_id"] for item in status["pages"]] == [medium, short]
+    history_route = acceptance.prefix + "/scopes/" + identifier + "/usage"
+    turns = (await acceptance.http("GET", history_route))["turns"]
+    turn = (await acceptance.http("GET", history_route + "/" + turns[0]["id"]))["turn"]
+    delivered = next(delivery for delivery in turn["deliveries"] if delivery["kind"] == "request")
+    assert [item["page_id"] for item in delivered["pages"]] == [medium, short]
+    assert [item["name"] for item in delivered["pages"]] == ["HB-BUDGET-MEDIUM", "Short background"]
+    assert all(item["content"] in delivered["text"]
+               and json.dumps(item["content"], ensure_ascii=False)[1:-1] in wire for item in delivered["pages"])
+    assert "HB-FEEDBACK-LONG complete paragraph." not in delivered["text"]
+    acceptance.passed("reload_keeps_order_removal_preserves_native_content_and_panel_snapshot_matches_actual_injection")
 
     await acceptance.native("DELETE", bank + "/knowledge-base/nodes/" + short)
     wire, status = await chat()
     by_id = {item["page_id"]: item for item in status["pages"]}
     assert by_id[medium]["used"] and by_id[short]["code"] == "background_missing"
-    assert models[short] not in wire
+    assert "【知识页：Short background｜更新于 " not in wire
     acceptance.passed("deleted_page_has_individual_missing_feedback_while_other_page_is_used")
 
     await frame.locator("#background-page").select_option("")
@@ -202,7 +214,7 @@ async def verify(acceptance, page, frame, bank, short):
     await until(closed, timeout=20)
     assert await selected([medium, short])
     await acceptance.bot.chat(ALICE, "A synthetic conversation without selected pages.")
-    assert "Hindsight 知识页" not in acceptance.latest_wire()
+    assert "【知识页" not in acceptance.latest_wire()
     assert (await acceptance.native("GET", bank + "/knowledge-base/pages/" + medium))["id"] == medium
     acceptance.passed("disabling_keeps_order_and_native_pages_but_stops_automatic_injection")
 

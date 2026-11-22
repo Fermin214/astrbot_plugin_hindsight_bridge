@@ -131,7 +131,6 @@ async def main(output):
                 ("edited", {"edit_date": int(time.time())}),
                 ("business", {"business_connection_id": "synthetic-connection"}),
                 ("via_bot", {"via_bot": {"id": 777, "is_bot": True, "first_name": "Inline"}}),
-                ("unknown", {"future_protocol_field": {"text": "synthetic"}}),
             ):
                 sample = await fixture.event(changes=changes)
                 assert fixture.header(sample) is None, label
@@ -146,7 +145,9 @@ async def main(output):
                     assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
                                           inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
                     assert reasons == ["quoted_or_reply" if label == "reply" else "media_or_non_text"]
-            passed.append("nonordinary_private_media_reply_forward_edit_business_and_unknown_fields_rejected")
+            metadata = await fixture.event(changes={"future_protocol_field": {"trace": "synthetic"}})
+            assert fixture.header(metadata) is not None
+            passed.append("nonordinary_private_payloads_rejected_and_unrelated_metadata_ignored")
 
             for entity in ("bold", "italic", "code", "bot_command"):
                 formatted = await fixture.event(changes={"entities": [{"type": entity, "offset": 0, "length": 4}]})
@@ -165,11 +166,13 @@ async def main(output):
                 readonly = fixture.header(sample, allow_readonly=True)
                 assert readonly is not None and readonly.text == text and readonly.capture_allowed is False
             passed.append("readonly_replies_links_and_mentions_keep_only_sender_text_and_reject_other_payloads")
-            command = await fixture.event("/hindsight@SyntheticBot pause")
-            assert fixture.header(command).text == "/hindsight pause"
-            command.message_str = "hindsight pause"
+            command = await fixture.event("/hb@SyntheticBot pause", changes={
+                "entities": [{"type": "bot_command", "offset": 0, "length": len("/hb@SyntheticBot")}],
+            })
+            assert fixture.header(command).text == "/hb pause"
+            command.message_str = "hb pause"
             command.is_at_or_wake_command = True
-            assert fixture.header(command).text == "/hindsight pause"
+            assert fixture.header(command).text == "/hb pause"
             command.message_str = "unrelated"
             assert fixture.header(command) is None
             passed.append("plain_formatting_and_native_command_suffix_supported_transformed_entities_rejected")
@@ -215,7 +218,9 @@ async def main(output):
                         assert not queue.capture(captured_event, "another-conversation").created
                         frozen = dict(queue.get(captured.task_id))
                         assert json.loads(frozen["payload"])["items"][0]["metadata"]["time_source"] == "telegram.message.date"
-                        command = fixture.header(await fixture.event("/hindsight pause", mid=101))
+                        command = fixture.header(await fixture.event("/hb pause", mid=101, changes={
+                            "entities": [{"type": "bot_command", "offset": 0, "length": len("/hb")}],
+                        }))
                         source, scope = command.scope(queue.deployment_id), queue.scope(command)
                         change = queue.access.command(command, source, scope, "mode", ("paused",))
                         queue.access.run(change, scope, lambda: queue.set_mode(

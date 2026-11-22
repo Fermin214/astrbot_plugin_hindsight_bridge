@@ -63,20 +63,20 @@ Normal chatting requires no commands. Open **Users & Memories** in the plugin pa
 - **Tune Chat Recall**: Switch between **Auto Recall** and **On-Demand Tools**, customize the memory prompt and retrieval budget, allow read-only recall on quoted replies or links, and inspect delivered context snapshots per turn.
 - **Manage Knowledge Pages & Reflect**: Pick, order, and toggle up to 8 Knowledge Pages, or enable per-user Reflect synthesis.
 - **Edit Content in Control Plane**: Copy the Control Plane URL from **Plugin Settings → Hindsight Service Connection** and the user's **Bank ID** to browse, search, edit, or export memories directly in Hindsight (see [Deployment](deploy/README.md#五打开官方-control-plane) for login key retrieval).
-- **Recover or Clear Data**: Resolve upgrade or error pauses under **View Pause Status**, clear stuck Reflect states via **Unblock Reflect** after confirming no active task remains on Hindsight, or permanently erase a user's bank via **Clear Memory** (AstrBot's own chat history stays intact).
+- **Recover or Clear Data**: Resolve upgrade or error pauses under **View Pause Status**, or permanently erase a user's bank via **Clear Memory**. Reflect timeouts do not block recovery or erasure; AstrBot's own chat history stays intact.
 
 Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list):
 
 | Action | Command |
 | --- | --- |
-| List personal memories | `/hindsight view` |
-| Read selected knowledge page | `/hindsight background [index]` |
-| Check status & diagnostics | `/hindsight status` |
-| Export personal memories as JSON | `/hindsight export` |
-| Switch to read-only (keep recalling, stop saving) | `/hindsight readonly` |
-| Pause saving and automatic recall | `/hindsight pause` |
-| Resume read/write | `/hindsight on` |
-| Erase personal memories | `/hindsight forget`, then reply to confirm |
+| Show command help | `/hb help` |
+| Check status & diagnostics | `/hb status` |
+| Switch to read-only (keep recalling, stop saving) | `/hb readonly` |
+| Pause saving and automatic recall | `/hb pause` |
+| Resume read/write | `/hb on` |
+| Erase personal memories | `/hb forget`, then reply to confirm |
+
+Version 0.5.0 retires `correct/view/show/export/recall/background/retry/cancel`. Inspect delivered context, select pages and retry failed saves in the plugin panel; browse, search, edit and export memories in Hindsight Control Plane. Individual task cancellation through chat is removed; erasure still invalidates pending work and deletes the personal Bank.
 
 ## Scope
 
@@ -90,7 +90,7 @@ Common private-chat commands (see [User Guide](docs/USAGE.md) for the full list)
 - [User Guide](docs/USAGE.md): Panel controls, Knowledge Pages, On-Demand Tools, Reflect, and commands
 - [Compatibility](docs/SUPPORT.md): Versions, model providers, platforms, and limits
 - [Backup & Restore](docs/DATA-MAINTENANCE.md): Backups, disaster recovery, and companion upgrades
-- [Contributing](CONTRIBUTING.md): Architecture overview, test suites, and contribution rules
+- [Contributing](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/CONTRIBUTING.md): Architecture overview, test suites, and contribution rules
 
 Please report issues on [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) with versions, steps to reproduce, and error details.
 

@@ -9,3 +9,9 @@
 tests/ export-ignore
 tools/ export-ignore
 requirements-dev.txt export-ignore
+.agents/ export-ignore
+AGENTS.md export-ignore
+CONTRIBUTING.md export-ignore
+docs/ARCHITECTURE.md export-ignore
+docs/SETUP-DESIGN.md export-ignore
+docs/PLATFORM-ACCEPTANCE.md export-ignore

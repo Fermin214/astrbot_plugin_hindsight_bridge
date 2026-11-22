@@ -1,7 +1,6 @@
 """Native recall results and safe handoff from the removed correction store."""
 
 from contextlib import closing
-import json
 import sqlite3
 import tempfile
 import unittest
@@ -20,8 +19,8 @@ class NativeMemories(unittest.TestCase):
             {"id": "unlinked", "text": "unlinked observation", "type": "observation"},
         ]
         block = memory_block(rows)
-        payload = json.loads(block[block.index("{"):])
-        self.assertEqual(list(payload.values()), [rows])
+        self.assertLess(block.index("native corrected fact"), block.index("derived observation"))
+        self.assertLess(block.index("derived observation"), block.index("unlinked observation"))
         self.assertEqual(memory_block([]), "")
         self.assertEqual(memory_block(rows, limit=1), "")
         self.assertLessEqual(len(memory_block(rows, limit=150)), 150)
@@ -31,10 +30,9 @@ class NativeMemories(unittest.TestCase):
             "id": "reply", "text": "I completed the operation.",
             "document_id": "aw1-0-" + "a" * 64, "type": "experience",
         }])
-        payload = json.loads(block[block.index("{"):])
-        record = list(payload.values())[0][0]
-        self.assertIn("assistant", record.values())
-        self.assertIn("unknown", record.values())
+        self.assertIn("助手回复", block)
+        self.assertIn("I completed the operation.", block)
+        self.assertNotIn("aw1-", block)
 
     def test_nonempty_legacy_store_stops_without_deleting_records(self):
         with tempfile.TemporaryDirectory() as directory:

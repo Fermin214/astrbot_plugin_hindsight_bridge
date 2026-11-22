@@ -48,13 +48,13 @@ Bridge 仅通过 AstrBot 的公开钩子/插件接口与 Hindsight 的公开 HTT
 - 默认 `recall_timeout` 为 10 秒（范围 0.2–30 秒），覆盖查询构建、认证与检索；默认上下文上限 4,000 字符。
 - 召回超时、无匹配或服务断连时只附加简短状态说明（或保持静默），不阻塞普通聊天；各用户的最近检索结果与连续失败次数在内存中按作用域独立统计，服务恢复检查完成前暂缓向远端提交队列。
 - `core/reference.py` 管理按用户保存的参考设置，并将每轮真正写入请求的文本及工具返回值快照保存在业务目录的 `references.sqlite3`（按控制库身份、连接、用户、授权修订和 Bank 代次隔离；写入失败时跳过快照而不中断聊天）。
-- 私聊命令 `/hindsight view`、`/show`、`/export` 是对 Hindsight 只读接口的薄封装；旧的本地更正入口 `correct` 仅提示管理员前往官方 Control Plane 处理。
+- 私聊命令组 `/hb` 只提供 `help`、`status`、`on`、`readonly`、`pause`、`forget` 六个命令。查看交付内容、选页和重试使用插件管理页；浏览、查找、修改和导出记忆使用 Hindsight Control Plane。
 
 ## 知识页（Knowledge Page）
 
 `core/background.py` 在控制库 `settings` 中按连接与用户保存已选页面有序 ID 列表（格式 2 最多存 8 个，格式 1 为兼容单页读取）、授权修订、Bank/代次及启用开关，**不缓存页面正文**；页面内容始终在需要时向 Hindsight 实时拉取。
 
-- **预算与并发**：读取前先校验页面预算（`background_max_tokens`，默认 400，64–8192）和共享预算（`recall_max_tokens` 默认 1200，`context_max_chars` 默认 4000）。认证后知识页与 Recall 并发执行，最多 4 路并发拉取；知识页共享 `background_timeout`（默认 1 秒，不超过剩余 `recall_timeout` 的四分之一）。
+- **预算与并发**：请求标记、记忆提示、知识页标头与正文、细节记忆和分隔符共同计入最终交付预算（`recall_max_tokens` 默认 1200，`context_max_chars` 默认 4000），先装提示，再装知识页与细节条目。知识页另受 `background_max_tokens` 限制（默认 400，64–8192）。认证后知识页与 Recall 并发执行，最多 4 路并发拉取；知识页共享 `background_timeout`（默认 1 秒，不超过剩余 `recall_timeout` 的四分之一）。
 - **整页装载**：按用户排列顺序逐篇尝试放入，单篇超限则跳过并继续尝试下一篇，绝不截断正文。拉取时调用单模型 `detail=content` 接口（该接口返回 `is_stale=null`，因此目录的 `index_stale` 标记仅作为独立元数据展示，不代表正文是否已刷新完成）。
 - **防过期守卫**：请求前冻结当前配置、Bank、代次与选项修订，返回后和注入前再次比对，一旦用户切换、撤权、遗忘或修改设置即丢弃在途旧结果。
 
@@ -71,12 +71,7 @@ Bridge 仅通过 AstrBot 的公开钩子/插件接口与 Hindsight 的公开 HTT
 
 `core/reflection.py` 按连接与用户保存 `reflect:` 开关与等待时长（默认关闭，等待 3–30 秒，默认 12 秒）。每次触发都会固定使用 low budget 与受限输出额度向 Hindsight 发起一次综合推理（每轮最多 1 次，计入上述 4 次工具配额）。
 
-由于 Hindsight 1.1.0 / 1.2.0 缺少查询单个 Reflect 请求是否完成的公开接口，Bridge 从控制库格式 7 起新增 `reflection_requests` 表来保证一致性：
-
-1. HTTP 发送前先记录 `prepared`，紧接着与范围复核同事务推进为 `dispatched`。
-2. 请求传输线程最长跟踪 120 秒（即使前端工具已因超时返回给聊天，后台仍继续等待结果以确认终点，晚到正文不再回填聊天）。
-3. 拿到明确响应或确定未发出时结束等待；若因进程重启、断网或超时无法确认终点，状态转为 `unknown`。
-4. 处于 `unknown` 状态时，对应 Bank 的后续 Reflect、解除维护暂停和清空删库都会阻塞等待；直到管理员确认 Hindsight 已重启或无残留任务后，在面板手动解除阻塞将其标记为 `overridden`（保留原记录、操作人与时间，不重放请求）。
+Reflect 请求在内存中追踪，传输最长等待 120 秒，聊天按用户设置的等待时长继续。断网和超时只记录诊断，不阻塞后续 Reflect、解除暂停或清空；迟到结果经身份、代次和请求归属复核后丢弃。控制库保留格式 7 和 `reflection_requests` 表，启动将历史 `prepared/dispatched/unknown` 归档为 `overridden`，保留兼容数据。
 
 ## 暂停与 Bank 协调
 

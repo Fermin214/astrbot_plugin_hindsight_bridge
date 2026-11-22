@@ -142,10 +142,6 @@ async def main(output):
             ("boolean_update", {"update_time_ms": False}),
             ("backwards_update", {"update_time_ms": int((time.time() - 10) * 1000)}),
             ("different_recipient", {"to_user_id": "another-bot"}),
-            ("unknown_extension", {"unknown_extension": {"text": "synthetic"}}),
-            ("empty_container_extension", {"unknown_extension": {}}),
-            ("populated_scalar_extension", {"unknown_extension": True}),
-            ("unknown_empty_scalar", {"unknown_extension": 0}),
             ("root_relation", {"root_id": 1}),
             ("parent_relation", {"parent_id": 1}),
             ("boolean_relation", {"root_id": False}),
@@ -186,7 +182,9 @@ async def main(output):
                 assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
                                       inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
                 assert reasons == ["quoted_or_reply" if label == "reference" else "media_or_non_text"]
-        passed.append("native_fallback_media_reference_updates_direction_and_unknown_fields_rejected")
+        for value in ({"trace": "synthetic"}, {}, True, 0):
+            assert fixture.header(await fixture.event(changes={"unknown_extension": value})) is not None
+        passed.append("native_media_reference_updates_direction_rejected_and_unrelated_metadata_ignored")
 
         created = int(time.time() * 1000) - 100
         completed = await fixture.event(changes={
@@ -212,10 +210,10 @@ async def main(output):
             {"type": 1, "text_item": {"text": " second "}},
         ]})
         assert fixture.header(multiline).text == "first\nsecond"
-        command = await fixture.event(text="/hindsight pause")
-        command.message_str = "hindsight pause"
+        command = await fixture.event(text="/hb pause")
+        command.message_str = "hb pause"
         command.is_at_or_wake_command = True
-        assert fixture.header(command).text == "/hindsight pause"
+        assert fixture.header(command).text == "/hb pause"
         command.message_str = "unrelated"
         assert fixture.header(command) is None
         passed.append("native_multitext_and_exact_wake_prefix_conversion")
@@ -283,7 +281,7 @@ async def main(output):
                     owner = queue.scope(fresh)
                     old_bank = owner["bank"]
                     paused = fixture.header(await fixture.event(
-                        text="/hindsight pause", changes={"message_id": "101"},
+                        text="/hb pause", changes={"message_id": "101"},
                     ))
                     source = paused.scope(queue.deployment_id)
                     change = queue.access.command(paused, source, owner, "mode", ("paused",))

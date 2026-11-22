@@ -300,10 +300,23 @@ class ReferenceHistory:
         if not self.path.exists():
             return []
         try:
-            return [dict(row) for row in self._open().execute(
+            database = self._open()
+            turns = []
+            for row in database.execute(
                 "SELECT id,conversation_id,message_id,created_at FROM turns WHERE binding=? "
                 "ORDER BY created_at DESC,rowid DESC", (binding,),
-            )]
+            ):
+                deliveries = [json.loads(item["payload"]) for item in database.execute(
+                    "SELECT payload FROM deliveries WHERE turn_id=? ORDER BY rowid", (row["id"],),
+                )]
+                turns.append({**dict(row), "summary": {
+                    "pages": sum(len(item.get("pages", [])) for item in deliveries),
+                    "memories": sum(len(item.get("items", [])) for item in deliveries),
+                    "tools": sum(item.get("kind") != "request" for item in deliveries),
+                    "status": "error" if any(item.get("status") == "error" for item in deliveries)
+                    else deliveries[-1].get("status", "") if deliveries else "",
+                }})
+            return turns
         except (sqlite3.Error, OSError):
             raise QueueError("reference_history_unavailable") from None
 

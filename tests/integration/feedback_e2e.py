@@ -20,7 +20,7 @@ class Feedback(Acceptance):
         super().__init__()
         self.report.update(
             acceptance_scope="native Dashboard feedback, 0.2.6 upgrade, control migration and snapshot recovery",
-            chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", rerank_model="rrf",
+            chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", embedding_dimensions=64, rerank_model="rrf",
             not_covered=["real QQ login", "production model quality"],
         )
         if self.settings.get("feedback_only"):
@@ -49,12 +49,46 @@ class Feedback(Acceptance):
             await page.screenshot(path=str(ROOT / "feedback-phone.png"), full_page=True)
         self.passed("native_phone_layout_has_no_horizontal_overflow_with_invalidated_selection")
 
+    async def plugin_descriptions(self, page):
+        detail = await self.http("GET", "/api/v1/plugins/by-id?plugin_id=" + NAME)
+        components = detail["components"]
+        group = next(component for component in components if component.get("name") == "hb")
+        commands = group.get("subcommands", [])
+        assert {command["name"] for command in commands} == {"help", "status", "on", "readonly", "pause", "forget"}
+        descriptions = [group, *commands, *(component for component in components if component.get("type") in {"hook", "listener"})]
+        expected_handlers = {"observe_incoming", "bind_memory_tools", "remember_assistant", "add_memory"}
+        assert expected_handlers <= {component.get("handler_name") for component in descriptions}
+        assert all(component.get("description") and component["description"] != "无描述"
+                   and re.search(r"[\u4e00-\u9fff]", component["description"]) for component in descriptions)
+        await page.goto(self.dashboard + "/#/extension/plugins/" + NAME)
+        await self.dismiss_host_notice(page)
+        await page.locator("#plugin-components .handler-row__desc").first.wait_for(timeout=30000)
+        command_group = page.locator("#plugin-components tr.command-row--group").filter(
+            has=page.locator("code").filter(has_text=re.compile(r"^hb$")),
+        )
+        await command_group.locator("button.command-cell__toggle").click()
+        child_rows = page.locator("#plugin-components tr.command-row--sub")
+        await child_rows.nth(len(commands) - 1).wait_for(timeout=10000)
+        assert await child_rows.count() == len(commands)
+        for command in commands:
+            child = child_rows.filter(has=page.locator("code").filter(has_text=re.compile("^" + re.escape(command["name"]) + "$")))
+            assert await child.count() == 1, command["name"]
+            assert await child.locator(".handler-row__desc").inner_text() == command["description"]
+        rendered = await page.locator("#plugin-components .handler-row__desc").all_text_contents()
+        assert len(rendered) >= len(descriptions), rendered
+        assert all(text.strip() and "无描述" not in text for text in rendered), rendered
+        self.report["measurements"]["plugin_descriptions"] = {
+            "commands": sorted(command["name"] for command in commands),
+            "handlers": sorted(expected_handlers), "rendered_descriptions": len(rendered),
+        }
+        self.passed("native_plugin_details_show_six_commands_listener_and_three_hooks_with_chinese_descriptions")
+
     async def switch_bot(self, frame, old_scope, old_page):
         old_bot = self.bot.bot_id
         await self.bot.close()
         self.bot = OneBot(self.session, {**self.settings, "bot_id": old_bot + 1})
         await self.bot.connect()
-        await self.bot.chat(ALICE, "/hindsight status")
+        await self.bot.chat(ALICE, (await self.command_prefix()) + " status")
         await self.confirm(ALICE)
         current = await self.scope()
         assert current["bot_id"] == str(old_bot + 1) and current["bank"] != old_scope["bank"]
@@ -92,17 +126,6 @@ class Feedback(Acceptance):
                          if row["user_id"] == str(user) and not row["historical"] and not row["pending"]), None)
         return await until(ready, timeout=30)
 
-    async def confirm(self, user):
-        state = await self.bootstrap()
-        prepared = await self.http("POST", self.prefix + "/accounts/authorize", payload={
-            "action": "prepare", "platform_instance_id": "delivery-onebot", "user_id": str(user),
-            "config_revision": state["config_revision"],
-        })
-        await self.http("POST", self.prefix + "/accounts/authorize", payload={
-            "action": "confirm", "platform_instance_id": "delivery-onebot", "user_id": str(user),
-            "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
-        })
-
     async def page(self, bank, query, *, wait=True):
         value = await self.native("POST", bank + "/knowledge-base/pages", {
             "name": query, "source_query": query, "max_tokens": 8192,
@@ -129,7 +152,7 @@ class Feedback(Acceptance):
         await self.control("start_astrbot")
         self.bot = OneBot(self.session, self.settings)
         await self.bot.connect()
-        await self.bot.chat(ALICE, "/hindsight status")
+        await self.bot.chat(ALICE, (await self.command_prefix()) + " status")
         await self.usable()
 
     async def single_page(self, page, frame, bank, short):
@@ -248,10 +271,10 @@ class Feedback(Acceptance):
             await self.control("delay_background", seconds=0.35)
             try:
                 wire = await chat(False, "读取知识页超时")
-                assert "Hindsight 知识页" not in wire
+                assert "【知识页" not in wire
                 await configure(background_timeout=0.8)
                 await self.usable()
-                assert "Hindsight 知识页" in await chat(True)
+                assert "【知识页" in await chat(True)
                 await configure(recall_timeout=0.4, background_timeout=10)
                 await self.usable()
                 await chat(False, "读取知识页超时")
@@ -350,6 +373,7 @@ class Feedback(Acceptance):
                     assert all(latest[key] == original[key] for key in ("deployment_id", "control_id", "revision"))
                     self.passed("stopped_full_control_copy_to_dedicated_mount_preserves_identity_revision_bank_mode_selection")
                 await self.action(identifier, "mode", mode="readonly")
+                await self.plugin_descriptions(page)
                 await page.goto(self.dashboard + "/#/plugin-view/" + NAME + "/memory")
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")

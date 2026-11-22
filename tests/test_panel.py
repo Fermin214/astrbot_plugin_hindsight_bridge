@@ -15,9 +15,11 @@ from urllib.parse import parse_qs, urlsplit
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
 from plugins.astrbot_plugin_hindsight_bridge.core import onebot_source
 from plugins.astrbot_plugin_hindsight_bridge.core import panel as module
-from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightError
+from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Scope
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
@@ -121,11 +123,13 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
         class Client:
             bank_path = staticmethod(module.HindsightClient.bank_path)
+            connection_fingerprint = staticmethod(module.HindsightClient.connection_fingerprint)
 
-            def __init__(self, url, key):
+            def __init__(self, url, key, *, auth_verified=False):
                 self.url = str(module.httpx.URL(url)).rstrip("/")
                 self.key = key
                 self.api_key = key
+                self.auth_verified = ""
 
             async def ensure_auth(self, **kwargs):
                 owner.auth_calls.append((self.url, self.key))
@@ -748,6 +752,54 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             "database_password", "api_key", "management_key",
         )))
 
+    async def test_direct_connection_save_and_initialization_probe_new_credentials_once(self):
+        requests, clients = [], []
+
+        async def service(request):
+            invalid = request.headers["Authorization"].startswith("Bearer invalid-")
+            requests.append((str(request.url), invalid))
+            return httpx.Response(401 if invalid else 200, json={"banks": []})
+
+        class TransportClient(HindsightClient):
+            def __init__(self, url, key, *, auth_verified=False):
+                super().__init__(url, key, auth_verified=auth_verified, transport=httpx.MockTransport(service))
+                clients.append(self)
+
+        async def initialize():
+            self.plugin.client = self.panel.new_client(self.config["api_url"], self.config["api_key"])
+            await self.plugin.client.check_connection(force=True)
+            self.panel.remember_auth(self.plugin.client)
+            self.plugin.outbox = SimpleNamespace(
+                recovering=False, list_scopes=lambda: [], connection_error=lambda: "",
+                sync_permissions=Mock(), connection_id=self.config["service_id"],
+            )
+
+        remember = self.panel.remember_auth
+
+        def remembered(client):
+            revision = self.panel.config_revision()
+            remember(client)
+            self.assertEqual(self.panel.config_revision(), revision)
+
+        self.plugin.initialize = AsyncMock(side_effect=initialize)
+        try:
+            with patch.object(module, "HindsightClient", TransportClient), patch.object(self.panel, "remember_auth", side_effect=remembered):
+                for index, updates in enumerate((
+                    {"api_url": "http://new-service:8888", "api_key": self.config["api_key"]},
+                    {"api_url": "http://new-service:8888", "api_key": "rotated-secret"},
+                ), start=1):
+                    with self.subTest(change="address" if index == 1 else "key"):
+                        self.assertTrue((await self.save(**updates))["saved"])
+                        self.assertEqual(sum(invalid for _, invalid in requests), index)
+                        fingerprint = HindsightClient.connection_fingerprint(self.config["api_url"], self.config["api_key"])
+                        self.assertIn(fingerprint, self.panel.state()["auth_fingerprints"])
+                        await self.plugin.client.check_connection(force=True)
+                        await self.plugin.client.check_connection(force=True)
+                        self.assertEqual(sum(invalid for _, invalid in requests), index)
+        finally:
+            for client in clients:
+                await client.close()
+
     async def test_save_lock_covers_inherited_credentials_and_network_check(self):
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -1095,45 +1147,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         maintenance.resume.assert_awaited_once_with("scope-1", management="management-capability")
         self.assertEqual(result["maintenance"], {"phase": "inactive", "ready": False})
         queue.can_recall.assert_not_called()
-
-    async def test_reflect_override_checks_confirmation_revision_owner_and_bank(self):
-        _, queue, _ = self.management_resources()
-        erasure = {"old_bank": "old-bank", "phase": "pending"}
-        queue.control.erasures = Mock(return_value=[erasure])
-        queue.control.reflection_pending = Mock(return_value=[
-            {"bank": "bank-1", "state": "unknown"}, {"bank": "old-bank", "state": "unknown"},
-            {"bank": "foreign-bank", "state": "unknown"},
-        ])
-        queue.control.override_unknown_reflections = Mock(return_value=1)
-        revision = self.panel.config_revision()
-        for values in (
-            {"confirm_override": False}, {"confirm_override": 1}, {"config_revision": "stale"}, {"config_revision": None},
-            {"bank": "foreign-bank"}, {"bank": ["bank-1"]},
-        ):
-            with self.subTest(values=values), self.assertRaises(module.PanelError):
-                await self.action("reflect_override", **{
-                    "bank": "bank-1", "confirm_override": True, "config_revision": revision, **values,
-                })
-        queue.control.override_unknown_reflections.assert_not_called()
-        with self.assertRaises(module.PanelError):
-            await self.action("reflect_override", bank="bank-1", confirm_override=True)
-        for bank in ("bank-1", "old-bank"):
-            result = await self.action("reflect_override", bank=bank, confirm_override=True, config_revision=revision)
-            self.assertEqual(result["overridden"], 1)
-            queue.control.override_unknown_reflections.assert_called_with("connection-1", bank, actor="admin")
-            queue.control.erasures.assert_called_with("connection-1", owner_id="owner-1")
-            queue.control.reflection_pending.assert_called_with("connection-1", owner_id="owner-1")
-            self.assertTrue(self.plugin.worker.wake.is_set())
-            self.assertEqual(erasure["phase"], "pending")
-        queue.forget.assert_not_called()
-        queue.control.reflection_pending.return_value = [{"bank": "bank-1", "state": "dispatched"}]
-        with self.assertRaises(module.PanelError):
-            await self.action("reflect_override", bank="bank-1", confirm_override=True, config_revision=revision)
-        self.assertEqual(queue.control.override_unknown_reflections.call_count, 2)
-        self.panel.body = AsyncMock(return_value={"action": "reflect_override"})
-        request = SimpleNamespace(method="POST", username="")
-        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}), self.assertRaises(module.PanelError):
-            await self.panel.action("scope-1")
 
     async def test_maintenance_defaults_to_drain_and_requires_boolean_discard(self):
         _, _, maintenance = self.management_resources()

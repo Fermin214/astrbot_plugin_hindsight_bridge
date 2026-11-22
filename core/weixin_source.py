@@ -8,12 +8,6 @@ from dataclasses import dataclass
 from .identity import Incoming
 
 
-MESSAGE_FIELDS = frozenset({
-    "seq", "message_id", "from_user_id", "to_user_id", "client_id",
-    "create_time_ms", "update_time_ms", "delete_time_ms", "session_id", "group_id",
-    "message_type", "message_state", "item_list", "context_token", "run_id",
-    "root_id", "parent_id",
-})
 ITEM_FIELDS = frozenset({
     "type", "create_time_ms", "update_time_ms", "is_completed", "msg_id", "text_item",
 })
@@ -135,13 +129,13 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     valid_time = (
         type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
         and valid_update(raw.get("update_time_ms"), occurred, finished)
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
     )
     items = raw.get("item_list")
     if inspect is not None:
         inspect(login.account_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw, items))
     if (
-        not valid_time or raw.get("delete_time_ms") not in (None, 0) or set(raw) - MESSAGE_FIELDS
+        not valid_time or raw.get("delete_time_ms") not in (None, 0)
         or any(value is not None and (type(value) is not int or not 0 <= value < 2**64
                                      or value != 0 and not allow_readonly)
                for value in (raw.get("root_id"), raw.get("parent_id")))

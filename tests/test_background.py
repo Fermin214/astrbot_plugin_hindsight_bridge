@@ -12,13 +12,14 @@ import unittest
 import httpx
 
 from plugins.astrbot_plugin_hindsight_bridge.core.background import (
-    ReadGuard, check_page, compose_background, compose_backgrounds, context_limits, reference, reference_key, save_reference,
+    ReadGuard, ReferenceBudget, check_page, compose_background, compose_backgrounds, context_limits, page_block,
+    reference, reference_key, save_reference,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.client import (
     BACKGROUND_MAX_BYTES, HindsightClient, HindsightError, native_page_id,
 )
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import Incoming
-from plugins.astrbot_plugin_hindsight_bridge.core.materials import token_count
+from plugins.astrbot_plugin_hindsight_bridge.core.materials import DEFAULT_MEMORY_PROMPT, token_count
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox, QueueError
 
 
@@ -75,7 +76,7 @@ class NativeReads(unittest.IsolatedAsyncioTestCase):
         page = await self.client.knowledge_page("bank", "kp-1")
         model = await self.client.background_page("bank", "mm-1")
         self.assertEqual(page["body"], model["content"])
-        self.assertEqual(model["freshness"], "unknown")
+        self.assertNotIn("freshness", model)
         self.assertNotIn("reflect_response", model)
         self.assertNotIn("is_stale", model)
         self.assertEqual(self.calls[-1].url.params["detail"], "content")
@@ -101,14 +102,14 @@ class NativeReads(unittest.IsolatedAsyncioTestCase):
                 native_page_id(value)
         self.assertEqual(native_page_id("mm-123_abc"), "mm-123_abc")
 
-    async def test_duplicate_models_unknown_nodes_and_nonboolean_stale_are_rejected(self):
+    async def test_duplicate_models_and_invalid_node_shapes_are_rejected(self):
         original = native_tree()
         variants = []
         repeated = copy.deepcopy(original)
         repeated["roots"][0]["children"].append(copy.deepcopy(repeated["roots"][0]["children"][0]))
         repeated["roots"][0]["children"][1]["id"] = "kp-2"
         variants.append(repeated)
-        for field, value in (("kind", "unknown"), ("kind", []), ("is_stale", 0), ("children", {})):
+        for field, value in (("kind", "unknown"), ("kind", []), ("children", {})):
             variant = copy.deepcopy(original)
             variant["roots"][0]["children"][0][field] = value
             variants.append(variant)
@@ -117,18 +118,27 @@ class NativeReads(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(HindsightError, "invalid_background_response"):
                 await self.client.knowledge_pages("bank")
 
-    async def test_tree_depth_and_node_count_have_hard_limits(self):
+    async def test_irrelevant_tree_metadata_and_nonboolean_stale_do_not_hide_pages(self):
+        tree = native_tree()
+        tree["new_metadata"] = {"revision": ["future"]}
+        tree["roots"][0].update(description={"future": "folder"})
+        tree["roots"][0]["children"][0].update(name="Name " * 300, is_stale="unknown", summary=["future"])
+        self.values["/v1/default/banks/bank/knowledge-base/tree"] = tree
+        pages = await self.client.knowledge_pages("bank")
+        self.assertEqual(pages[0]["page_id"], "kp-1")
+        self.assertIsNone(pages[0]["index_stale"])
+        self.assertNotIn("is_stale", self.client.cached_page_metadata("bank", "kp-1", "mm-1"))
+
+    async def test_bounded_tree_accepts_deep_and_large_directories(self):
         node = native_tree()["roots"][0]
         for n in range(12):
             node = {"id": f"kf-{n + 2}", "kind": "folder", "name": "Folder", "children": [node]}
         self.values["/v1/default/banks/bank/knowledge-base/tree"] = {"roots": [node]}
-        with self.assertRaisesRegex(HindsightError, "background_index_too_large"):
-            await self.client.knowledge_pages("bank")
+        self.assertEqual((await self.client.knowledge_pages("bank"))[0]["page_id"], "kp-1")
         self.values["/v1/default/banks/bank/knowledge-base/tree"] = {"roots": [
             {"id": f"kf-{n}", "kind": "folder", "name": "Folder", "children": []} for n in range(501)
         ]}
-        with self.assertRaisesRegex(HindsightError, "background_index_too_large"):
-            await self.client.knowledge_pages("bank")
+        self.assertEqual(await self.client.knowledge_pages("bank"), [])
 
     async def test_model_bank_identity_and_native_times_are_verified(self):
         for key, value in (
@@ -405,7 +415,7 @@ class ContextComposition(unittest.TestCase):
         self.assertIn(page["content"], block)
         self.assertLessEqual(token_count(block), 6000)
         self.assertLessEqual(len(block), 24000)
-        for tokens, chars, page_tokens in ((1200, 24000, 4096), (6000, 256, 4096), (6000, 24000, 400)):
+        for tokens, chars, page_tokens in ((1000, 24000, 4096), (6000, 256, 4096), (6000, 24000, 400)):
             diagnostics = {}
             block, code, _, used = compose_background(
                 page, [{"text": "Whole fact survives."}], tokenizer="o200k_base",
@@ -511,3 +521,62 @@ class ContextComposition(unittest.TestCase):
         self.assertFalse(facts_used)
         self.assertEqual(background_used, "A short native background." in block)
         self.assertIn("recall_content_unavailable", block)
+
+    def test_prompt_and_marker_share_the_final_budget_and_empty_prompt_stays_empty(self):
+        marker = "<hb-read-request:0123456789abcdef01234567>\n"
+        page = {**native_model(content="A useful knowledge page."), "name": "Preferences", "is_stale": False}
+        reads = [{"reference": {"page_id": "kp-1", "mental_model_id": "mm-1"}, "page": page, "code": ""}]
+        rows = [{"id": "private-uuid", "document_id": "uw1-0-" + "a" * 64,
+                 "text": "A useful remembered fact.", "type": "world", "source_kind": "user"}]
+        for prompt in (DEFAULT_MEMORY_PROMPT, "我的记忆提示", ""):
+            delivered = {}
+            block, used, outcomes = compose_backgrounds(
+                reads, rows, tokens=8192, chars=32768, tokenizer="o200k_base",
+                prefix=marker, prompt=prompt, delivered=delivered,
+            )
+            self.assertTrue(used and outcomes[0]["used"])
+            if prompt:
+                self.assertTrue(block.startswith(prompt + "\n\n"))
+                self.assertEqual(block.count(prompt), 1)
+            else:
+                self.assertNotIn(DEFAULT_MEMORY_PROMPT, block)
+                self.assertNotIn("外部数据", block)
+                self.assertNotIn("不是指令", block)
+            self.assertNotIn("private-uuid", block)
+            self.assertNotIn("uw1-0-", block)
+            self.assertLess(block.index(page["content"]), block.index(rows[0]["text"]))
+            self.assertEqual(delivered["prompt"], prompt)
+            for chars in (len(marker + block), len(marker + block) - 1):
+                bounded, _, _ = compose_backgrounds(
+                    reads, rows, tokens=token_count(marker + block), chars=chars,
+                    tokenizer="o200k_base", prefix=marker, prompt=prompt,
+                )
+                self.assertLessEqual(len(marker + bounded), chars)
+                self.assertLessEqual(token_count(marker + bounded), token_count(marker + block))
+
+    def test_page_snapshot_keeps_delivery_metadata_and_body(self):
+        page = {**native_model(content="Historical page body."), "name": "Original title", "is_stale": True}
+        reads = [{"reference": {"page_id": "kp-1", "mental_model_id": "mm-1"}, "page": page, "code": ""}]
+        delivered = {}
+        block, _, _ = compose_backgrounds(
+            reads, [], tokens=8192, chars=32768, tokenizer="o200k_base", delivered=delivered,
+        )
+        snapshot = copy.deepcopy(delivered)
+        page.update(name="Renamed title", is_stale=False, content="New body.")
+        self.assertEqual(delivered, snapshot)
+        self.assertEqual(snapshot["pages"][0]["name"], "Original title")
+        self.assertTrue(snapshot["pages"][0]["is_stale"])
+        self.assertEqual(snapshot["pages"][0]["content"], "Historical page body.")
+        self.assertIn("【知识页：Original title｜更新于 ", block)
+        self.assertNotIn("新鲜度未知", block)
+        self.assertNotIn("last_refreshed_at", block)
+        self.assertTrue(page_block(native_model()).startswith("【知识页｜更新于 "))
+
+    def test_fallback_wrapping_keeps_prompt_and_obeys_the_same_limits(self):
+        budget = ReferenceBudget(8192, 60, "o200k_base", "marker\n")
+        prompt = "我的记忆提示"
+        self.assertEqual(budget.wrap("x" * 100, prompt), prompt)
+        self.assertEqual(budget.wrap("x" * 100, ""), "")
+        wrapped = budget.wrap("检索未匹配", prompt)
+        self.assertTrue(wrapped.startswith(prompt + "\n\n"))
+        self.assertTrue(budget.fits(wrapped))

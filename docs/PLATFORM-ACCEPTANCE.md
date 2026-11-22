@@ -56,6 +56,6 @@ sh /tmp/bridge-weixin/start-native.sh \
 | 权限撤销与迟到请求 | 移除账号或暂停期间，不再保存新消息，也不注入迟到的检索结果 |
 | 断连与重载恢复 | Hindsight 恢复连接后继续处理冻结任务；宿主重载后身份、模式与 Bank 不变 |
 | 清空记忆（遗忘） | 彻底删除旧 Bank 及待办任务，旧轮次回调和查询不污染新代次 |
-| 长消息与 JSON 导出 | 核对超长文本分段及 `/hindsight export` 导出文件，平台拒收时返回明确错误 |
+| 长消息与交付记录 | 核对超长文本分段；在插件面板「使用记录」查看并复制交付原文与 JSON，记忆导出通过 Hindsight Control Plane |
 
 验收报告需记录对应的代码 commit、文件摘要、AstrBot/Hindsight/SDK 版本、模型标识、平台指纹及实测结果。

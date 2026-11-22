@@ -46,4 +46,4 @@ ASTRBOT_DISABLE_METRICS=1 \
 /path/to/venv/bin/python tests/integration/astrbot_smoke.py
 ```
 
-真实飞书开放平台应用联调与端到端业务验证见 [平台接入验证](PLATFORM-ACCEPTANCE.md)。
+真实飞书开放平台应用联调与端到端业务验证见 [平台接入验证](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/PLATFORM-ACCEPTANCE.md)。

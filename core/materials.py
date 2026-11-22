@@ -151,12 +151,8 @@ def retain_payload(
     content = (
         f"材料格式：{material_format}；时区：{zone_label}\n"
         "历史语境只用于理解指代，只从新增消息抽取新增信息。"
-        "user 是用户原文，assistant 是会话历史保存的助手正文，发送状态未知。"
-        "助手建议不等于用户接受，只有用户明确接受或拒绝才形成对应决定；"
-        "助手承诺、声称已完成或描述工具操作，都只证明助手说过这些话，"
-        "不能证明操作实际执行、约定已经履行或外部结果已经发生。"
-        "区分用户事实、计划、假设、助手建议、双方决定和助手承诺；"
-        "将助手陈述明确归因于助手，不改写为用户的行为或经历。\n"
+        "user 是用户原文，assistant 是助手陈述；区分用户事实与助手陈述。"
+        "助手建议不等于用户接受；助手承诺或声称已完成，不等于操作实际执行或结果发生。\n"
         "【历史语境】\n"
         + ("\n".join(line(m) for m in history) or "无")
         + ("\n【新增助手正文】\n" if assistant else "\n【本次新增用户消息】\n")
@@ -244,8 +240,20 @@ def memory_item(row):
 
 
 def render_memories(items, prompt):
-    header = DEFAULT_MEMORY_PROMPT + "\n" if prompt == DEFAULT_MEMORY_PROMPT else ""
-    return header + json.dumps({"记忆": items}, ensure_ascii=False, separators=(",", ":"))
+    types = {"world": "世界事实", "experience": "经历", "observation": "观察"}
+    sources = {"user": "用户", "assistant": "助手回复", "mixed": "混合来源",
+               "external": "早期/外部记录", "unknown": "来源未知"}
+    lines = []
+    for item in items:
+        metadata = item.get("metadata") or {}
+        occurred = item.get("occurred_start") or item.get("mentioned_at") or metadata.get("occurred_at") or ""
+        date = occurred[:10] if isinstance(occurred, str) and re.match(r"\d{4}-\d{2}-\d{2}", occurred) else ""
+        source = item.get("source_kind") or metadata.get("role") or document_role(item.get("document_id")) or "unknown"
+        labels = [label for label in (date, types.get(item.get("type")), sources.get(source, "来源未知")) if label]
+        lines.append("- [" + "｜".join(labels) + "] " + item["text"].replace("\n", "\n  "))
+    if not lines:
+        return ""
+    return (prompt + "\n\n" if prompt else "") + "\n".join(lines)
 
 
 def memory_block(results: list[dict], *, limit=4000) -> str:

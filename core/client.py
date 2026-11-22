@@ -13,10 +13,8 @@ from urllib.parse import quote, urlencode, urlsplit
 import httpx
 
 from .materials import token_count
+from .identity import canonical, sha256
 
-STATUSES = {"pending", "processing", "completed", "failed", "cancelled", "not_found"}
-EXPORT_FORMAT = "astrbot-hindsight-memory-export"
-EXPORT_VERSION = 1
 FACT_TYPES = {"world", "experience", "observation"}
 RECALL_BUDGETS = ("low", "mid", "high")
 BACKGROUND_MAX_BYTES = 256 * 1024
@@ -26,129 +24,6 @@ def native_page_id(value):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}", value):
         raise HindsightError("invalid_background_id", permanent=True)
     return value
-
-
-def _identifier(value, *, document=False):
-    if (
-        not isinstance(value, str)
-        or not value.strip()
-        or "\\" in value
-        or any(ord(c) < 32 for c in value)
-        or any(part in {".", ".."} for part in value.split("/"))
-        or (not document and "/" in value)
-    ):
-        raise HindsightError("invalid_identifier", permanent=True)
-    return value
-
-
-def _memory_record(value, bank, *, detail=False):
-    """Keep documented fact fields, excluding arbitrary metadata and service links."""
-    code = "invalid_memory_response"
-    if not isinstance(value, dict) or value.get("bank_id", bank) != bank:
-        raise HindsightError(code)
-    kind = value.get("type" if detail else "fact_type")
-    if not isinstance(kind, str) or kind not in FACT_TYPES:
-        raise HindsightError(code)
-    if (
-        ("type" in value and value["type"] != kind)
-        or ("fact_type" in value and value["fact_type"] != kind)
-        or not isinstance(value.get("id"), str)
-        or not value["id"]
-        or not isinstance(value.get("text"), str)
-    ):
-        raise HindsightError(code)
-    result = {"id": value["id"], "text": value["text"], "type": kind, "fact_type": kind}
-    for key in (
-        "context",
-        "date",
-        "document_id",
-        "chunk_id",
-        "mentioned_at",
-        "occurred_start",
-        "occurred_end",
-        "created_at",
-        "updated_at",
-        "consolidated_at",
-        "consolidation_failed_at",
-        "state",
-        "invalidation_reason",
-        "invalidated_at",
-        "edited_at",
-    ):
-        if key in value:
-            if value[key] is not None and not isinstance(value[key], str):
-                raise HindsightError(code)
-            result[key] = value[key]
-    result.setdefault("document_id", None)
-    for key in ("tags", "source_memory_ids"):
-        items = value.get(key, [])
-        if not isinstance(items, list) or any(
-            not isinstance(item, str) or not item for item in items
-        ):
-            raise HindsightError(code)
-        result[key] = list(items)
-    if "proof_count" in value:
-        if type(value["proof_count"]) is not int or value["proof_count"] < 0:
-            raise HindsightError(code)
-        result["proof_count"] = value["proof_count"]
-    entities = value.get("entities", [] if detail else "")
-    if isinstance(entities, str):
-        result["entities"] = entities
-    elif detail and isinstance(entities, list):
-        result["entities"] = []
-        for entity in entities:
-            if isinstance(entity, str):
-                result["entities"].append(entity)
-            elif isinstance(entity, dict) and isinstance(entity.get("id"), str):
-                clean = {}
-                for key in ("id", "name", "canonical_name", "type"):
-                    if key in entity:
-                        if not isinstance(entity[key], str):
-                            raise HindsightError(code)
-                        clean[key] = entity[key]
-                result["entities"].append(clean)
-            else:
-                raise HindsightError(code)
-    else:
-        raise HindsightError(code)
-    return result
-
-
-def _document_record(value, bank, document_id):
-    code = "invalid_document_response"
-    if (
-        not isinstance(value, dict)
-        or value.get("id") != document_id
-        or value.get("bank_id") != bank
-        or type(value.get("memory_unit_count")) is not int
-        or value["memory_unit_count"] < 0
-    ):
-        raise HindsightError(code)
-    result = {
-        "id": document_id,
-        "bank_id": bank,
-        "memory_unit_count": value["memory_unit_count"],
-    }
-    for key in ("original_text", "content_hash", "created_at", "updated_at"):
-        if key not in value or (
-            not isinstance(value[key], str)
-            and not (key in {"original_text", "content_hash"} and value[key] is None)
-        ):
-            raise HindsightError(code)
-        result[key] = value[key]
-    tags = value.get("tags", [])
-    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
-        raise HindsightError(code)
-    result["tags"] = list(tags)
-    if value.get("nodes_by_fact_type") is not None:
-        counts = value["nodes_by_fact_type"]
-        if not isinstance(counts, dict) or any(
-            key not in FACT_TYPES or type(count) is not int or count < 0
-            for key, count in counts.items()
-        ):
-            raise HindsightError(code)
-        result["nodes_by_fact_type"] = dict(counts)
-    return result
 
 
 class HindsightError(Exception):
@@ -194,6 +69,26 @@ def _operation_metadata(value):
     return kind, completed_at
 
 
+def _operation_children(value):
+    raw = value.get("child_operations")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise HindsightError("invalid_operation_children")
+    children = []
+    for child in raw:
+        if (
+            not isinstance(child, dict)
+            or not isinstance(child.get("operation_id"), str)
+            or not child["operation_id"]
+            or not isinstance(child.get("status"), str)
+            or not child["status"]
+        ):
+            raise HindsightError("invalid_operation_children")
+        children.append((child["operation_id"], child["status"]))
+    return tuple(children)
+
+
 def retry_after(value: str | None) -> float:
     if not value:
         return 0
@@ -216,6 +111,7 @@ class HindsightClient:
         *,
         transport=None,
         tokenizer="o200k_base",
+        auth_verified=False,
     ):
         parsed = urlsplit(url)
         if (
@@ -239,9 +135,12 @@ class HindsightClient:
             transport=transport,
         )
         self.auth_until = 0.0
+        self.auth_verified = self.connection_fingerprint(self.url, self.api_key) if auth_verified else ""
+        self.auth_rejected = ""
         self.auth_lock = asyncio.Lock()
         self.connection = {"connected": None, "code": "", "checked_at": None}
         self.request_sequence = self.connection_sequence = 0
+        self.page_metadata = {}
 
     def next_connection_sequence(self):
         self.request_sequence += 1
@@ -257,6 +156,10 @@ class HindsightClient:
     @staticmethod
     def bank_path(bank: str) -> str:
         return "/v1/default/banks/" + quote(bank, safe="")
+
+    @staticmethod
+    def connection_fingerprint(url, api_key):
+        return sha256(canonical([str(httpx.URL(url)).rstrip("/"), api_key]))
 
     async def request(
         self,
@@ -375,7 +278,6 @@ class HindsightClient:
             if (
                 not isinstance(value, dict) or not isinstance(value.get("text"), str)
                 or value.get("based_on") is not None and not isinstance(value["based_on"], dict)
-                or value.get("usage") is not None and not isinstance(value["usage"], dict)
             ):
                 raise ValueError
             settled()
@@ -413,22 +315,18 @@ class HindsightClient:
         value = await self._background_read(bank, "/knowledge-base/tree")
         if not isinstance(value.get("roots"), list):
             raise HindsightError("invalid_background_response")
-        stack = [(node, (), 1) for node in reversed(value["roots"])]
+        stack = [(node, ()) for node in reversed(value["roots"])]
         pages, seen, models = [], set(), set()
         while stack:
-            node, parents, depth = stack.pop()
-            if len(seen) >= 500 or depth > 12:
-                raise HindsightError("background_index_too_large")
+            node, parents = stack.pop()
             if not isinstance(node, dict):
                 raise HindsightError("invalid_background_response")
             identity = native_page_id(node.get("id"))
             name, kind, children = node.get("name"), node.get("kind"), node.get("children")
             if (
-                identity in seen or not isinstance(name, str) or not name.strip() or len(name) > 1024
+                identity in seen or not isinstance(name, str) or not name.strip()
                 or not isinstance(kind, str) or kind not in {"folder", "page"} or not isinstance(children, list)
                 or (kind == "page" and children)
-                or (kind == "folder" and node.get("mental_model_id") is not None)
-                or (node.get("is_stale") is not None and type(node["is_stale"]) is not bool)
             ):
                 raise HindsightError("invalid_background_response")
             seen.add(identity)
@@ -440,12 +338,28 @@ class HindsightClient:
                 pages.append({
                     "page_id": identity, "mental_model_id": model,
                     "name": name, "path": " / ".join((*parents, name)),
-                    "index_stale": node.get("is_stale"),
+                    "index_stale": node["is_stale"] if type(node.get("is_stale")) is bool else None,
                 })
-            if len(stack) + len(seen) + len(children) > 500:
-                raise HindsightError("background_index_too_large")
-            stack.extend((child, (*parents, name), depth + 1) for child in reversed(children))
+            stack.extend((child, (*parents, name)) for child in reversed(children))
+        self.page_metadata = {key: value for key, value in self.page_metadata.items() if key[:3] != (self.url, self.api_key, bank)}
+        expires = time.monotonic() + 30
+        for page in pages:
+            metadata = {"name": page["name"], "path": page["path"]}
+            if type(page["index_stale"]) is bool:
+                metadata["is_stale"] = page["index_stale"]
+            self.page_metadata[(self.url, self.api_key, bank, page["page_id"], page["mental_model_id"])] = (expires, metadata)
         return pages
+
+    def cached_page_metadata(self, bank, page_id, model_id):
+        key = (self.url, self.api_key, bank, page_id, model_id)
+        cached = self.page_metadata.get(key)
+        if cached is None:
+            return {}
+        expires, metadata = cached
+        if expires <= time.monotonic():
+            self.page_metadata.pop(key, None)
+            return {}
+        return dict(metadata)
 
     async def knowledge_page(self, bank, page_id):
         value = await self._background_read(
@@ -453,7 +367,6 @@ class HindsightClient:
         )
         if (
             value.get("id") != page_id or not isinstance(value.get("name"), str)
-            or len(value["name"]) > 1024
             or (value.get("body") is not None and not isinstance(value["body"], str))
         ):
             raise HindsightError("invalid_background_response")
@@ -475,7 +388,7 @@ class HindsightClient:
             or (value.get("content") is not None and not isinstance(value["content"], str))
         ):
             raise HindsightError("invalid_background_response")
-        result = {"id": model_id, "content": value.get("content") or "", "freshness": "unknown"}
+        result = {"id": model_id, "content": value.get("content") or ""}
         for key in ("last_refreshed_at", "last_memory_seen_at", "last_refresh_failed_at"):
             stamp = value.get(key)
             if stamp is not None:
@@ -489,6 +402,11 @@ class HindsightClient:
 
     async def ensure_auth(self, force: bool = False, *, timeout: float | None = None,
                           _connection_sequence: int | None = None) -> None:
+        fingerprint = self.connection_fingerprint(self.url, self.api_key)
+        if self.auth_rejected == fingerprint:
+            raise HindsightError("server_auth_not_enforced")
+        if self.auth_verified and self.auth_verified != fingerprint:
+            self.auth_until = 0.0
         if not force and time.monotonic() < self.auth_until:
             return
         previous_auth = self.auth_until
@@ -501,14 +419,16 @@ class HindsightClient:
             sequence = _connection_sequence if _connection_sequence is not None else self.next_connection_sequence()
             try:
                 await self.request("GET", path, timeout=timeout, _connection_sequence=sequence)
-                for wrong_key in ("", "invalid-" + uuid.uuid4().hex):
+                if self.auth_verified != fingerprint:
                     try:
-                        await self.request("GET", path, key=wrong_key, timeout=timeout)
+                        await self.request("GET", path, key="invalid-" + uuid.uuid4().hex, timeout=timeout)
                     except HindsightError as exc:
-                        if exc.code in {"http_401", "http_403"}:
-                            continue
-                        raise
-                    raise HindsightError("server_auth_not_enforced")
+                        if exc.code not in {"http_401", "http_403"}:
+                            raise
+                    else:
+                        self.auth_rejected = fingerprint
+                        raise HindsightError("server_auth_not_enforced")
+                    self.auth_verified = fingerprint
             except HindsightError as exc:
                 self.auth_until = 0.0
                 self.connection_result(False, exc.code, sequence=sequence)
@@ -555,7 +475,7 @@ class HindsightClient:
                     "query": query, "budget": budget, "max_tokens": max_tokens,
                     "query_timestamp": timestamp,
                     "types": types if types is not None else ["world", "experience", "observation"],
-                    "include": {"source_facts": {"max_tokens": 256, "max_tokens_per_observation": 64}},
+                    "include": {"source_facts": {"max_tokens": 2048, "max_tokens_per_observation": 256}},
                 }, timeout=timeout,
             )
             result = await self.read_bounded(
@@ -611,26 +531,11 @@ class HindsightClient:
         ):
             raise HindsightError("invalid_operation_response")
         status = result.get("status")
-        if not isinstance(status, str) or status not in STATUSES:
+        if not isinstance(status, str) or not status:
             raise HindsightError("invalid_operation_status")
-        children = []
-        raw_children = result.get("child_operations", [])
-        if raw_children is None:
-            raw_children = []
-        if not isinstance(raw_children, list):
-            raise HindsightError("invalid_operation_children")
-        for child in raw_children:
-            if (
-                not isinstance(child, dict)
-                or not isinstance(child.get("operation_id"), str)
-                or not child["operation_id"]
-                or not isinstance(child.get("status"), str)
-                or child["status"] not in STATUSES - {"not_found"}
-            ):
-                raise HindsightError("invalid_operation_children")
-            children.append((child["operation_id"], child["status"]))
+        children = _operation_children(result)
         kind, completed_at = _operation_metadata(result)
-        return Operation(operation_id, status, tuple(children), kind, completed_at)
+        return Operation(operation_id, status, children, kind, completed_at)
 
     async def retry(self, bank: str, operation_id: str, *, before_send=None) -> None:
         await self.ensure_auth()
@@ -715,7 +620,8 @@ class HindsightClient:
                     not isinstance(row, dict)
                     or not isinstance(oid, str)
                     or not oid
-                    or row.get("status") not in STATUSES - {"not_found"}
+                    or not isinstance(row.get("status"), str)
+                    or not row["status"]
                 ):
                     raise HindsightError("invalid_operations_list")
                 if (
@@ -727,7 +633,7 @@ class HindsightClient:
                 if row.get("bank_id", bank) != bank:
                     raise HindsightError("inconsistent_operation_bank")
                 kind, completed_at = _operation_metadata(row)
-                operations[oid] = Operation(oid, row["status"], kind=kind, completed_at=completed_at)
+                operations[oid] = Operation(oid, row["status"], _operation_children(row), kind, completed_at)
             offset += len(rows)
             if offset >= total:
                 return list(operations.values())
@@ -746,147 +652,6 @@ class HindsightClient:
                 return False
             raise
         return True
-
-    async def list_memories(
-        self, bank: str, *, offset: int = 0, limit: int = 20
-    ) -> dict:
-        _identifier(bank)
-        if type(offset) is not int or offset < 0 or type(limit) is not int or limit < 1:
-            raise HindsightError("invalid_pagination", permanent=True)
-        # The supplied bank is the entire read scope; no bank discovery is needed.
-        try:
-            value = await self.request(
-                "GET",
-                self.bank_path(bank)
-                + "/memories/list?"
-                + urlencode({"offset": offset, "limit": limit}),
-            )
-        except HindsightError as exc:
-            # A new scope has no bank until the first retained conversation.
-            if exc.code == "http_404":
-                return {"items": [], "total": 0, "offset": offset, "limit": limit}
-            raise
-        rows, total = value.get("items"), value.get("total")
-        if (
-            not isinstance(rows, list)
-            or type(total) is not int
-            or total < 0
-            or type(value.get("offset")) is not int
-            or value["offset"] != offset
-            or type(value.get("limit")) is not int
-            or value["limit"] != limit
-            or len(rows) > limit
-            or len(rows) > max(0, total - offset)
-            or (not rows and offset < total)
-        ):
-            raise HindsightError("invalid_memories_page")
-        items = [_memory_record(row, bank) for row in rows]
-        if len({item["id"] for item in items}) != len(items):
-            raise HindsightError("invalid_memories_page")
-        return {"items": items, "total": total, "offset": offset, "limit": limit}
-
-    async def get_memory(self, bank: str, memory_id: str) -> dict:
-        _identifier(bank)
-        _identifier(memory_id)
-        value = await self.request(
-            "GET", self.bank_path(bank) + "/memories/" + quote(memory_id, safe="")
-        )
-        record = _memory_record(value, bank, detail=True)
-        if record["id"] != memory_id:
-            raise HindsightError("invalid_memory_response")
-        return record
-
-    async def memory_page(self, bank: str, *, page=1, page_size=10) -> dict:
-        """Fill a logical page even when the service returns short HTTP pages."""
-        if (
-            type(page) is not int
-            or page < 1
-            or type(page_size) is not int
-            or not 1 <= page_size <= 100
-        ):
-            raise HindsightError("invalid_pagination", permanent=True)
-        start, rows, total = (page - 1) * page_size, [], None
-        while True:
-            offset = start + len(rows)
-            value = await self.list_memories(
-                bank, offset=offset, limit=page_size - len(rows)
-            )
-            if total is not None and total != value["total"]:
-                raise HindsightError("catalog_changed")
-            total = value["total"]
-            rows.extend(value["items"])
-            if len({row["id"] for row in rows}) != len(rows):
-                raise HindsightError("invalid_memories_page")
-            if len(rows) == page_size or start + len(rows) >= total:
-                return {
-                    "items": rows,
-                    "total": total,
-                    "offset": start,
-                    "limit": page_size,
-                }
-
-    async def get_document(self, bank: str, document_id: str) -> dict:
-        _identifier(bank)
-        _identifier(document_id, document=True)
-        value = await self.request(
-            "GET", self.bank_path(bank) + "/documents/" + quote(document_id, safe="")
-        )
-        return _document_record(value, bank, document_id)
-
-    async def export_memories(self, bank: str, *, max_items: int = 10000) -> dict:
-        _identifier(bank)
-        if type(max_items) is not int or max_items < 1:
-            raise HindsightError("invalid_export_limit", permanent=True)
-        records, seen, total = [], set(), None
-        offset = 0
-        while True:
-            page = await self.list_memories(
-                bank, offset=offset, limit=min(100, max_items)
-            )
-            if page["total"] > max_items:
-                raise HindsightError("export_limit_exceeded", permanent=True)
-            if total is not None and total != page["total"]:
-                raise HindsightError("export_changed")
-            total = page["total"]
-            for item in page["items"]:
-                if item["id"] in seen:
-                    raise HindsightError("export_pagination_incomplete")
-                record = await self.get_memory(bank, item["id"])
-                if (
-                    record["type"] != item["type"]
-                    or record["document_id"] != item["document_id"]
-                    or record["text"] != item["text"]
-                ):
-                    raise HindsightError("export_changed")
-                seen.add(record["id"])
-                records.append(record)
-            offset += len(page["items"])
-            if offset == total:
-                break
-            if not page["items"]:
-                raise HindsightError("export_pagination_incomplete")
-        # Resolve only references belonging to the enumerated facts in this bank.
-        if any(
-            source not in seen for row in records for source in row["source_memory_ids"]
-        ):
-            raise HindsightError("export_source_missing")
-        documents = []
-        for document_id in sorted(
-            {row["document_id"] for row in records if row["document_id"]}
-        ):
-            documents.append(await self.get_document(bank, document_id))
-        # Detect count changes during detail/document reads before producing an artifact.
-        if (await self.list_memories(bank, limit=1))["total"] != total:
-            raise HindsightError("export_changed")
-        return {
-            "format": EXPORT_FORMAT,
-            "version": EXPORT_VERSION,
-            "bank_id": bank,
-            "exported_at": datetime.now(UTC).isoformat(),
-            "total": total,
-            "memories": records,
-            "documents": documents,
-        }
 
     async def delete_bank(self, bank: str) -> None:
         await self.ensure_auth()

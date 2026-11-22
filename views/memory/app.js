@@ -62,9 +62,8 @@ export function createApp(view) {
     else view.renderReferences();
     const configured = new Set((view.data.config.allowed_accounts || []).map(view.accountKey));
     view.$("paused-banks-notice").hidden = !view.data.scopes.some((item) => (!configured.has(view.accountKey(item)) || item.historical)
-      && (item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length));
-    view.$("paused-banks-notice").querySelector("span").textContent = view.data.scopes.some((item) => item.summary?.reflect_unknown?.length)
-      ? "有 Reflect 请求需要解除阻塞" : "有记忆库暂停读写";
+      && (item.summary?.maintenance || item.summary?.bank_missing));
+    view.$("paused-banks-notice").querySelector("span").textContent = "有记忆库暂停读写";
     if (pollMaintenance) await view.readMaintenanceStatus();
     view.renderServiceVersion();
     view.$("settings-conflict").hidden = !view.settingsRevision || view.data.config_revision === view.settingsRevision;
@@ -145,7 +144,7 @@ export function createApp(view) {
   }
 
   function bindEvents() {
-  const tabs = [...view.document.querySelectorAll('[role="tab"]')];
+  const tabs = [...view.document.querySelectorAll('[role="tab"][id^="tab-"]')];
   tabs.forEach((tab, index) => {
     tab.addEventListener("click", () => view.activateTab(tab.id.slice(4)));
     tab.addEventListener("keydown", (event) => {
@@ -160,11 +159,7 @@ export function createApp(view) {
     });
   });
   view.$("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void (view.managedMode() ? view.saveAccess() : view.saveSettings()).catch((error) => view.notify(view.errorMessage(error), true)); });
-  view.$("parameters-form").addEventListener("input", () => {
-    if (view.parameterDraft) view.parameterDraft.dirty = true;
-    view.$("parameters-feedback").hidden = true;
-    view.renderParameters();
-  });
+  view.$("parameters-form").addEventListener("input", view.editParameters);
   view.$("parameters-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void view.saveParameters().catch((error) => view.notify(view.errorMessage(error), true, "parameters-feedback"));
@@ -294,20 +289,10 @@ export function createApp(view) {
   view.$("bank-picker").addEventListener("change", () => view.selectScope(view.$("bank-picker").value));
   for (const button of view.document.querySelectorAll("[data-mode]")) button.addEventListener("click", () => void view.setMode(button, button.dataset.mode));
   view.$("background-page").addEventListener("change", view.changeBackground);
-  view.$("reading-mode").addEventListener("change", () => {
-    if (view.readingDraft) view.readingDraft.dirty = true;
-    view.$("reading-feedback").hidden = true;
-    view.renderReading();
-  });
+  view.$("reading-mode").addEventListener("change", view.editReading);
   view.$("reading-save").addEventListener("click", () => void view.saveReading());
   view.$("reference-form").addEventListener("submit", (event) => { event.preventDefault(); void view.saveReferences(); });
-  view.$("reference-form").addEventListener("input", (event) => {
-    if (!view.referenceDraft?.selection) return;
-    view.referenceDraft.dirty = true;
-    view.$("reference-feedback").hidden = true;
-    if (event.target.id === "reference-prompt") view.countPrompt(view.referenceDraft);
-    view.renderReferences();
-  });
+  view.$("reference-form").addEventListener("input", view.editReferences);
   view.$("reference-reload").addEventListener("click", () => {
     view.clearReferenceDraft();
     void view.refreshBootstrap().catch((error) => view.notify(view.errorMessage(error), true, "reference-feedback"));
@@ -316,25 +301,28 @@ export function createApp(view) {
   view.$("usage-turn").addEventListener("change", () => void view.loadUsageTurn());
   view.$("usage-dialog").addEventListener("close", () => { if (!view.$("usage-dialog").open) view.resetUsage(); });
   view.$("usage-copy-json").addEventListener("click", () => {
-    view.$("usage-json").hidden = false;
-    void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback").then(() => { view.$("usage-json").hidden = true; })
+    void view.copyValue("usage-json", "JSON 已复制。", "usage-feedback")
       .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback"));
   });
-  for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", () => {
-    if (view.reflectDraft) view.reflectDraft.dirty = true;
-    view.renderReflect();
+  view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback", view.usageText)
+    .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
+  const usageTabs = ["content", "text", "json"];
+  usageTabs.forEach((name, index) => {
+    const tab = view.$(`usage-tab-${name}`);
+    tab.addEventListener("click", () => view.activateUsageTab(name));
+    tab.addEventListener("keydown", (event) => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % usageTabs.length;
+      if (event.key === "ArrowLeft") next = (index + usageTabs.length - 1) % usageTabs.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = usageTabs.length - 1;
+      if (next == null) return;
+      event.preventDefault();
+      view.activateUsageTab(usageTabs[next], true);
+    });
   });
+  for (const id of ["reflect-enabled", "reflect-timeout"]) view.$(id).addEventListener("input", view.editReflect);
   view.$("reflect-save").addEventListener("click", () => void view.saveReflect());
-  view.$("reflect-override").addEventListener("click", () => view.openReflectOverride());
-  view.$("maintenance-reflect-override").addEventListener("click", () => view.openReflectOverride(view.maintenanceScope()?.scope_id));
-  view.$("reflect-override-confirm").addEventListener("change", () => {
-    view.$("reflect-override-submit").disabled = !view.$("reflect-override-confirm").checked;
-  });
-  view.$("reflect-override-submit").addEventListener("click", () => void view.confirmReflectOverride());
-  view.$("reflect-override-dialog").addEventListener("close", () => {
-    view.reflectOverrideState = null;
-    view.$("reflect-override-confirm").checked = false;
-  });
   view.$("copy-bank").addEventListener("click", () => void view.perform(view.$("copy-bank"), "copy",
     () => view.copyValue("scope-bank", "Bank ID 已复制。")));
   view.$("copy-control-plane").addEventListener("click", () => void view.perform(view.$("copy-control-plane"), "copy",
@@ -346,7 +334,7 @@ export function createApp(view) {
     view.notify(response.message || "已安排重试。");
   }));
   view.$("maintenance-view").addEventListener("click", () => view.openMaintenance(view.scopeId));
-  view.$("show-paused-banks").addEventListener("click", () => view.openMaintenance(view.data.scopes.find((item) => (item.summary?.maintenance || item.summary?.bank_missing || item.summary?.reflect_unknown?.length)
+  view.$("show-paused-banks").addEventListener("click", () => view.openMaintenance(view.data.scopes.find((item) => (item.summary?.maintenance || item.summary?.bank_missing)
     && (item.historical || !(view.data.config.allowed_accounts || []).some((account) => view.accountKey(account) === view.accountKey(item))))?.scope_id));
   view.$("maintenance-scope").addEventListener("change", () => { view.maintenanceScopeId = view.$("maintenance-scope").value; view.renderMaintenance(); void view.readMaintenanceStatus(); });
   view.$("maintenance-retry").addEventListener("click", () => void view.readMaintenanceStatus());

@@ -1,15 +1,16 @@
-"""Transport uncertainty and cancellation timing beyond deterministic Agent flows."""
+"""Native Reflect failures, startup archival and late-result isolation."""
 
 import asyncio
 from dataclasses import replace
 import json
 import sqlite3
 import tempfile
+import time
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -33,7 +34,7 @@ RESPONSE = {"text": "Native synthesis from the cited fact.", "based_on": {
 
 
 class ReflectMigration(unittest.TestCase):
-    def test_v6_unknown_preserves_all_fields_and_releases_only_its_active_index(self):
+    def test_v6_unknown_is_archived_on_startup_without_changing_storage_format(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with closing(Control(root, "fixture")):
@@ -49,33 +50,22 @@ class ReflectMigration(unittest.TestCase):
                 db.execute("PRAGMA user_version=6")
             with closing(Control(root, "fixture", required=True)) as control:
                 self.assertEqual(control.db.execute("PRAGMA user_version").fetchone()[0], 7)
-                pending = control.reflection_pending("connection")[0]
-                self.assertEqual(tuple(pending)[:8], original)
-                revision = int(control.setting("revision"))
-                self.assertEqual(control.override_unknown_reflections("other", "bank", actor="admin"), 0)
-                self.assertEqual(control.override_unknown_reflections("connection", "bank", actor="admin"), 1)
-                self.assertEqual(int(control.setting("revision")), revision + 1)
                 audit = control.db.execute("SELECT * FROM reflection_requests").fetchone()
                 self.assertEqual(tuple(audit)[:8], (*original[:5], "overridden", *original[6:]))
                 self.assertIsInstance(audit["overridden_at"], float)
-                self.assertEqual(audit["overridden_by"], "admin")
-                self.assertEqual(control.override_unknown_reflections("connection", "bank", actor="other-admin"), 0)
-                self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), tuple(audit))
-                self.assertFalse(control.reflection_pending("connection"))
+                self.assertEqual(audit["overridden_by"], "startup")
                 with control.transaction():
-                    control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
-                                       "VALUES ('next','connection','owner','bank',3,'prepared',124)")
-                    with self.assertRaises(sqlite3.IntegrityError):
+                    for state in ("prepared", "dispatched", "unknown"):
                         control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
-                                           "VALUES ('duplicate','connection','owner','bank',3,'unknown',125)")
-                self.assertEqual(len(control.reflection_pending("connection")), 1)
+                                           "VALUES (?,?,?,?,?,?,?)", (state, "connection", "owner", state, 3, state, 124))
             with closing(Control(root, "fixture", required=True)) as control:
-                self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), tuple(audit))
+                self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests WHERE request_id='request'").fetchone()), tuple(audit))
+                self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests WHERE state='overridden'").fetchone()[0], 4)
 
 
 
 class ReflectTransport(unittest.IsolatedAsyncioTestCase):
-    async def test_only_complete_native_results_or_definitely_unsent_transport_release_barriers(self):
+    async def test_native_reflect_payload_and_transport_failures(self):
         requests = []
         failure = None
 
@@ -93,18 +83,15 @@ class ReflectTransport(unittest.IsolatedAsyncioTestCase):
 
         client = HindsightClient("http://memory.test", "key", transport=httpx.MockTransport(service))
         try:
-            settled = Mock()
+            settled = lambda: None
             value = await client.reflect("bank", "private-query", max_tokens=256, settled=settled)
-            settled.assert_called_once()
             self.assertEqual(value, RESPONSE)
             body = json.loads(requests[0].content)
             self.assertEqual(body, {"query": "private-query", "budget": "low", "max_tokens": 256, "include": {"facts": {}}})
             self.assertEqual(requests[0].url.path, "/v1/default/banks/bank/reflect")
             for failure in ("read", "gateway", "invalid", "connect"):
-                settled.reset_mock()
                 with self.assertRaises(HindsightError):
                     await client.reflect("bank", "private-query", max_tokens=256, settled=settled)
-                self.assertEqual(settled.call_count, int(failure == "connect"))
         finally:
             await client.close()
 
@@ -162,7 +149,7 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         native = self.plugin.client.reflect = AsyncMock()
         self.assertIn("reading_changed", await self.tools.execute(context, "reflect", {"query": "q"}))
         native.assert_not_awaited()
-        self.assertFalse(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id))
+        self.assertFalse(self.plugin.reflection.tasks)
 
     async def test_independent_auto_mode_opens_only_reflect_and_uses_one_native_call(self):
         event, context, scope = await self.ready()
@@ -170,9 +157,8 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
 
         async def native(bank, query, *, max_tokens, settled):
             self.assertEqual(bank, scope["bank"])
-            row = dict(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id, bank=bank)[0])
-            self.assertEqual(row["state"], "dispatched")
-            self.assertNotIn(query, canonical(row))
+            self.assertEqual(len(self.plugin.reflection.tasks), 1)
+            self.assertEqual(self.plugin.outbox.control.db.execute("SELECT COUNT(*) FROM reflection_requests").fetchone()[0], 0)
             settled()
             return RESPONSE
         self.plugin.client.reflect = AsyncMock(side_effect=native)
@@ -181,7 +167,7 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["usage"], RESPONSE["usage"])
         self.assertEqual(result["sources"]["memories"][0]["id"], "fact-1")
         self.assertEqual(self.request.func_tool.tools, [])
-        self.assertFalse(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id))
+        self.assertFalse(self.plugin.reflection.tasks)
         self.assertIn("tool_context_unavailable", await self.tools.execute(context, "reflect", {"query": "again"}))
         self.plugin.client.reflect.assert_awaited_once()
         self.assertEqual(self.tools.tool_turns[event].calls, 1)
@@ -207,14 +193,43 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         await entered.wait()
         result = json.loads(await host)
         self.assertEqual(result["error"], "reflect_timeout")
-        self.assertTrue(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id, bank=scope["bank"]))
         self.assertEqual(len(self.plugin.reflection.tasks), 1)
+        self.assertEqual(self.plugin.outbox.control.db.execute("SELECT COUNT(*) FROM reflection_requests").fetchone()[0], 0)
         release.set()
         await asyncio.gather(*list(self.plugin.reflection.tasks))
-        self.assertFalse(self.plugin.outbox.control.reflection_pending(self.plugin.outbox.connection_id))
+        self.assertFalse(self.plugin.reflection.tasks)
         self.assertEqual(self.plugin.hooks, 0)
 
-    async def test_forget_waits_before_delete_and_drops_old_response(self):
+    async def test_resume_preserves_reflect_and_reopens_only_after_platform_second_boundary(self):
+        _, _, scope = await self.ready()
+        queue = self.plugin.outbox
+        queue.set_mode(scope["scope_id"], "readonly", now=int(time.time()))
+        self.plugin.client.list_operations = AsyncMock(return_value=[])
+        maintenance = Maintenance(queue, self.plugin.client)
+        maintenance.begin(scope["scope_id"])
+        resumed_at = int(time.time()) + 4.25
+        with unittest.mock.patch("plugins.astrbot_plugin_hindsight_bridge.core.control.time.time", return_value=resumed_at):
+            await maintenance.resume(scope["scope_id"])
+        current = queue.scope_owner(scope["scope_id"])
+        boundary = current["accept_from"]
+        self.assertGreater(boundary, resumed_at)
+        self.assertTrue(read_options(queue, current)["enabled"])
+        shared = reading_tests.ToolSet(list(self.tools.owned.values()))
+        for accepted in (False, True):
+            event, request = self.turn("after-resume-" + str(accepted))
+            self.incoming = replace(self.incoming, timestamp=boundary if accepted else boundary - 1,
+                                    received_at=boundary + 0.1 if accepted else resumed_at + 0.1)
+            self.plugin.incoming[event] = self.incoming
+            request.model, request.func_tool = None, shared
+            await self.plugin.add_memory(event, request)
+            self.assertEqual(REFLECT_NAME in {tool.name for tool in request.func_tool.tools}, accepted)
+            self.assertIn(REFLECT_NAME, {tool.name for tool in shared.tools})
+            self.assertTrue(read_options(queue, queue.scope_owner(scope["scope_id"]))["enabled"])
+            if not accepted:
+                outcome = self.plugin.recall_outcomes[(queue.connection_id, scope["owner_id"])]
+                self.assertEqual(outcome["code"], "message_before_accept_from")
+
+    async def test_forget_deletes_without_waiting_for_reflect_and_drops_old_response(self):
         _, context, scope = await self.ready()
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -230,16 +245,16 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         await entered.wait()
         record = self.plugin.outbox.forget(scope["scope_id"])
         maintenance = Maintenance(self.plugin.outbox, client)
-        self.assertFalse(await maintenance.erase(record))
-        client.delete_bank.assert_not_awaited()
-        release.set()
-        self.assertNotIn(RESPONSE["text"], await host)
         client.bank_exists.return_value = False
         self.assertTrue(await maintenance.erase(record))
         client.delete_bank.assert_awaited_once_with(scope["bank"])
+        release.set()
+        self.assertNotIn(RESPONSE["text"], await host)
+        self.assertNotEqual(self.plugin.outbox.control.erasures(self.plugin.outbox.connection_id)[0]["phase"], "verified")
+        self.assertTrue(await maintenance.erase(record))
         self.assertFalse(read_options(self.plugin.outbox, self.scope())["enabled"])
 
-    async def test_unknown_request_survives_reload_blocks_old_erase_not_other_owners_recovery(self):
+    async def test_disconnected_reflect_does_not_block_reload_or_erasure(self):
         _, context, scope = await self.ready()
         self.plugin.client.reflect = AsyncMock(side_effect=HindsightError("connection_error"))
         await self.tools.execute(context, "reflect", {"query": "lost"})
@@ -249,31 +264,25 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.plugin.outbox = Outbox(self.directory / "runtime", "test-service", "http://memory.test",
                                    credential_fingerprint=sha256("key"), control_directory=self.plugin.control_directory())
         queue = self.plugin.outbox
-        self.assertEqual(queue.control.reflection_pending(queue.connection_id)[0]["state"], "unknown")
+        self.assertEqual(queue.control.db.execute("SELECT COUNT(*) FROM reflection_requests").fetchone()[0], 0)
         self.plugin.client.delete_bank = AsyncMock()
+        self.plugin.client.list_operations = AsyncMock(return_value=[])
+        self.plugin.client.bank_exists = AsyncMock(return_value=False)
+        self.plugin.client.bank_list_contains = AsyncMock(return_value=False)
         maintenance = Maintenance(queue, self.plugin.client)
-        self.assertFalse(await maintenance.erase(record))
-        self.plugin.client.delete_bank.assert_not_awaited()
+        self.assertTrue(await maintenance.erase(record))
+        self.plugin.client.delete_bank.assert_awaited_once_with(scope["bank"])
         queue.recovering = True
         self.assertTrue(await maintenance.startup())
         self.assertFalse(queue.recovering)
-        self.assertNotEqual(queue.control.erasures(queue.connection_id)[0]["phase"], "verified")
+        self.assertEqual(queue.control.erasures(queue.connection_id)[0]["phase"], "verified")
 
-    async def test_override_allows_new_reflect_and_late_settlement_preserves_audit(self):
+    async def test_disconnected_reflect_allows_a_new_request(self):
         _, context, scope = await self.ready()
         control = self.plugin.outbox.control
 
-        async def native(*args, settled, **kwargs):
-            with control.transaction():
-                control.db.execute("UPDATE reflection_requests SET state='unknown',error_code='disconnect'")
-            control.override_unknown_reflections(self.plugin.outbox.connection_id, scope["bank"], actor="admin")
-            settled()
-            return RESPONSE
-
-        self.plugin.client.reflect = AsyncMock(side_effect=native)
+        self.plugin.client.reflect = AsyncMock(side_effect=HindsightError("connection_error"))
         await self.tools.execute(context, "reflect", {"query": "first"})
-        audit = tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone())
-        self.assertEqual(audit[5], "overridden")
         _, context, _ = await self.ready(enabled=False)
 
         async def completed(*args, settled, **kwargs):
@@ -283,5 +292,5 @@ class ReflectBoundaries(unittest.IsolatedAsyncioTestCase):
         self.plugin.client.reflect.side_effect = completed
         result = json.loads(await self.tools.execute(context, "reflect", {"query": "next"}))
         self.assertEqual(result["text"], RESPONSE["text"])
-        self.assertFalse(control.reflection_pending(self.plugin.outbox.connection_id))
-        self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests").fetchone()), audit)
+        self.assertFalse(self.plugin.reflection.tasks)
+        self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests").fetchone()[0], 0)

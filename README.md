@@ -63,20 +63,20 @@
 - **配置聊天记忆**：设置细节记忆读取方式（**自动召回** 或 **按需工具**）、自定义记忆提示与检索预算、开关引用/带链接消息只读召回、查看或复制每轮交付给模型的原文记录。
 - **管理知识页与 Reflect**：在 **知识页（Knowledge Pages）** 中选择并排序最多 8 篇主题文档，开关随时可切换；在 **Reflect 综合推理** 中按用户开启多记忆综合回答。
 - **在官方面板管理内容**：从 **插件设置 → Hindsight 服务连接** 复制管理地址打开 Hindsight 原生 Control Plane，配合用户页的 **Bank ID** 即可浏览、搜索、更正或导出记忆（获取登录密钥见 [部署说明](deploy/README.md#五打开官方-control-plane)）。
-- **状态恢复与清空**：遇到服务升级或异常留下的暂停状态时，点击 **查看暂停状态** 核对后恢复；Reflect 请求因断网等原因结果未知时，确认服务无残留任务后可点击 **解除 Reflect 阻塞**；需要彻底删除数据时点击 **清空记忆**（仅清除插件记忆库，不影响 AstrBot 本地聊天历史）。
+- **状态恢复与清空**：遇到服务升级或异常留下的暂停状态时，点击 **查看暂停状态** 核对后恢复；Reflect 超时不阻塞恢复和清空；需要彻底删除数据时点击 **清空记忆**（仅清除插件记忆库，不影响 AstrBot 本地聊天历史）。
 
 常用私聊命令（完整列表与细节见 [使用指南](docs/USAGE.md)）：
 
 | 想做什么 | 私聊命令 |
 | --- | --- |
-| 查看本人记忆列表 | `/hindsight view` |
-| 查看已选知识页 | `/hindsight background [序号]` |
-| 查看状态与错误诊断 | `/hindsight status` |
-| 导出个人记忆 JSON | `/hindsight export` |
-| 切为只读（停止保存，继续召回） | `/hindsight readonly` |
-| 暂停（停止保存与自动召回） | `/hindsight pause` |
-| 恢复读写 | `/hindsight on` |
-| 清空个人记忆 | `/hindsight forget`，按提示发送确认码 |
+| 查看命令说明 | `/hb help` |
+| 查看状态与错误诊断 | `/hb status` |
+| 切为只读（停止保存，继续召回） | `/hb readonly` |
+| 暂停（停止保存与自动召回） | `/hb pause` |
+| 恢复读写 | `/hb on` |
+| 清空个人记忆 | `/hb forget`，按提示发送确认码 |
+
+0.5.0 退休 `correct/view/show/export/recall/background/retry/cancel`。交付内容、选页和重试使用插件面板；浏览、检索、修改与导出使用 Hindsight Control Plane。不再提供单项任务私聊取消，清空仍作废积压并删除个人 Bank。
 
 ## 记录边界
 
@@ -90,7 +90,7 @@
 - [使用指南](docs/USAGE.md)：面板各项配置、知识页、按需工具、Reflect 与私聊命令
 - [兼容范围](docs/SUPPORT.md)：AstrBot/Hindsight 版本、模型供应商与平台限制
 - [备份与恢复](docs/DATA-MAINTENANCE.md)：数据备份、故障恢复与配套服务升级
-- [贡献指南](CONTRIBUTING.md)：架构入口、验证命令与提交规范
+- [贡献指南](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/CONTRIBUTING.md)：架构入口、验证命令与提交规范
 
 遇到问题请在 [GitHub Issues](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/issues) 提交反馈，并附上版本、复现步骤与错误提示。
 

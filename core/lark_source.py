@@ -124,7 +124,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     valid_time = (
         type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
         and (raw.update_time is None or updated in (0, occurred))
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 1
+        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
     )
     if inspect is not None:
         inspect(login.bot_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw))

@@ -97,10 +97,10 @@ async def main(output):
             "ou_fixtureuser", "ou_fixturebot", "cli_fixture", "synthetic text", "synthetic-offline-secret",
         ))
         passed.append(mode + "_field_probe_excludes_platform_credentials_ids_and_text")
-        command = await fixture.event(text="/hindsight pause")
-        command.message_str = "hindsight pause"
+        command = await fixture.event(text="/hb pause")
+        command.message_str = "hb pause"
         command.is_at_or_wake_command = True
-        assert header(command).text == "/hindsight pause"
+        assert header(command).text == "/hb pause"
         command.message_str = "unrelated"
         assert header(command) is None
         passed.append(mode + "_command_prefix_requires_exact_original_text")

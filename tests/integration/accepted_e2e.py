@@ -71,6 +71,7 @@ class Accepted(Acceptance):
                 await self.install("candidate-install.zip")
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"], service_id="accepted-service",
                                   allowed_accounts=[{"__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(ALICE)}])
+                await self.confirm(ALICE)
                 await self.usable()
                 await self.bot.chat(ALICE, "Remember: my permanent baseline marker is Orchid-18. Reply briefly.")
                 await self.drained()
@@ -98,20 +99,32 @@ class Accepted(Acceptance):
                 self.passed("real_backend_stop_after_acceptance_recovers_without_duplicate_submission")
 
                 row = await self.held_task("Remember: the cancellable work marker is Elm-45. Reply briefly.")
-                answer = await self.bot.chat(ALICE, "/hindsight cancel " + str(row["id"]))
-                assert str(row["id"]) in answer
+                async with self.session.delete(
+                    self.settings["hindsight_url"] + "/v1/default/banks/" + row["bank"] + "/operations/" + row["operation_id"],
+                    headers={"Authorization": "Bearer " + self.settings["memory_key"]},
+                ) as response:
+                    assert response.status == 200
+                async def cancellation_inflight():
+                    local = database(self.runtime, "SELECT state,cancel_intent FROM outbox WHERE id=?", (row["id"],))[0]
+                    nodes = database(self.runtime, "SELECT operation_id,status FROM operations WHERE task_id=?", (row["id"],))
+                    return local if local["state"] == "cancel_requested" and local["cancel_intent"] == 0 and any(
+                        node["operation_id"] == row["operation_id"] and node["status"] == "cancelled" for node in nodes
+                    ) and any(
+                        node["operation_id"] != row["operation_id"] and node["status"] in {"pending", "processing"} for node in nodes
+                    ) else None
+                await until(cancellation_inflight, timeout=30)
+                await self.control("release_extraction")
                 async def cancelled():
                     local = database(self.runtime, "SELECT state,cancel_intent FROM outbox WHERE id=?", (row["id"],))[0]
                     remote = await self.operation(row["bank"], row["operation_id"])
-                    return remote if local["state"] == "cancelled" and local["cancel_intent"] == 1 and remote["status"] == "cancelled" else None
+                    return remote if local["state"] == "cancelled" and local["cancel_intent"] == 0 and remote["status"] == "cancelled" else None
                 remote = await until(cancelled, timeout=30)
                 for child in remote.get("child_operations", []):
                     assert (await self.operation(row["bank"], child["operation_id"]))["status"] not in {"pending", "processing"}
-                await self.control("release_extraction")
                 await until(lambda: all(task["state"] in {"done", "cancelled"} for task in self.tasks()), timeout=120)
                 self.assert_single_submission(row)
                 assert "Orchid-18" in json.dumps(await self.memories(scope["bank"]))
-                self.passed("actual_cancel_command_cancels_real_operation_tree_and_keeps_existing_memories")
+                self.passed("native_control_plane_cancel_is_tracked_without_local_cancel_intent_and_keeps_existing_memories")
 
                 row = await self.held_task("Remember: the late-write marker after forget is Aspen-54. Reply briefly.")
                 await self.control("hold_cleanup")

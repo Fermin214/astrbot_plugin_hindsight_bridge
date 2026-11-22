@@ -157,17 +157,20 @@ export function createSetup(view) {
   function renderParameters({ discard = false } = {}) {
     const snapshot = view.data?.parameters;
     if (!snapshot) return;
-    if (discard || !view.parameterDraft || !view.parameterDraft.dirty) {
+    if (view.parameterDraft?.revision !== view.data.config_revision && view.parameterDraft?.dirty) view.parameterDraft.conflict = true;
+    if (discard || !view.parameterDraft || (!view.parameterDraft.dirty && !view.parameterDraft.conflict)) {
       view.parameterDraft = { revision: view.data.config_revision, dirty: false };
       for (const key of view.parameterKeys) {
         view.$("memory-" + key).value = key === "command_prefixes"
           ? (Array.isArray(snapshot.values[key]) ? snapshot.values[key].join(", ") : "") : String(snapshot.values[key] ?? "");
       }
+      view.parameterDraft.baseline = JSON.stringify(view.parameterPayload().parameters);
     }
     view.$("parameters-fields").disabled = view.locks.has("parameters");
-    view.$("parameters-conflict").hidden = view.parameterDraft.revision === view.data.config_revision;
+    view.$("parameters-conflict").hidden = !view.parameterDraft.conflict;
     view.$("save-parameters").disabled = view.locks.has("parameters") || !view.parameterDraft.dirty
-      || view.parameterDraft.revision !== view.data.config_revision || !view.$("parameters-form").checkValidity();
+      || view.parameterDraft.conflict || !view.$("parameters-form").checkValidity();
+    view.$("save-parameters").closest(".card")?.classList.toggle("is-dirty", view.parameterDraft.dirty);
     const labels = { service_id: "记忆服务识别码", agent_id: "记忆归属识别码",
       service_address_revision: "服务地址变更序号", control_state_dir: "控制目录" };
     view.$("deployment-values").replaceChildren(...Object.entries(snapshot.deployment).flatMap(([key, value]) =>
@@ -205,6 +208,13 @@ export function createSetup(view) {
     return { config_revision: view.parameterDraft.revision, parameters };
   }
 
+  function editParameters() {
+    if (!view.parameterDraft) return;
+    try { view.updateDirty(view.parameterDraft, view.parameterPayload().parameters, "parameters-feedback"); }
+    catch { view.parameterDraft.dirty = true; view.clearFeedback("parameters-feedback"); }
+    view.renderParameters();
+  }
+
   async function saveParameters() {
     if (!view.parameterDraft || !view.$("parameters-form").reportValidity()) return;
     const payload = view.parameterPayload();
@@ -220,7 +230,7 @@ export function createSetup(view) {
       view.data.parameters = response.parameters;
       view.data.config_revision = response.config_revision;
       view.renderParameters({ discard: true });
-      if (!view.backgroundDraft?.dirty) view.backgroundDraft = null;
+      if (!view.backgroundDraft?.dirty && !view.backgroundDraft?.conflict) view.backgroundDraft = null;
       view.notify("已保存", false, "parameters-feedback");
       await view.refreshBootstrap({ automatic: true, pollMaintenance: false });
     }, "parameters-feedback");
@@ -384,5 +394,5 @@ export function createSetup(view) {
     view.notify("设置已重新加载。");
   }
 
-  return { providerSelect, updateProviderHelp, clearUninstall, managedMode, loadManagedSetup, updateConnectionMode, renderServiceVersion, versionCheckIdentity, checkServiceVersion, hydrateConfig, renderParameters, renderParameterLimits, parameterPayload, saveParameters, connectionPayload, settingsPayload, checkConnection, watchModels, saveSettings, saveAccess, prepareInstallation, copyCommand, reloadSettings };
+  return { editParameters, providerSelect, updateProviderHelp, clearUninstall, managedMode, loadManagedSetup, updateConnectionMode, renderServiceVersion, versionCheckIdentity, checkServiceVersion, hydrateConfig, renderParameters, renderParameterLimits, parameterPayload, saveParameters, connectionPayload, settingsPayload, checkConnection, watchModels, saveSettings, saveAccess, prepareInstallation, copyCommand, reloadSettings };
 }

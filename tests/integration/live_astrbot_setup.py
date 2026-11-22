@@ -29,6 +29,7 @@ config["provider"] = [{
     "id": "delivery-chat", "type": "openai_chat_completion", "provider_type": "chat_completion",
     "enable": True, "key": [settings["chat_token"]], "model": settings["chat_model"],
     "api_base": settings["chat_url"], "timeout": 90,
+    "modalities": ["tool_use"],
     "custom_extra_body": {"max_tokens": settings.get("chat_tokens", 512)},
 }]
 native_models = Path("/delivery/native-models.json")

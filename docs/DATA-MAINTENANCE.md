@@ -57,7 +57,7 @@ docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 
 同时另存安装目录下的 `.env`、`compose.yaml` 以及 `memory_settings` 卷里的 `models.json`。备份完毕后启动 `memory-api` 并重新启用插件。
 
-> 完整备份配套记忆库必须按本节导出 PostgreSQL，插件数据备份和个人 `/hindsight export` 都不能替代数据库备份。
+> 完整备份配套记忆库必须按本节导出 PostgreSQL，插件数据备份和 Hindsight Control Plane 的个人记忆导出都不能替代数据库备份。
 
 ## 在官方面板修改记忆
 
@@ -79,7 +79,7 @@ docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 2. 在 AstrBot 插件管理中更新 Hindsight Bridge 并重载。
 3. 沿用原有连接配置与数据目录，查看运行状态；如果页面提示重新确认账号，核对机器人身份后确认即可。
 
-使用 QQ 官方机器人时，保持原平台实例、AppID 和用户 OpenID 不变，在 WebSocket 与 Webhook 之间切换会直接沿用已有记忆。升级后若提示恢复异常，可先通过 `/hindsight status` 查看原因并对照下文处理。
+使用 QQ 官方机器人时，保持原平台实例、AppID 和用户 OpenID 不变，在 WebSocket 与 Webhook 之间切换会直接沿用已有记忆。升级后若提示恢复异常，可先通过 `/hb status` 查看原因并对照下文处理。
 
 ## 升级 Hindsight 服务
 
@@ -161,7 +161,7 @@ services:
 
 ## Reflect 与控制库格式
 
-从 0.4.0 起控制库采用格式 7，用于记录 Reflect 请求状态及人工解阻日志：
+0.5.0 沿用 0.4.0 的格式 7 控制库及 `reflection_requests` 表：
 - 升级后自动从旧格式迁入，保留全部账号、Bank、暂停记录与队列状态，**之后不可直接降级回旧版插件**。
-- 当断网或服务重启导致 Reflect 请求结果未知时，管理员在确认 Hindsight 已重启或确实没有运行中的 Reflect 任务后，可点击 **用户与记忆 → 解除 Reflect 阻塞**（历史保留库也可在 **查看暂停状态** 中找到该入口），勾选确认即可放行。
+- 启动自动将历史 `prepared/dispatched/unknown` 请求归档；Reflect 超时和断网只报告诊断，不锁住后续请求、解除暂停或清空。清空仍作废旧代次并核查远端 Bank 删除，迟到结果不得进入新代次。
 - 解阻记录会长期保留在控制库中；恢复旧业务快照时必须继续保留最新控制库，备份脚本也会拒绝用丢失或回退了这些记录的控制库覆盖现有副本。

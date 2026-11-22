@@ -47,8 +47,8 @@ def main():
         state.settings["references"] = args.scope == "references"
         state.settings["reflect"] = args.scope == "reflect"
         state.settings["tool_schema_mode"] = args.tool_schema_mode
-        baseline = ("v0.3.5" if state.settings["references"] else
-                    "43ab66ebd57ca0716cfd9c46d37f4b1147d1260b" if state.settings["reflect"] else
+        baseline = ("v0.4.0" if state.settings["references"] else
+                    "v0.4.0" if state.settings["reflect"] else
                     "7513bf7385eb692bc621568d45697bc9e3ff9a79" if state.settings["read_tools"] else
                     "v0.2.8" if state.settings["multi_page"] else
                     "66c0e1118a61a721a23b4bed220c6922f6a5b887" if args.scope == "single-page" else "v0.2.6")
@@ -85,4 +85,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    live.run_cli(main)

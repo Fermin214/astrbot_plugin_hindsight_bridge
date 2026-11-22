@@ -161,6 +161,7 @@ class ToolTurn:
     reflect_calls: int = 0
     delivered_ids: set[str] = field(default_factory=set)
     snapshot_id: str | None = None
+    arguments: dict = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -290,16 +291,25 @@ class MemoryTools:
                     if selected_provider else await getter(umo))
         if provider is None:
             return "", False
-        config = provider.provider_config
-        modalities = config.get("modalities")
-        compatible = not modalities or (isinstance(modalities, list) and "tool_use" in modalities)
         host = self.plugin.context.get_config(umo)
         orchestrator = host.get("subagent_orchestrator", {})
         runner = host.get("agent_runner", {}).get("config", {}).get("model", {})
-        # Public Agent hooks expose the context, but not a fallback's executing provider.
-        if orchestrator.get("main_enable", False) or runner.get("fallback_provider_ids"):
-            compatible = False
-        fingerprint = sha256(canonical([config, provider.get_model(), model, selected_provider, runner]))
+        fallbacks = runner.get("fallback_provider_ids", [])
+        if not isinstance(fallbacks, list) or any(not isinstance(identifier, str) or not identifier for identifier in fallbacks):
+            return "", False
+        candidates = [provider]
+        lookup = getattr(self.plugin.context, "get_provider_by_id", None)
+        for identifier in fallbacks:
+            candidate = lookup(identifier) if lookup else None
+            if candidate is None:
+                return "", False
+            candidates.append(candidate)
+        configs = [(candidate.provider_config, candidate.get_model()) for candidate in candidates]
+        compatible = not orchestrator.get("main_enable", False) and all(
+            isinstance(config.get("modalities"), list) and "tool_use" in config["modalities"]
+            for config, _ in configs
+        )
+        fingerprint = sha256(canonical([configs, model, selected_provider, runner]))
         return fingerprint, compatible
 
     @staticmethod
@@ -429,7 +439,6 @@ class MemoryTools:
             or not self.turn_tools_available(turn, request)
             or not turn.guard.valid(plugin, event)
             or not local_runner(plugin.context.get_config(turn.umo))
-            or plugin.context.get_config(turn.umo).get("agent_runner", {}).get("config", {}).get("model", {}).get("fallback_provider_ids")
             or read_options(turn.guard.queue, turn.guard.scope) != turn.options
             or reflection.runtime_options(turn.guard.queue, turn.guard.scope) != turn.reflect_options
             or turn.options["mode"] != "tools" and not turn.reflect_options["enabled"]
@@ -579,7 +588,9 @@ class MemoryTools:
             and (incoming := self.plugin.snapshot(event)) is not None
             and incoming_digest(incoming, turn.guard.queue.deployment_id) == turn.digest
         ):
-            self.plugin.record_tool_delivery(turn, kind, text, status)
+            delivery = json.loads(text)
+            parameters = {} if delivery.get("error") in {"tool_context_unavailable", "tool_budget_exhausted"} else dict(turn.arguments)
+            self.plugin.record_tool_delivery(turn, kind, text, status, arguments=parameters, delivery=delivery)
         return text
 
     async def _run(self, turn, event, context, kind, arguments):
@@ -596,6 +607,7 @@ class MemoryTools:
                     return unavailable
                 if PREFIX + kind not in turn.names:
                     return unavailable
+                turn.arguments = {}
                 if turn.context_ref() is not context or not self.valid(turn, event):
                     self.record(turn, "unavailable", "reading_changed", kind=kind)
                     return self.deliver(turn, kind, {"error": "reading_changed"})
@@ -681,12 +693,14 @@ class MemoryTools:
                 arguments["query"], tokenizer=client.tokenizer,
                 budget=int(self.plugin.config.get("recall_query_tokens", 380)),
             )
+            turn.arguments = {"query": query}
             return await self.plugin.reflection.ask(turn, query, recheck, **limits)
         if kind in {"search_pages", "recall"}:
             query = reading.query_text(
                 arguments["query"], tokenizer=client.tokenizer,
                 budget=int(self.plugin.config.get("recall_query_tokens", 380)),
             )
+            turn.arguments = {"query": query}
             if kind == "search_pages":
                 rows = await reading.search_pages(client, bank, query)
             else:
@@ -722,10 +736,13 @@ class MemoryTools:
                     result["status"] = "duplicate" if rows else "filtered" if excluded else "no_match"
             return result
         page = await reading.mapped_page(client, bank, arguments["page_id"], recheck)
+        turn.arguments = {"page_id": page["id"]}
         if kind == "read_page":
-            return {"kind": "page", "external_data": True, **reading.page_excerpt(
+            result = {"kind": "page", "external_data": True, **reading.page_excerpt(
                 page, start_line=arguments.get("start_line", 1), version=arguments.get("version", ""), **limits,
             )}
+            turn.arguments.update(start_line=result["start_line"], version=result["version"])
+            return result
         if kind == "page_sources":
             value = await reading.page_sources(client, bank, page)
             result = {**base, "page_id": page["id"], "version": page["version"], **value}

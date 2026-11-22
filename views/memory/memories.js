@@ -1,4 +1,41 @@
 export function createMemories(view) {
+  function referenceValues() {
+    return { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
+      capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
+      recall_on_quoted_or_link: view.$("reference-quoted").checked,
+      types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
+      detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber };
+  }
+
+  function readingValues() {
+    return { mode: view.$("reading-mode").value };
+  }
+
+  function reflectValues() {
+    return { enabled: view.$("reflect-enabled").checked, timeout: Number(view.$("reflect-timeout").value) };
+  }
+
+  function backgroundValues(draft) {
+    return { enabled: draft.enabled, page_ids: draft.selected.map((page) => page.page_id) };
+  }
+
+  function editReading() {
+    if (view.readingDraft) view.updateDirty(view.readingDraft, view.readingValues(), "reading-feedback");
+    view.renderReading();
+  }
+
+  function editReflect() {
+    if (view.reflectDraft) view.updateDirty(view.reflectDraft, view.reflectValues(), "reflect-feedback");
+    view.renderReflect();
+  }
+
+  function editReferences(event) {
+    if (!view.referenceDraft?.selection) return;
+    view.updateDirty(view.referenceDraft, view.referenceValues(), "reference-feedback");
+    if (event.target.id === "reference-prompt") view.countPrompt(view.referenceDraft);
+    view.renderReferences();
+  }
+
   function refreshAccountPlatforms() {
     const select = view.$("account-platform");
     const previous = select.value;
@@ -151,13 +188,14 @@ export function createMemories(view) {
     ]) : undefined;
     const changed = available && view.referenceDraft && (view.referenceDraft.revision !== scope.reference_revision
       || view.referenceDraft.configRevision !== view.data.config_revision);
-    if (view.referenceDraft?.key !== key || (changed && !view.referenceDraft.dirty)) {
+    if (changed && view.referenceDraft.dirty) view.referenceDraft.conflict = true;
+    if (view.referenceDraft?.key !== key || (changed && !view.referenceDraft.dirty && !view.referenceDraft.conflict)) {
       view.clearReferenceDraft();
       if (available) view.referenceDraft = { key, id: view.scopeId, revision: scope.reference_revision,
         observedRevision: scope.reference_revision, scopeRevision: scope.revision, configRevision: view.data.config_revision };
     }
     const draft = view.referenceDraft;
-    const conflict = changed && draft?.dirty;
+    const conflict = draft?.conflict === true;
     if (draft && draft.observedRevision !== scope.reference_revision) {
       draft.observedRevision = scope.reference_revision;
       view.resetUsage();
@@ -165,6 +203,7 @@ export function createMemories(view) {
     const blocked = !draft?.selection || view.locks.has("memory");
     view.$("reference-fields").disabled = blocked;
     view.$("reference-save").disabled = blocked || !draft.dirty || conflict;
+    view.$("reference-save").closest(".card")?.classList.toggle("is-dirty", !!draft?.dirty);
     view.$("reference-reload").hidden = !(draft?.failed || conflict);
     view.$("usage-open").disabled = !available || view.locks.has("memory");
     if (scope?.reference_error || conflict) {
@@ -199,6 +238,7 @@ export function createMemories(view) {
       view.$("reference-budget").value = saved.recall_budget ?? "mid";
       view.$("reference-limit").value = saved.detail_limit;
       view.$("reference-history").value = saved.history_limit;
+      draft.baseline = JSON.stringify(view.referenceValues());
     } catch (error) {
       if (view.referenceDraft !== draft || revision !== draft.revision) return;
       draft.failed = true;
@@ -227,11 +267,7 @@ export function createMemories(view) {
     view.renderReferences();
     const draft = view.referenceDraft;
     if (!draft?.selection || view.$("reference-save").disabled || !view.$("reference-form").reportValidity()) return;
-    const payload = { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
-      capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
-      recall_on_quoted_or_link: view.$("reference-quoted").checked,
-      types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
-      detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber,
+    const payload = { ...view.referenceValues(),
       revision: draft.revision, scope_revision: draft.scopeRevision, config_revision: draft.configRevision };
     await view.perform(view.$("reference-save"), "memory", async () => {
       const response = await view.bridge.apiPost(view.endpoint("references", draft.id), payload);
@@ -239,6 +275,7 @@ export function createMemories(view) {
       draft.dirty = false;
       draft.revision = response.selection.revision;
       draft.selection = response.selection;
+      draft.baseline = JSON.stringify(view.referenceValues());
       view.data.scopes.find((item) => item.scope_id === draft.id).reference_revision = draft.revision;
       view.$("reference-tokens").textContent = `${response.prompt_tokens} / ${draft.promptLimit} token`;
       view.notify("已保存", false, "reference-feedback");
@@ -249,15 +286,28 @@ export function createMemories(view) {
   function clearUsageDetail() {
     view.$("usage-deliveries").replaceChildren();
     view.$("usage-json").value = "";
-    view.$("usage-json").hidden = true;
+    view.$("usage-text").value = "";
+    view.usageText = "";
     view.$("usage-copy-json").hidden = true;
-    view.$("usage-feedback").textContent = "";
+    view.clearFeedback("usage-feedback");
+  }
+
+  function activateUsageTab(name, focus = false) {
+    for (const kind of ["content", "text", "json"]) {
+      const tab = view.$(`usage-tab-${kind}`);
+      const selected = kind === name;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      view.$(`usage-panel-${kind}`).hidden = !selected;
+      if (selected && focus) tab.focus();
+    }
   }
 
   function resetUsage() {
     view.usageReadRevision++;
     view.clearUsageDetail();
     view.$("usage-turn").replaceChildren();
+    view.activateUsageTab("content");
     if (view.$("usage-dialog").open) view.$("usage-dialog").close();
   }
 
@@ -274,8 +324,16 @@ export function createMemories(view) {
       const { turns } = await view.bridge.apiGet(view.endpoint("usage", draft.id));
       if (revision !== view.usageReadRevision || view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
       if (!turns.length) { view.notify("暂无使用记录。", false, "usage-feedback"); return; }
-      view.$("usage-turn").replaceChildren(...turns.map((turn) => view.option(turn.id,
-        `${new Date(turn.created_at * 1000).toLocaleString()} · ${turn.conversation_id} · ${turn.message_id}`)));
+      view.$("usage-turn").replaceChildren(...turns.map((turn) => {
+        const summary = turn.summary || {};
+        const labels = [new Date(turn.created_at * 1000).toLocaleString("zh-CN", { year: "numeric", month: "2-digit",
+          day: "2-digit", hour: "2-digit", minute: "2-digit" })];
+        if (summary.pages) labels.push(`${summary.pages} 篇知识页`);
+        if (summary.memories) labels.push(`${summary.memories} 条记忆`);
+        if (summary.tools) labels.push(`${summary.tools} 次工具调用`);
+        if (summary.status === "error") labels.push("读取失败");
+        return view.option(turn.id, labels.join(" · "));
+      }));
       view.$("usage-picker").hidden = false;
       await view.loadUsageTurn();
     } catch (error) {
@@ -293,8 +351,11 @@ export function createMemories(view) {
       const { turn } = await view.bridge.apiGet(view.endpoint(`usage/${encodeURIComponent(turnId)}`, draft.id));
       if (revision !== view.usageReadRevision || view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
       view.$("usage-json").value = JSON.stringify(turn, null, 2);
+      view.usageText = turn.deliveries.map((delivery) => delivery.text).filter(Boolean).join("\n\n");
+      view.$("usage-text").value = view.usageText;
       view.$("usage-copy-json").hidden = false;
       view.$("usage-deliveries").replaceChildren(...turn.deliveries.map((delivery, index) => view.usageDelivery(delivery, index, turn)));
+      view.clearFeedback("usage-feedback");
     } catch (error) {
       if (revision === view.usageReadRevision && view.$("usage-dialog").open) view.notify(view.errorMessage(error), true, "usage-feedback");
     }
@@ -305,33 +366,50 @@ export function createMemories(view) {
       page_sources: "知识页来源", page_history: "知识页版本", reflect: "Reflect" };
     const statuses = { delivered: "已交付", no_match: "无匹配", filtered: "已筛除", duplicate: "条目重复",
       limit: "达到条数或长度上限", error: "读取失败", budget: "额度已用完", not_called: "工具未调用" };
-    const sourceKinds = { user: "用户发言", assistant: "助手发言", mixed: "混合来源", unknown: "来源未知" };
+    const sourceKinds = { user: "用户发言", assistant: "助手回复", mixed: "混合来源", external: "早期/外部记录", unknown: "来源未知" };
     const types = { world: "世界事实", experience: "经历", observation: "观察" };
     const section = view.el("section", "usage-delivery");
     const title = kinds[delivery.kind] || delivery.kind;
     section.append(view.el("h3", "", `${index + 1}. ${title}`));
     const usedTools = delivery.kind === "request" && delivery.status === "not_called" && turn.deliveries.length > 1;
     if (!usedTools) section.append(view.el("p", "", [statuses[delivery.status] || delivery.status, delivery.code].filter(Boolean).join(" · ")));
-    for (const item of delivery.items || []) {
-      const labels = [item.id, types[item.type] || item.type, sourceKinds[item.source_kind] || "来源未知",
-        item.document_id, item.occurred_start, item.occurred_end, item.mentioned_at].filter(Boolean);
-      section.append(view.el("p", "usage-meta", labels.join(" · ")));
+    function card(label, body, labels, id) {
+      const article = view.el("article", "usage-card");
+      const header = view.el("div", "usage-card-header");
+      header.append(view.el("h4", "", label));
+      if (id) {
+        const button = view.el("button", "", "复制 ID");
+        button.type = "button";
+        button.setAttribute("aria-label", `复制${label} ID`);
+        button.addEventListener("click", () => void view.copyValue("usage-copy-value", "ID 已复制。", "usage-feedback", id)
+          .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
+        header.append(button);
+      }
+      article.append(header);
+      if (labels.length) article.append(view.el("p", "usage-meta", labels.filter(Boolean).join(" · ")));
+      if (body) article.append(view.el("div", "usage-body", body));
+      return article;
     }
     for (const page of delivery.pages || []) {
-      section.append(view.el("p", "usage-meta", [page.page_id, page.mental_model_id, page.version, page.last_refreshed_at].filter(Boolean).join(" · ")));
+      const freshness = page.is_stale === true ? "有新记忆待刷新" : page.is_stale === false ? "已是最新" : "";
+      const updated = page.last_refreshed_at ? new Date(page.last_refreshed_at).toLocaleString("zh-CN") : "";
+      section.append(card(page.name || "知识页", page.content ?? page.text ?? "", [freshness, updated], page.page_id));
     }
-    if (delivery.text) {
-      const field = view.el("textarea", "usage-text");
-      field.id = `usage-text-${index}`;
-      field.readOnly = true;
-      field.rows = 5;
-      field.value = delivery.text;
-      field.setAttribute("aria-label", `${title}原文`);
-      const button = view.el("button", "", "复制原文");
-      button.type = "button";
-      button.addEventListener("click", () => void view.copyValue(field.id, "原文已复制。", "usage-feedback", delivery.text)
-        .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
-      section.append(field, button);
+    for (const item of delivery.items || []) {
+      const date = (item.occurred_start || item.mentioned_at || "").slice(0, 10);
+      section.append(card("细节记忆", item.text || "", [types[item.type] || item.type,
+        sourceKinds[item.source_kind] || "来源未知", date], item.id));
+    }
+    if (delivery.kind !== "request") {
+      const labels = Object.entries(delivery.arguments || {}).map(([key, value]) => {
+        const names = { query: "查询", page_id: "知识页", start_line: "起始行", end_line: "结束行",
+          offset: "起点", limit: "条数", version: "版本" };
+        return `${names[key] || key}：${value}`;
+      });
+      section.append(card(title, delivery.items?.length || delivery.pages?.length ? "" : delivery.text,
+        labels, ""));
+    } else if (!delivery.items?.length && !delivery.pages?.length && delivery.text) {
+      section.append(view.el("div", "usage-body", delivery.text));
     }
     return section;
   }
@@ -340,17 +418,21 @@ export function createMemories(view) {
     const scope = view.data?.scopes.find((item) => item.scope_id === view.scopeId);
     const saved = scope?.reading || { revision: 0, mode: "automatic" };
     const snapshot = JSON.stringify([view.scopeId, scope?.bank, saved.revision, saved.scope_revision, view.data?.config_revision]);
-    if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank || !view.readingDraft.dirty) {
+    if (view.readingDraft?.snapshot !== snapshot && view.readingDraft?.dirty) view.readingDraft.conflict = true;
+    if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank
+      || (!view.readingDraft.dirty && !view.readingDraft.conflict)) {
       if (!view.readingDraft || view.readingDraft.id !== view.scopeId || view.readingDraft.bank !== scope?.bank) view.$("reading-feedback").hidden = true;
       view.readingDraft = { snapshot, id: view.scopeId, bank: scope?.bank, revision: saved.revision,
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
       view.$("reading-mode").value = saved.mode || "automatic";
+      view.readingDraft.baseline = JSON.stringify(view.readingValues());
     }
     const select = view.$("reading-mode");
     select.disabled = !scope || !!scope.pending || !!scope.historical || !!view.data?.status?.recovering
       || !!saved.error || view.locks.has("memory");
-    const conflict = view.readingDraft.snapshot !== snapshot;
+    const conflict = view.readingDraft.conflict === true;
     view.$("reading-save").disabled = select.disabled || conflict || !view.readingDraft.dirty;
+    view.$("reading-save").closest(".card")?.classList.toggle("is-dirty", view.readingDraft.dirty);
     const status = saved.status || {};
     const messages = [];
     if (conflict) messages.push("设置已更新，请刷新页面。");
@@ -386,26 +468,27 @@ export function createMemories(view) {
     const saved = scope?.reflect || { revision: 0, enabled: false, timeout: 12 };
     const snapshot = JSON.stringify([view.scopeId, scope?.bank, saved.revision, saved.scope_revision, view.data?.config_revision]);
     const changedScope = !view.reflectDraft || view.reflectDraft.id !== view.scopeId || view.reflectDraft.bank !== scope?.bank;
-    if (discard || changedScope || !view.reflectDraft.dirty) {
+    if (view.reflectDraft?.snapshot !== snapshot && view.reflectDraft?.dirty) view.reflectDraft.conflict = true;
+    if (discard || changedScope || (!view.reflectDraft.dirty && !view.reflectDraft.conflict)) {
       view.reflectDraft = { snapshot, id: view.scopeId, bank: scope?.bank, revision: saved.revision,
         scope_revision: saved.scope_revision, config_revision: view.data?.config_revision, dirty: false };
       view.$("reflect-enabled").checked = !!saved.enabled;
       view.$("reflect-timeout").value = String(saved.timeout ?? 12);
+      view.reflectDraft.baseline = JSON.stringify(view.reflectValues());
       if (discard || changedScope) view.$("reflect-feedback").hidden = true;
     }
-    const conflict = view.reflectDraft.snapshot !== snapshot;
+    const conflict = view.reflectDraft.conflict === true;
     const unavailable = !scope || scope.pending || scope.historical || view.data?.status?.recovering || saved.error || view.locks.has("memory");
     view.$("reflect-enabled").disabled = !!unavailable || (!saved.enabled && !!scope?.summary?.maintenance);
     view.$("reflect-timeout").disabled = !!unavailable;
     view.$("reflect-save").disabled = !!unavailable || conflict || !view.reflectDraft.dirty;
-    view.$("reflect-override").hidden = !scope?.summary?.reflect_unknown?.length;
+    view.$("reflect-save").closest(".card")?.classList.toggle("is-dirty", view.reflectDraft.dirty);
     view.$("reflect-conflict").hidden = !conflict;
     const unsupported = saved.enabled && saved.status?.state === "unavailable";
     const messages = [];
     if (saved.error) messages.push("Reflect 设置读取失败");
     else if (saved.invalidated) messages.push("记忆库已变化，Reflect 已关闭。");
-    if (saved.unknown) messages.push("请求状态待确认，暂时无法清空记忆。");
-    else if (saved.pending) messages.push("Reflect 处理中…");
+    if (saved.pending) messages.push("Reflect 处理中…");
     else if (unsupported) messages.push("此会话暂不支持 Reflect");
     else if (saved.enabled && ["error", "budget"].includes(saved.status?.state)) {
       messages.push(saved.status.message || "Reflect 调用失败");
@@ -430,34 +513,6 @@ export function createMemories(view) {
     }, "reflect-feedback");
   }
 
-  function openReflectOverride(id = view.scopeId) {
-    const scope = view.data?.scopes.find((item) => item.scope_id === id);
-    const banks = scope?.summary?.reflect_unknown || [];
-    if (!banks.length) return;
-    view.reflectOverrideState = { id, banks: [...banks], configRevision: view.data.config_revision };
-    view.$("reflect-override-bank").replaceChildren(...banks.map((bank) => view.option(bank,
-      `${bank === scope.bank ? scope.historical ? "保留的旧记忆库" : "使用中的记忆库" : "清空中的旧记忆库"} · ${bank}`)));
-    view.$("reflect-override-bank").value = banks[0];
-    view.$("reflect-override-confirm").checked = false;
-    view.$("reflect-override-submit").disabled = true;
-    view.$("reflect-override-feedback").hidden = true;
-    view.$("reflect-override-dialog").showModal();
-  }
-
-  async function confirmReflectOverride() {
-    const pending = view.reflectOverrideState;
-    const bank = view.$("reflect-override-bank").value;
-    if (!pending || !view.$("reflect-override-confirm").checked || !pending.banks.includes(bank)) return;
-    await view.perform(view.$("reflect-override-submit"), "memory", async () => {
-      const response = await view.bridge.apiPost(view.endpoint("action", pending.id), {
-        action: "reflect_override", bank, config_revision: pending.configRevision, confirm_override: true,
-      });
-      view.$("reflect-override-dialog").close();
-      await view.refreshBootstrap();
-      view.notify(response.message);
-    }, "reflect-override-feedback");
-  }
-
   function backgroundSnapshot(scope) {
     return JSON.stringify([
       scope?.scope_id, scope?.bank, scope?.background?.scope_revision, scope?.background?.revision,
@@ -475,19 +530,21 @@ export function createMemories(view) {
     const saved = scope?.background || { revision: 0, enabled: false, page_id: "" };
     const snapshot = view.backgroundSnapshot(scope);
     const changedScope = !view.backgroundDraft || view.backgroundDraft.id !== view.scopeId || view.backgroundDraft.bank !== scope?.bank;
-    if (changedScope || (!view.backgroundDraft.dirty && view.backgroundDraft.snapshot !== snapshot)) {
+    if (view.backgroundDraft?.snapshot !== snapshot && view.backgroundDraft?.dirty) view.backgroundDraft.conflict = true;
+    if (changedScope || (!view.backgroundDraft.dirty && !view.backgroundDraft.conflict && view.backgroundDraft.snapshot !== snapshot)) {
       view.backgroundReadRevision++;
       view.backgroundDraft = { snapshot, id: view.scopeId, bank: scope?.bank, page_id: saved.page_id || "", enabled: saved.enabled === true,
         revision: saved.revision, scope_revision: saved.scope_revision, config_revision: view.data?.config_revision,
         selected: view.backgroundPages(saved).map((page) => ({ ...page })), dirty: false,
         pages: [], checks: [], loaded: false, loading: false, attempted: false };
+      view.backgroundDraft.baseline = JSON.stringify(view.backgroundValues(view.backgroundDraft));
       view.$("background-feedback").hidden = true;
     }
     const unavailable = !scope || scope.pending || scope.historical || view.data?.status?.recovering || saved.error;
     const blocked = unavailable || scope.summary?.maintenance || scope.summary?.bank_missing || scope.bank_state === "new";
     const select = view.$("background-page");
     const draft = view.backgroundDraft;
-    const conflict = draft.snapshot !== snapshot;
+    const conflict = draft.conflict === true;
     const selected = draft.selected;
     select.disabled = !!unavailable || view.locks.has("memory") || (blocked && !saved.enabled);
     const options = [view.option("", "不使用知识页")];
@@ -515,7 +572,8 @@ export function createMemories(view) {
       }
       if (check?.code && check.code !== "background_too_large") row.append(view.el("p", "operation-status error", check.message));
       if (!draft.dirty && saved.enabled && usage) row.append(view.el("span", "page-status", usage.used ? "已使用" : usage.message));
-      if (native?.index_stale === true && draft.enabled) row.append(view.el("span", "page-status", "有新记忆待刷新"));
+      if (typeof native?.index_stale === "boolean" && draft.enabled) row.append(view.el("span", "page-status",
+        native.index_stale ? "有新记忆待刷新" : "已是最新"));
       const actions = view.el("div", "knowledge-page-actions");
       for (const [label, direction] of [["上移", -1], ["下移", 1], ["移除", 0]]) {
         const button = view.el("button", "", label);
@@ -529,8 +587,7 @@ export function createMemories(view) {
           else [draft.selected[index], draft.selected[index + direction]] = [draft.selected[index + direction], draft.selected[index]];
           draft.page_id = draft.selected[0]?.page_id || "";
           draft.enabled = draft.enabled && draft.selected.length > 0;
-          draft.dirty = true;
-          view.$("background-feedback").hidden = true;
+          view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
           view.renderBackground();
         });
         actions.append(button);
@@ -545,6 +602,7 @@ export function createMemories(view) {
     view.$("background-recheck").disabled = !!blocked || view.backgroundDraft.loading || view.locks.has("memory");
     view.$("background-recheck").textContent = draft.loading ? "刷新中…" : "刷新知识页";
     view.$("background-save").disabled = !!unavailable || view.locks.has("memory") || conflict || !draft.dirty;
+    view.$("background-save").closest(".card")?.classList.toggle("is-dirty", draft.dirty);
     if (view.viewReady && !blocked && !view.backgroundDraft.attempted && !view.locks.has("memory")) void view.loadBackground();
   }
 
@@ -582,8 +640,7 @@ export function createMemories(view) {
     if (!draft) return;
     draft.enabled = !!view.$("background-enabled")?.checked && draft.selected.length > 0;
     draft.page_id = draft.selected[0]?.page_id || "";
-    draft.dirty = true;
-    view.$("background-feedback").hidden = true;
+    view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
     view.renderBackground();
   }
 
@@ -601,8 +658,7 @@ export function createMemories(view) {
     }
     draft.enabled = !!pageId;
     draft.page_id = draft.selected[0]?.page_id || "";
-    draft.dirty = true;
-    view.$("background-feedback").hidden = true;
+    view.updateDirty(draft, view.backgroundValues(draft), "background-feedback");
     view.renderBackground();
   }
 
@@ -751,5 +807,5 @@ export function createMemories(view) {
     });
   }
 
-  return { refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, openReflectOverride, confirmReflectOverride, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { activateUsageTab, referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }

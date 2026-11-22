@@ -165,7 +165,7 @@ class Worker:
             statuses = {node["status"] for node in nodes.values()}
             if statuses == {"completed"}:
                 self.outbox.update(task_id, "done", attempts=0, retry_requested=0)
-            elif statuses & {"pending", "processing"}:
+            elif statuses - {"completed", "failed", "cancelled", "not_found"}:
                 self.outbox.update(
                     task_id,
                     "cancel_requested" if "cancelled" in statuses else "tracking",
@@ -305,7 +305,7 @@ class Worker:
             nodes = await self.tree(row, root)
         if not self.outbox.current(row, writing=False):
             return
-        active = any(n["status"] in {"pending", "processing"} for n in nodes.values())
+        active = any(node["status"] not in {"completed", "failed", "cancelled", "not_found"} for node in nodes.values())
         self.outbox.update(
             row["id"],
             "cancel_requested" if active else "cancelled",

@@ -4,8 +4,11 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import posixpath
+import re
 import shutil
 import subprocess
+from urllib.parse import unquote, urlsplit
 import zipfile
 
 from distribution import working_tree_files
@@ -58,6 +61,17 @@ def main():
             if (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 parser.error("candidate packages must not contain symlinks: " + entry.filename)
             inventory[entry.filename.removeprefix(prefix)] = hashlib.sha256(archive.read(entry)).hexdigest()
+        if args.distribution:
+            for name in inventory:
+                if not name.endswith(".md"):
+                    continue
+                for link in re.findall(r"\]\(([^)]+)\)", archive.read(prefix + name).decode("utf-8")):
+                    parsed = urlsplit(link)
+                    if parsed.scheme or parsed.netloc:
+                        continue
+                    target = posixpath.normpath(posixpath.join(posixpath.dirname(name), unquote(parsed.path))) if parsed.path else name
+                    if target not in inventory:
+                        parser.error(f"distribution document link is missing: {name}: {link}")
     shutil.copyfile(candidate, destination / "candidate-upgrade.zip")
     digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
     (destination / "package-inventory.json").write_text(

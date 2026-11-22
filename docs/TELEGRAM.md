@@ -14,7 +14,7 @@ Telegram 侧采用数字 User ID 与数字 Bot ID 作为稳定标识，修改 `@
 ## 消息范围
 
 - **自动记录**：普通私聊纯文字，以及不改变可见文本的加粗、斜体、行内代码等格式实体，和对应的最终助手回复。
-- **不自动记录**：命令（如 `/hindsight@MyBot status` 会按宿主去后缀后执行但不存入记忆）、含 `mention` / `text_link` / `text_mention` 实体的消息、引用、转发、编辑消息、图片/语音等媒体及其 caption、群组、频道、callback 与 business 会话。
+- **不自动记录**：命令（如 `/hb@MyBot status` 会按宿主去后缀后执行但不存入记忆）、含 `mention` / `text_link` / `text_mention` 实体的消息、引用、转发、编辑消息、图片/语音等媒体及其 caption、群组、频道、callback 与 business 会话。
 
 > 若在聊天参考中开启了 **引用回复或带链接的私聊也检索**，引用回复及含链接/`@` 提及的文字会读取已有记忆和知识页，但不会保存为新记忆。
 
@@ -47,4 +47,4 @@ ASTRBOT_DISABLE_METRICS=1 \
 /path/to/venv/bin/python tests/integration/astrbot_smoke.py
 ```
 
-真实 Bot 收发与完整业务联调见 [平台接入验证](PLATFORM-ACCEPTANCE.md)。
+真实 Bot 收发与完整业务联调见 [平台接入验证](https://github.com/Fermin214/astrbot_plugin_hindsight_bridge/blob/main/docs/PLATFORM-ACCEPTANCE.md)。

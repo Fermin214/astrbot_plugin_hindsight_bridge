@@ -31,14 +31,15 @@ class LiveHarnessTests(unittest.TestCase):
             state.containers, state.docker = [], Mock()
             (state.output / "package-inventory.json").write_text(json.dumps({"tree_sha256": digest}))
             report = state.output / "live-e2e-report.json"
-            with self.assertRaises(FileNotFoundError):
-                state.verify()
-            for changes in ({"complete": False}, {"passed": []}, {"candidate_tree_sha256": "b" * 64}):
-                with self.subTest(changes=changes), self.assertRaises(ValueError):
-                    report.write_text(json.dumps(complete | changes))
+            with patch.object(harness, "browser_lease", return_value=None):
+                with self.assertRaises(FileNotFoundError):
                     state.verify()
-            report.write_text(json.dumps(complete))
-            state.verify()
+                for changes in ({"complete": False}, {"passed": []}, {"candidate_tree_sha256": "b" * 64}):
+                    with self.subTest(changes=changes), self.assertRaises(ValueError):
+                        report.write_text(json.dumps(complete | changes))
+                        state.verify()
+                report.write_text(json.dumps(complete))
+                state.verify()
 
     def test_gateway_relays_first_stream_event_before_upstream_finishes(self):
         release = threading.Event()

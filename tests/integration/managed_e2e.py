@@ -316,7 +316,7 @@ class Managed(Acceptance):
                         "action": "begin", "config_revision": (await self.bootstrap())["config_revision"],
                     })
                     await self.action(scope["scope_id"], "mode", mode="paused")
-                    blocked = await self.bot.chat(ALICE, "/hindsight forget")
+                    blocked = await self.bot.chat(ALICE, (await self.command_prefix()) + " forget")
                     assert "服务升级期间" in blocked
                     assert next(row for row in (await self.bootstrap())["scopes"] if row["user_id"] == str(ALICE))["bank"] == scope["bank"]
                     self.passed("browser_old_version_reminder_all_banks_maintenance_plugin_backup_and_upgrade_command")
@@ -324,7 +324,7 @@ class Managed(Acceptance):
                     self.settings = json.loads((ROOT / "live-settings.json").read_text())
                     self.report.update(hindsight=self.settings["hindsight_version"], hindsight_image_id=self.settings["hindsight_image_id"])
                     await self.backend_ready()
-                    blocked = await self.bot.chat(ALICE, "/hindsight forget")
+                    blocked = await self.bot.chat(ALICE, (await self.command_prefix()) + " forget")
                     assert "服务升级期间" in blocked
                     assert next(row for row in (await self.bootstrap())["scopes"] if row["user_id"] == str(ALICE))["bank"] == scope["bank"]
                     self.passed("native_forget_rejected_after_preparation_and_after_container_upgrade_before_verification")

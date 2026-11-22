@@ -1,4 +1,17 @@
 export function createDom(view) {
+  const feedbackTimers = new Map();
+
+  function clearFeedback(target) {
+    view.clearTimeout(feedbackTimers.get(target));
+    feedbackTimers.delete(target);
+    view.$(target).hidden = true;
+  }
+
+  function updateDirty(draft, values, target) {
+    draft.dirty = JSON.stringify(values) !== draft.baseline;
+    view.clearFeedback(target);
+  }
+
   async function withTimeout(work, milliseconds, message) {
     let timer;
     try {
@@ -26,13 +39,20 @@ export function createDom(view) {
   function notify(message, error = false, target = "feedback") {
     if (view.$(target).closest("dialog") && !view.$(target).closest("dialog").open) target = "feedback";
     const node = view.$(target);
+    view.clearTimeout(feedbackTimers.get(target));
+    feedbackTimers.delete(target);
     (target === "feedback" ? view.$("feedback-message") : node).textContent = message;
     node.hidden = false;
     node.classList.toggle("error", error);
     node.setAttribute("role", error ? "alert" : "status");
-    if (target === "feedback") {
-      view.clearTimeout(view.feedbackTimer);
-      if (!error) view.feedbackTimer = view.setTimeout(() => { node.hidden = true; }, 6500);
+    if (!error && (target === "feedback" || message === "已保存")) {
+      const timer = view.setTimeout(() => {
+        if (feedbackTimers.get(target) !== timer) return;
+        node.hidden = true;
+        feedbackTimers.delete(target);
+      }, target === "feedback" ? 6500 : 2800);
+      feedbackTimers.set(target, timer);
+      if (target === "feedback") view.feedbackTimer = timer;
     }
   }
 
@@ -76,7 +96,7 @@ export function createDom(view) {
     if (name !== "setup") {
       view.clearCommands();
     }
-    view.document.querySelectorAll('[role="tab"]').forEach((tab) => {
+    view.document.querySelectorAll('[role="tab"][id^="tab-"]').forEach((tab) => {
       const selected = tab.id === `tab-${name}`;
       tab.setAttribute("aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;
@@ -123,5 +143,5 @@ export function createDom(view) {
     view.notify(message, false, target);
   }
 
-  return { withTimeout, text, el, notify, errorMessage, perform, activateTab, option, controlPlaneUrl, copyValue };
+  return { withTimeout, text, el, notify, clearFeedback, updateDirty, errorMessage, perform, activateTab, option, controlPlaneUrl, copyValue };
 }
