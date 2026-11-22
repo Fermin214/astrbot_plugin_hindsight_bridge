@@ -375,6 +375,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         operations = result.get("operations", [result])
                         changed = False
                         for operation in operations:
+                            if operation.get("status") == "not_found":
+                                continue
                             operation_id = operation.get("operation_id") or operation.get("id")
                             root = not override["operation_id"] or operation_id == override["operation_id"]
                             child = override["mode"] == "child" and operation_id == override["child_id"]

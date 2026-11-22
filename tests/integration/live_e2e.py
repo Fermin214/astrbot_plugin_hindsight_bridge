@@ -491,6 +491,8 @@ class Acceptance:
             if maintenance:
                 await self.drained()
                 await self.action(scope_id, "maintenance_resume")
+                boundary = database(self.runtime, "SELECT accept_from FROM scopes WHERE scope_id=?", (scope_id,))[0]["accept_from"]
+                await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform maintenance reception boundary")
         rows = await self.memories(bank)
         assert marker in json.dumps(rows)
         assert next(row for row in self.tasks() if row["id"] == task["id"])["state"] == "done"
