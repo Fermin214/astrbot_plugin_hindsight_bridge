@@ -20,7 +20,7 @@ class Feedback(Acceptance):
         super().__init__()
         self.report.update(
             acceptance_scope="native Dashboard feedback, 0.2.6 upgrade, control migration and snapshot recovery",
-            chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", rerank_model="rrf",
+            chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", embedding_dimensions=64, rerank_model="rrf",
             not_covered=["real QQ login", "production model quality"],
         )
         if self.settings.get("feedback_only"):

@@ -507,6 +507,13 @@ class Environment:
         transport._post = measured_post
         environment = json.loads(args.model_environment.read_text())
         descriptors = json.loads(environment.pop("ASTRBOT_MEMORY_MODEL_CONFIG"))
+        embedding = descriptors.get("embedding", {})
+        rerank = descriptors.get("rerank", {})
+        self.settings.update(
+            embedding_model=embedding.get("model", environment.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL")),
+            embedding_dimensions=embedding.get("dimensions", environment.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS")),
+            rerank_model=rerank.get("model", environment.get("HINDSIGHT_API_RERANKER_PROVIDER")),
+        )
         self.transport_token = secrets.token_hex(20)
         self.transport = transport.TransportServer(("127.0.0.1", 0), descriptors, self.transport_token)
         transport_url = f"http://127.0.0.1:{self.transport.server_port}"
