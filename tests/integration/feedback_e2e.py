@@ -452,13 +452,15 @@ class Feedback(Acceptance):
                         return state if state.get("checked_at", 0) > before else None
                     state = await until(checked, timeout=30)
                     assert state["used"] is used and expected in state["message"], state
-                    await frame.locator("#background-status").filter(has_text=expected).wait_for(timeout=15000)
+                    visible = "已使用" if used else expected
+                    status = frame.locator("#background-selected .page-status").filter(has_text=visible)
+                    await status.wait_for(timeout=15000)
                     await page.wait_for_timeout(5500)
-                    assert expected in await frame.locator("#background-status").inner_text()
+                    assert await status.is_visible()
                     await frame.locator("#scope-picker").select_option(json.dumps(["delivery-onebot", str(BOB)], separators=(",", ":")))
-                    assert expected not in await frame.locator("#background-status").inner_text()
+                    await status.wait_for(state="hidden", timeout=15000)
                     await frame.locator("#scope-picker").select_option(json.dumps(["delivery-onebot", str(ALICE)], separators=(",", ":")))
-                    await frame.locator("#background-status").filter(has_text=expected).wait_for(timeout=15000)
+                    await status.wait_for(timeout=15000)
 
                 if not self.settings.get("recovery_only"):
                     await chat_status("上次聊天已使用知识页", True)
