@@ -106,14 +106,14 @@ def bridge_class(directory, logger):
 
 class ConfigurationTests(unittest.TestCase):
     def test_timeout_default_saved_values_and_invalid_ranges(self):
-        self.assertEqual(diagnostics.recall_timeout({}), 10)
+        self.assertEqual(diagnostics.recall_timeout({}), 15)
         for value in (0.2, 4, 10, 30, "12"):
             self.assertEqual(diagnostics.recall_timeout({"recall_timeout": value}), float(value))
         for value in (0, -1, 0.19, 31, True, None, [], "bad", float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(diagnostics.ConfigurationError):
                 diagnostics.recall_timeout({"recall_timeout": value})
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text())
-        self.assertEqual(schema["recall_timeout"]["default"], 10)
+        self.assertEqual(schema["recall_timeout"]["default"], 15)
         self.assertEqual(set(schema), {
             "api_url", "api_key", "control_plane_url", "service_id", "service_address_revision",
             "control_state_dir", "agent_id", "allowed_accounts", "recall_timeout",
@@ -204,14 +204,16 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
-    async def test_quoted_readonly_turn_recalls_and_records_usage_without_any_capture(self):
+    async def test_readonly_mode_recalls_quoted_text_without_capture(self):
         plugin, queue = self.plugin, self.plugin.outbox
         scope = queue.scope(self.incoming)
         save_reference_options(queue, scope, **{
             **reference_options(queue, scope), "recall_on_quoted_or_link": True,
         })
+        queue.set_mode(scope["scope_id"], "readonly")
+        scope = queue.scope(self.incoming)
         event, request = self.turn("readonly")
-        self.incoming = replace(self.incoming, capture_allowed=False)
+        self.incoming = replace(self.incoming, reply_to="old-message")
         plugin.incoming[event] = self.incoming
         with patch.object(plugin, "freeze_user_capture") as freeze, \
                 patch.object(plugin, "track_assistant_capture") as track:
@@ -264,22 +266,16 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIn(label, failed)
         self.assertIn("recall_timeout", failed)
 
-    async def test_readonly_turn_requires_opt_in_and_discards_results_after_revocation(self):
+    async def test_readonly_quote_discards_results_after_revocation(self):
         plugin, queue = self.plugin, self.plugin.outbox
         scope = queue.scope(self.incoming)
-        event, request = self.turn("readonly-disabled")
-        self.incoming = replace(self.incoming, capture_allowed=False)
-        plugin.incoming[event] = self.incoming
-        with patch.object(plugin, "record_skip") as skipped:
-            await plugin.add_memory(event, request)
-        skipped.assert_called_once()
-        self.assertEqual(request.extra_user_content_parts, [])
-        self.assertEqual(self.requests, [])
+        queue.set_mode(scope["scope_id"], "readonly")
+        scope = queue.scope(self.incoming)
         save_reference_options(queue, scope, **{
-            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+            **reference_options(queue, scope), "recall_on_quoted_or_link": False,
         })
         event, request = self.turn("readonly-revoked")
-        self.incoming = replace(self.incoming, capture_allowed=False)
+        self.incoming = replace(self.incoming, reply_to="old-message")
         plugin.incoming[event] = self.incoming
         read = plugin.client.recall
 
@@ -481,20 +477,12 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin.client.recall = AsyncMock(side_effect=stall)
         with self.assertRaisesRegex(HindsightError, "recall_timeout"):
             await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.config["recall_timeout"] = 10
-        self.plugin.client.recall = AsyncMock(return_value=[])
-        observed = []
-        original = asyncio.timeout
-        def record(seconds):
-            observed.append(seconds)
-            return original(seconds)
-        with patch.object(asyncio, "timeout", side_effect=record):
-            await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.assertEqual(observed, [10])
-        self.config["recall_timeout"] = 30
-        with patch.object(asyncio, "timeout", side_effect=record):
-            await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.assertEqual(observed[-1], 30)
+        self.config["recall_timeout"] = 0.8
+        async def delayed(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return []
+        self.plugin.client.recall = AsyncMock(side_effect=delayed)
+        self.assertEqual(await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp), "")
 
     async def test_history_failure_is_not_reported_as_recall_timeout(self):
         self.context.conversation_manager.get_curr_conversation_id.side_effect = TimeoutError

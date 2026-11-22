@@ -40,12 +40,13 @@
             <div id="mode-control" class="mode-group" role="group" aria-label="记忆模式"><button type="button" data-mode="active" aria-pressed="false">读写记忆</button><button type="button" data-mode="readonly" aria-pressed="false">只读记忆</button><button type="button" data-mode="paused" aria-pressed="false">停用记忆</button></div>
           </div>
           <div class="stats">
-            <div><span>已保存</span><strong id="saved-count">暂无数据</strong></div>
+            <div><span>插件已保存</span><strong id="saved-count">暂无数据</strong><small id="bank-total" hidden></small></div>
             <div><span>待保存</span><strong id="pending-count">0</strong></div>
             <div><span>保存失败</span><div class="stat-value"><strong id="failed-count">0</strong><button id="retry" class="btn-ghost btn-xs" type="button" hidden>重试保存</button></div></div>
-            <div><span>最近检索</span><span id="scope-recall-status">尚未检索</span></div>
+            <div><span>最近检索</span><span id="scope-recall-status">暂无记录</span></div>
           </div>
           <div class="overview-alerts">
+            <div id="skip-warning" class="notice warning" role="status" hidden><span id="skip-warning-message"></span><button id="skip-warning-open" type="button">查看跳过记录</button></div>
             <p id="bank-state" class="operation-status" hidden></p><p id="queue-summary" class="operation-status" hidden></p><div id="scope-error" class="notice error" role="status" hidden></div>
             <div id="scope-skip-row" class="recall-row" hidden><span>最近跳过</span><span id="scope-skip-status"></span></div>
             <div class="maintenance-row"><p id="maintenance-state" class="operation-status" role="status" hidden></p><button id="maintenance-view" type="button" hidden>查看暂停状态</button></div>
@@ -75,7 +76,6 @@
                 <label for="reference-limit"><span class="field-label">每条消息最多参考</span><span class="input-unit" data-unit="条"><input id="reference-limit" name="detail_limit" type="number" min="0" max="100" step="1" required inputmode="numeric"></span></label>
               </div>
               <label class="toggle-row" for="reference-exclude"><span><span class="field-label">只参考用户发言</span><span class="hint">排除机器人回复；来源混合或未知的记忆仍会使用。</span></span><input type="checkbox" role="switch" class="switch" name="exclude_assistant" id="reference-exclude"></label>
-              <label class="toggle-row" for="reference-quoted"><span><span class="field-label">引用回复或带链接的私聊也检索</span><span class="hint">只读查找已有记忆，这类消息与助手回复不会保存为新记忆。</span></span><input type="checkbox" role="switch" class="switch" name="recall_on_quoted_or_link" id="reference-quoted"></label>
             </div>
             <div class="form-group">
               <h4>保存与使用记录</h4>
@@ -179,6 +179,7 @@
       <button id="usage-tab-content" type="button" role="tab" aria-selected="true">参考内容</button>
       <button id="usage-tab-text" type="button" role="tab" aria-selected="false" tabindex="-1">发给 AI 的原文</button>
       <button id="usage-tab-json" type="button" role="tab" aria-selected="false" tabindex="-1">原始 JSON</button>
+      <button id="usage-tab-skips" type="button" role="tab" aria-selected="false" tabindex="-1">跳过记录</button>
     </div>
     <section id="usage-panel-content" role="tabpanel" aria-labelledby="usage-tab-content"><div id="usage-deliveries"></div></section>
     <section id="usage-panel-text" role="tabpanel" aria-labelledby="usage-tab-text" hidden>
@@ -188,6 +189,10 @@
     <section id="usage-panel-json" role="tabpanel" aria-labelledby="usage-tab-json" hidden>
       <textarea id="usage-json" rows="16" aria-label="整轮 JSON" readonly></textarea>
       <div class="actions"><button id="usage-copy-json" type="button" hidden>复制整轮 JSON</button></div>
+    </section>
+    <section id="usage-panel-skips" role="tabpanel" aria-labelledby="usage-tab-skips" tabindex="0" hidden>
+      <div id="usage-skips"></div>
+      <div class="actions"><button id="usage-clear-skips" type="button" disabled>清空跳过记录</button></div>
     </section>
     <p id="usage-feedback" class="operation-status" role="status"></p>
     <textarea id="usage-copy-value" class="sr-only" aria-label="复制内容" readonly tabindex="-1"></textarea>

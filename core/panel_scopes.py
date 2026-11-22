@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 import json
 import secrets
 import time
@@ -74,6 +75,21 @@ class PanelScopes:
             }
             summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
             summary["recall"] = plugin.recall_status(scope) if queue and not scope.get("pending") else None
+            if queue and not scope.get("pending") and not scope.get("historical"):
+                summary["bank_total"] = self.bank_stats.get(scope)
+                if scope["mode"] == "active" and queue.can_recall(scope, manual=True):
+                    try:
+                        skips = queue.references.skips(scope)
+                        latest = queue.db.execute("SELECT MAX(queued.created_at) FROM outbox queued JOIN events incoming ON incoming.task_id=queued.id "
+                                                  "WHERE queued.connection_id=? AND queued.scope_id=? AND queued.bank=?",
+                                                  (queue.connection_id, scope["scope_id"], scope["bank"])).fetchone()[0] or 0
+                        consecutive = [item for item in skips if item["at"] > latest]
+                        if len(consecutive) >= 5:
+                            code = Counter(item["code"] for item in consecutive).most_common(1)[0][0]
+                            summary["skip_warning"] = {"count": len(consecutive), "code": code,
+                                                       "message": plugin.skip_reason(code)}
+                    except QueueError:
+                        pass
             account = (scope["platform_instance_id"], scope["user_id"])
             if account in accounts and (not scope.get("historical") or scope.get("availability") == "disconnected"):
                 skipped = plugin.skip_status(*account)
@@ -305,8 +321,23 @@ class PanelScopes:
         async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
             queue, scope = await self.reference_scope(scope_id)
             if turn_id is None:
-                return {"turns": queue.references.list(scope)}
+                return {"turns": queue.references.list(scope), "skips": queue.references.skips(scope)}
             return {"turn": queue.references.detail(scope, turn_id)}
+
+    async def skips(self, scope_id):
+        from astrbot.api.web import request
+
+        payload = await self.body() if request.method == "POST" else None
+        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+            queue, scope = await self.reference_scope(scope_id)
+            if payload is not None:
+                if (set(payload) != {"scope_revision", "config_revision"}
+                        or payload["scope_revision"] != scope["revision"]
+                        or payload["config_revision"] != self.config_revision()):
+                    raise QueueError("scope_not_available")
+                queue.references.clear_skips(scope)
+                self.plugin.skip_outcomes.pop((scope["platform_instance_id"], scope["user_id"]), None)
+            return {"skips": queue.references.skips(scope)}
 
     async def reading(self, scope_id):
         from astrbot.api.web import request

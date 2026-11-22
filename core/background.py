@@ -41,7 +41,7 @@ def page_references(pages):
 def context_limits(config):
     """Shared ceilings keep their old defaults; page limits are independent."""
     page_tokens = config.get("background_max_tokens", 400)
-    value = config.get("background_timeout", 1)
+    value = config.get("background_timeout", 3)
     try:
         seconds = float(value)
     except (ValueError, TypeError, OverflowError):

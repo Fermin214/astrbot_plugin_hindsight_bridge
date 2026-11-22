@@ -40,7 +40,10 @@ class PanelSnapshot:
 
 class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
     def __init__(self, plugin):
+        from .bank_stats import BankStats
+
         self.plugin = plugin
+        self.bank_stats = BankStats(plugin)
         self.lock = asyncio.Lock()
         self.closed = False
         self.requests = set()
@@ -74,6 +77,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             ("scopes/<scope_id>/references/count", "POST", self.prompt_count),
             ("scopes/<scope_id>/usage", "GET", self.usage),
             ("scopes/<scope_id>/usage/<turn_id>", "GET", self.usage),
+            ("scopes/<scope_id>/skips", ["GET", "POST"], self.skips),
             ("scopes/<scope_id>/reflect", ["GET", "POST"], self.reflect),
         ]
         if hasattr(plugin.context, "register_web_api"):
@@ -452,6 +456,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
 
     async def close(self):
         self.closed = True
+        await self.bank_stats.close()
         tasks = self.requests | {self.model_task}
         tasks = {task for task in tasks if task is not None and task is not asyncio.current_task()}
         for task in tasks:

@@ -71,7 +71,6 @@ class Fixture:
             "context_token": "synthetic-private-context",
             **(changes or {}),
         }
-        # Media download failures must not turn mixed input into plain text.
         with patch.object(self.host, "_resolve_inbound_media_component", return_value=None):
             await self.host._handle_inbound_message(copy.deepcopy(payload))
         return self.queue.get_nowait()
@@ -150,6 +149,7 @@ async def main(output):
                 {"type": 1, "text_item": {"text": "synthetic"}},
                 {"type": 2, "image_item": {"media": {}}},
             ]}),
+            ("pure_media", {"item_list": [{"type": 2, "image_item": {"media": {}}}]}),
             ("voice_transcription", {"item_list": [
                 {"type": 3, "voice_item": {"text": "synthetic"}},
             ]}),
@@ -170,17 +170,18 @@ async def main(output):
             ]}),
         ):
             sample = await fixture.event(changes=changes)
-            assert fixture.header(sample) is None, label
+            accepted = label in {"reference", "root_relation", "parent_relation", "media"}
+            assert (fixture.header(sample) is not None) is accepted, label
             readonly = fixture.header(sample, allow_readonly=True)
-            if label in {"reference", "root_relation", "parent_relation"}:
-                assert readonly is not None and readonly.capture_allowed is False
-                assert readonly.text == ("synthetic" if label == "reference" else "synthetic text")
+            if accepted:
+                assert readonly is not None and readonly.capture_allowed
+                assert readonly.text == ("synthetic[图片]" if label == "media" else "synthetic" if label == "reference" else "synthetic text")
             else:
                 assert readonly is None, label
             if label in {"media", "reference"}:
                 reasons = []
                 assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
-                                      inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                                      inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is not None
                 assert reasons == ["quoted_or_reply" if label == "reference" else "media_or_non_text"]
         for value in ({"trace": "synthetic"}, {}, True, 0):
             assert fixture.header(await fixture.event(changes={"unknown_extension": value})) is not None

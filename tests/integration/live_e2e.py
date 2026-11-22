@@ -108,6 +108,12 @@ class OneBot:
                 result = {"user_id": self.bot_id, "nickname": "Delivery bot"}
             elif action == "get_status":
                 result = {"online": True, "good": True}
+            elif action == "get_msg":
+                result = {"message_id": params["message_id"], "self_id": self.bot_id,
+                          "user_id": ALICE, "message_type": "private", "sub_type": "friend",
+                          "time": int(time.time()), "sender": {"user_id": ALICE, "nickname": "Synthetic quote"},
+                          "message": [{"type": "text", "data": {"text": "UNTRUSTED_NATIVE_QUOTE"}}],
+                          "raw_message": "UNTRUSTED_NATIVE_QUOTE", "font": 0}
             elif action in {"send_msg", "send_private_msg", "send_group_msg", "send_private_forward_msg", "send_group_forward_msg"}:
                 result = {"message_id": len(self.actions) + 10000}
                 segments = message_segments(params.get("message", params.get("messages", [])))
@@ -122,7 +128,7 @@ class OneBot:
                 await self.replies.put({**params, "message": segments})
             await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
 
-    async def send(self, user, text, *, group=False, message_id=None, timestamp=None, metadata=None):
+    async def send(self, user, text, *, group=False, message_id=None, timestamp=None, metadata=None, segments=None):
         type(self).sequence += 1
         self.message_id = type(self).sequence
         while not self.replies.empty():
@@ -131,7 +137,8 @@ class OneBot:
             "time": int(time.time()) if timestamp is None else timestamp,
             "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
             "sub_type": "normal" if group else "friend", "user_id": user,
-            "message_id": message_id or self.message_id, "message": [{"type": "text", "data": {"text": text}}],
+            "message_id": message_id or self.message_id,
+            "message": segments if segments is not None else [{"type": "text", "data": {"text": text}}],
             "raw_message": text, "font": 0, "sender": {"user_id": user, "nickname": "Synthetic user", "role": "member"},
         }
         if group:
@@ -142,8 +149,8 @@ class OneBot:
         await self.socket.send_json(event)
         return event["message_id"]
 
-    async def chat(self, user, text, *, timestamp=None, metadata=None):
-        await self.send(user, text, timestamp=timestamp, metadata=metadata)
+    async def chat(self, user, text, *, timestamp=None, metadata=None, segments=None):
+        await self.send(user, text, timestamp=timestamp, metadata=metadata, segments=segments)
         async with asyncio.timeout(100):
             while True:
                 reply = await self.replies.get()
@@ -207,7 +214,7 @@ class Acceptance:
         )
         destination = ROOT / "baseline-state"
         destination.mkdir(mode=0o700)
-        control = self.runtime.parent.with_name(NAME + "_control") / "control.sqlite3"
+        control = Path(self.settings.get("verification_control_directory") or self.runtime.parent.with_name(NAME + "_control")) / "control.sqlite3"
         snapshots = {}
         for source in (self.runtime, control, self.runtime.parent / "references.sqlite3"):
             if not source.is_file():
@@ -293,7 +300,8 @@ class Acceptance:
         scope = next(row for row in (await self.bootstrap())["scopes"]
                      if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
         configuration = await self.config()
-        control_directory = Path(configuration.get("control_state_dir") or self.runtime.parent.parent / (NAME + "_control"))
+        control_directory = Path(self.settings.get("verification_control_directory") or configuration.get("control_state_dir")
+                                 or self.runtime.parent.parent / (NAME + "_control"))
         boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
         boundary = math.ceil(boundary)
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
@@ -817,9 +825,15 @@ class Acceptance:
                     candidate_auth_started <= row["at"] <= daily_auth["at"]
                     and row["path"] == "/v1/default/banks" and not row["real_key"]
                 )]
-                assert len(initial_probes) == 1 and initial_probes[0]["status"] in {401, 403}
+                baseline_probes = [row for row in jsonl("memory-http-trace") if (
+                    row["at"] < candidate_auth_started and row["path"] == "/v1/default/banks"
+                    and not row["real_key"]
+                )]
+                assert len(baseline_probes) == 1 and baseline_probes[0]["status"] in {401, 403}
+                assert not initial_probes
                 self.report["measurements"]["candidate_initial_negative_auth_probe_count"] = len(initial_probes)
-                self.passed("real_candidate_initial_connection_checks_negative_auth_once")
+                self.report["measurements"]["baseline_negative_auth_probe_count"] = len(baseline_probes)
+                self.passed("real_upgrade_preserves_verified_auth_without_duplicate_negative_probe")
                 await self.extended_message_and_operations(alice)
                 await self.bot.chat(ALICE, "/new")
                 answer = await self.bot.chat(ALICE, "Which tea do I prefer, and what is my notebook code? Answer briefly.")

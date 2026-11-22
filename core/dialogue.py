@@ -1,6 +1,7 @@
 """Read final assistant text from bounded, persisted conversation history."""
 
 import json
+import re
 
 from .identity import sha256
 
@@ -91,25 +92,39 @@ def plain_text(row):
     return text
 
 
-def user_matches(row, user_text):
+def user_matches(row, user_text, media_types=()):
     user_text = user_text.strip()
     if plain_text(row) == user_text:
         return True
     if not isinstance(row, dict) or row.get("role") != "user":
         return False
     content = row.get("content")
-    if not isinstance(content, list) or len(content) < 2:
+    if not isinstance(content, list) or not content:
         return False
     if row.get("_no_save") or row.get("tool_calls") or row.get("function_call"):
         return False
-    if content[0] != {"type": "text", "text": user_text}:
-        return False
-    # AstrBot keeps the original prompt in the first block and appends reminders.
-    for part in content[1:]:
-        if not isinstance(part, dict) or part.get("type") != "text" or part.get("_no_save"):
+    texts = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("_no_save"):
+            return False
+        if part.get("type") in {"image_url", "input_audio", "audio", "video_url", "file"}:
+            continue
+        if part.get("type") != "text":
             return False
         text = part.get("text")
-        if not isinstance(text, str) or not text.startswith("<system_reminder>") or not text.endswith("</system_reminder>"):
+        if not isinstance(text, str):
+            return False
+        if not texts and text.strip() == user_text:
+            texts.append(text)
+            continue
+        if set(media_types) & {"image", "mface", "sticker"} and (
+            text == "[Image]" or re.fullmatch(r"\[Image Attachment: original path [^\r\n<>]+; not included in this request\]", text)
+        ):
+            continue
+        if not text.startswith("<system_reminder>"):
+            texts.append(text)
+            continue
+        if not text.endswith("</system_reminder>"):
             return False
         lines = text[len("<system_reminder>"):-len("</system_reminder>")].splitlines()
         if not lines or any(
@@ -118,10 +133,10 @@ def user_matches(row, user_text):
             for line in lines
         ):
             return False
-    return True
+    return "".join(texts).strip() == user_text
 
 
-def final_reply(rows, user_text):
+def final_reply(rows, user_text, media_types=()):
     """Only the last persisted user turn can establish an unambiguous anchor."""
     rows = [
         row
@@ -133,7 +148,7 @@ def final_reply(rows, user_text):
         for index, row in enumerate(rows)
         if isinstance(row, dict) and row.get("role") == "user"
     ]
-    if not users or not user_matches(rows[users[-1]], user_text):
+    if not users or not user_matches(rows[users[-1]], user_text, media_types):
         return None
     tail = rows[users[-1] + 1 :]
     if not tail or not isinstance(tail[-1], dict):

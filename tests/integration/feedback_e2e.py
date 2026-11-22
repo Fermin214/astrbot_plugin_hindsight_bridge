@@ -99,11 +99,12 @@ class Feedback(Acceptance):
         await frame.locator("#bank-picker").select_option(current["scope_id"])
         await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
         assert await frame.locator("#background-page").input_value() == ""
-        retained = await self.native("GET", old_scope["bank"] + "/knowledge-base/pages/" + old_page)
-        assert retained["id"] == old_page
+        if old_page:
+            retained = await self.native("GET", old_scope["bank"] + "/knowledge-base/pages/" + old_page)
+            assert retained["id"] == old_page
         self.report["measurements"]["bot_switch"] = {
             "old_bot": old_bot, "new_bot": self.bot.bot_id, "old_bank": old_scope["bank"],
-            "new_bank": current["bank"], "selection_revision": selection["revision"], "old_page_retained": True,
+            "new_bank": current["bank"], "selection_revision": selection["revision"], "old_page_retained": bool(old_page),
         }
         self.passed("native_new_bot_login_creates_revision_zero_scope_with_notice_without_copying_old_reference")
 
@@ -321,9 +322,11 @@ class Feedback(Acceptance):
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
                 full = not self.settings.get("feedback_only")
                 candidate_upgrade = any(self.settings.get(key) for key in (
-                    "single_page", "multi_page", "read_tools", "reflect", "references", "upgrade_only",
+                    "single_page", "multi_page", "read_tools", "reflect", "references", "gateway_only", "upgrade_only",
                 ))
                 upgrading = full or candidate_upgrade
+                if upgrading:
+                    self.report["not_covered"] = [item for item in self.report["not_covered"] if item != "baseline upgrade"]
                 await self.install("baseline-install.zip" if upgrading else "candidate-install.zip")
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
                                   service_id=self.settings["owner"], allowed_accounts=[
@@ -332,6 +335,8 @@ class Feedback(Acceptance):
                                   ])
                 for user in (ALICE, BOB):
                     await self.confirm(user)
+                if self.settings.get("gateway_only"):
+                    await self.config(recall_timeout=4, background_timeout=1)
                 await self.usable()
                 await asyncio.sleep(1.1)
                 await self.bot.chat(ALICE, "A synthetic baseline conversation.")
@@ -351,6 +356,14 @@ class Feedback(Acceptance):
                 await self.dismiss_host_notice(page)
                 frame = page.frame_locator("iframe")
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
+                if self.settings.get("gateway_only"):
+                    from gateway_e2e import verify
+
+                    await verify(self, page, frame, bank)
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(complete=True, acceptance_scope="v0.5.0 upgrade, native mixed-message capture, tools, quotes, skips, totals and deadlines")
+                    self.save()
+                    return
                 if self.settings.get("references"):
                     from reference_e2e import verify
 

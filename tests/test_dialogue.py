@@ -79,7 +79,6 @@ class HistoryBoundaries(unittest.TestCase):
         self.assertIsNone(final_reply(rows, source + "条"))
         self.assertEqual(json.dumps(rows, ensure_ascii=False), before)
         for extra in (
-            {"type": "image_url", "image_url": {"url": "local"}},
             {"type": "text", "text": "其他插件改写的提示"},
             {"type": "text", "text": "<system_reminder>其他提示</system_reminder>"},
         ):

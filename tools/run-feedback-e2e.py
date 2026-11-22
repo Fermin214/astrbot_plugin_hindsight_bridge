@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--baseline-revision", help="commit or tag matching the baseline version")
     parser.add_argument("--tool-schema-mode", choices=("full", "skills_like"), default="full")
     parser.add_argument("--scope", choices=("full", "feedback", "view", "recovery", "single-page", "multi-page", "assistant-capture",
-                                          "multi-page-recovery", "read-tools", "reflect", "parameters", "references", "upgrade"), default="full")
+                                          "multi-page-recovery", "read-tools", "reflect", "parameters", "references", "gateway", "upgrade"), default="full")
     args = parser.parse_args()
     args.magpie_url = "http://127.0.0.1:3425/v1"
     args.chat_model = "compatibility-fixture"
@@ -49,6 +49,8 @@ def main():
         state.settings["references"] = args.scope == "references"
         state.settings["reflect"] = args.scope == "reflect"
         state.settings["upgrade_only"] = args.scope == "upgrade"
+        state.settings["gateway_only"] = args.scope == "gateway"
+        state.settings["verification_control_directory"] = "/delivery/control-volume"
         state.settings["tool_schema_mode"] = args.tool_schema_mode
         live.private_json(state.output / "live-settings.json", state.settings)
         control_volume = state.output / "control-volume"

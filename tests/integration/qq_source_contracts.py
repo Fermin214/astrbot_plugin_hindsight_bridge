@@ -1,6 +1,7 @@
 """Actual AstrBot/SDK objects with synthetic QQ payloads and mocked login I/O."""
 
 import asyncio
+import base64
 import copy
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -144,6 +145,9 @@ async def transport_upgrade_contract(fixture, directory):
             assert candidate.pop("capture_allowed") is True
             previous = asdict(incoming)
             previous.pop("capture_allowed", None)
+            for key in ("host_text", "reply_to", "media_types"):
+                if key not in previous:
+                    candidate.pop(key, None)
             assert previous == candidate
             capture = queue.capture(incoming, "transport-conversation")
             queue.release(capture.task_id)
@@ -409,17 +413,26 @@ async def main():
 
     attachment = await fixture.event(data={"attachments": [{"content_type": "image/png"}]})
     assert [type(part).__name__ for part in attachment.get_messages()] == ["At", "Plain"]
-    assert fixture.header(attachment) is None
-    passed.append("raw_attachment_rejected_when_host_omits_media_component")
+    assert fixture.header(attachment).text.endswith("[图片]")
+    assert fixture.header(attachment).host_text == attachment.message_obj.raw_message.content.strip()
+    passed.append("raw_attachment_keeps_sender_text_when_host_omits_media_component")
+    encoded = base64.b64encode(json.dumps({"text": "微笑"}, ensure_ascii=False).encode()).decode()
+    face = await fixture.event('正文<faceType=4,faceId="",ext="' + encoded + '">',
+                               data={"attachments": [{"content_type": "image/png"}]})
+    captured = fixture.header(face)
+    assert captured.text == "正文[表情:微笑][图片]"
+    assert captured.host_text == face.get_message_str() and captured.capture_allowed
+    assert fixture.header(await fixture.event("", data={"attachments": [{"content_type": "image/png"}]})) is None
+    passed.append("native_official_face_name_and_image_keep_text_while_pure_attachment_is_skipped")
 
     quote = await fixture.event(data={"message_reference": {"message_id": "quoted-id"}})
     assert [type(part).__name__ for part in quote.get_messages()] == ["Reply", "At", "Plain"]
-    assert fixture.header(quote) is None
     readonly = fixture.header(quote, allow_readonly=True)
-    assert readonly is not None and readonly.capture_allowed is False
+    assert readonly is not None and readonly.capture_allowed
+    assert readonly.reply_to == "quoted-id"
     assert readonly.text == quote.message_obj.raw_message.raw_data["content"]
-    assert fixture.header(attachment, allow_readonly=True) is None
-    passed.append("actual_host_quote_conversion_rejected")
+    assert fixture.header(attachment, allow_readonly=True).capture_allowed
+    passed.append("actual_host_quote_saves_only_new_sender_text")
 
     quote_elements = await fixture.event(data={
         "message_type": 103,
@@ -441,14 +454,15 @@ async def main():
     })
     assert [type(part).__name__ for part in quote_only_elements.get_messages()][0] == "Reply"
     readonly = fixture.header(quote_only_elements, allow_readonly=True)
-    assert readonly is not None and readonly.capture_allowed is False
+    assert readonly is not None and readonly.capture_allowed
     assert "synthetic quoted body" not in readonly.text
     assert fixture.header(quote_elements, allow_readonly=True) is None
     for sample, expected in ((attachment, "media_or_non_text"), (quote, "quoted_or_reply"),
                              (quote_elements, "quoted_or_reply"), (quote_only_elements, "quoted_or_reply")):
         reasons = []
-        assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
-                              inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+        incoming = inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
+                                  inspect=lambda bot, occurred, received, shape: reasons.append(shape()))
+        assert (incoming is None) is (sample is quote_elements)
         assert reasons == [expected]
     passed.append("native_quote_and_media_diagnostics")
 

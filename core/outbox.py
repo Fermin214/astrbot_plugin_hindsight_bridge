@@ -244,12 +244,17 @@ class Outbox:
                 task_id INTEGER PRIMARY KEY REFERENCES window(task_id) ON DELETE CASCADE,
                 digest TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS history_prompts (
+                task_id INTEGER PRIMARY KEY REFERENCES window(task_id) ON DELETE CASCADE,
+                text TEXT NOT NULL, media_types TEXT NOT NULL DEFAULT '[]'
+            );
             CREATE INDEX IF NOT EXISTS outbox_due ON outbox(connection_id,next_at);
             CREATE INDEX IF NOT EXISTS outbox_scope ON outbox(connection_id,scope_id,id);
             CREATE INDEX IF NOT EXISTS window_scope ON
                 window(connection_id,scope_id,generation,conversation_id,occurred_at);
         """)
         for table, column, declaration in (
+            ("history_prompts", "media_types", "TEXT NOT NULL DEFAULT '[]'"),
             ("scopes", "owner_id", "TEXT NOT NULL DEFAULT ''"),
             ("scopes", "principal_id", "TEXT NOT NULL DEFAULT ''"),
             ("scopes", "revision", "INTEGER NOT NULL DEFAULT 0"),
@@ -669,6 +674,12 @@ class Outbox:
             history = bounded_history(turns)
             retained_history = history if include_assistant_context else bounded_history([turn[:1] for turn in turns])
             current = Message(key, incoming.text, incoming.timestamp)
+            quote = self.db.execute(
+                "SELECT text FROM window WHERE connection_id=? AND scope_id=? AND generation=? "
+                "AND conversation_id=? AND event_key=? AND occurred_at>=?",
+                (self.connection_id, identity.id, scope["generation"], conversation_id,
+                 identity.event_key(incoming.reply_to), scope["accept_from"]),
+            ).fetchone() if incoming.reply_to else None
             payload = retain_payload(
                 identity,
                 scope["generation"],
@@ -677,6 +688,7 @@ class Outbox:
                 conversation_id,
                 str(uuid.uuid4()),
                 self.zone,
+                quote=quote["text"] if quote else "",
             )
             payload["items"][0]["metadata"].update(
                 principal_id=scope["principal_id"],
@@ -714,6 +726,7 @@ class Outbox:
                     "INSERT INTO history_baselines VALUES (?,?)",
                     (task_id, history_before),
                 )
+            self.db.execute("INSERT INTO history_prompts VALUES (?,?,?)", (task_id, incoming.host_text, canonical(incoming.media_types)))
             self.db.execute(
                 "DELETE FROM window WHERE connection_id=? AND scope_id=? AND "
                 "generation=? AND conversation_id=? AND task_id NOT IN ("
@@ -834,16 +847,18 @@ class Outbox:
         )
 
     def history_anchor(self, scope_id, conversation_id):
-        return self.db.execute(
-            "SELECT w.*,b.digest history_before,r.task_id reply_task_id "
+        row = self.db.execute(
+            "SELECT w.*,b.digest history_before,r.task_id reply_task_id,COALESCE(p.text,w.text) host_text,COALESCE(p.media_types,'[]') media_types "
             "FROM window w LEFT JOIN history_baselines b ON b.task_id=w.task_id "
             "LEFT JOIN replies r ON r.user_task_id=w.task_id "
+            "LEFT JOIN history_prompts p ON p.task_id=w.task_id "
             "JOIN scopes s ON s.connection_id=w.connection_id AND s.scope_id=w.scope_id "
             "WHERE w.connection_id=? AND w.scope_id=? AND w.conversation_id=? "
             "AND w.generation=s.generation AND w.occurred_at>=s.accept_from "
             "ORDER BY w.task_id DESC LIMIT 1",
             (self.connection_id, scope_id, conversation_id),
         ).fetchone()
+        return {**dict(row), "media_types": tuple(json.loads(row["media_types"]))} if row else None
 
     def prune_window(self, now=None):
         self.db.execute(

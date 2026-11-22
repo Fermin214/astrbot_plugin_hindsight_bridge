@@ -677,6 +677,8 @@ class HindsightClient:
         return {
             key: result.get(key)
             for key in (
+                "total_documents",
+                "total_nodes",
                 "pending_consolidation",
                 "failed_consolidation",
                 "total_observations",

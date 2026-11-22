@@ -1,11 +1,10 @@
 """Weixin ClawBot ingress through AstrBot's native adapter and raw recipient."""
 
-import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .identity import Incoming
+from .source import bound_account, identifier, private_event, valid_time as valid_message_time
 
 
 ITEM_FIELDS = frozenset({
@@ -26,13 +25,6 @@ def valid_update(value, created, finished):
         type(value) is int and type(created) is int
         and created <= value <= (time.time() + 300) * 1000
         and (finished or value == created)
-    )
-
-
-def identifier(value):
-    return (
-        isinstance(value, str) and bool(value.strip()) and value == value.strip()
-        and ":" not in value and all(ord(char) >= 32 and ord(char) != 127 for char in value)
     )
 
 
@@ -73,13 +65,7 @@ def bound_login(event, adapter, binding):
     ):
         return None
     login = native_login(adapter)
-    previous = binding.get("login")
-    if (
-        login is None or not isinstance(previous, WeixinLogin)
-        or not previous.matches(login) or binding.get("bot_id") != login.account_id
-        or event.get_platform_id() != adapter.meta().id
-        or event.get_platform_name() != "weixin_oc"
-    ):
+    if not bound_account(event, adapter, binding, login, login.account_id if login else "", login.client if login else None):
         return None
     # The event holds a mutable adapter. Its original recipient proves which
     # account received the message, even before this plugin first observes it.
@@ -105,7 +91,7 @@ def message_shape(raw, items):
 
 def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
-    if login is None or not event.is_private_chat() or event.get_group_id():
+    if login is None or not private_event(event):
         return None
     raw = event.message_obj.raw_message
     if raw.get("group_id"):
@@ -129,66 +115,59 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     valid_time = (
         type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
         and valid_update(raw.get("update_time_ms"), occurred, finished)
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
+        and valid_message_time(occurred / 1000, received)
     )
     items = raw.get("item_list")
     if inspect is not None:
         inspect(login.account_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw, items))
     if (
         not valid_time or raw.get("delete_time_ms") not in (None, 0)
-        or any(value is not None and (type(value) is not int or not 0 <= value < 2**64
-                                     or value != 0 and not allow_readonly)
+        or any(value is not None and (type(value) is not int or not 0 <= value < 2**64)
                for value in (raw.get("root_id"), raw.get("parent_id")))
     ):
         return None
     parts = event.get_messages()
     if not isinstance(items, list) or not items or len(items) > 8000 or not isinstance(parts, list):
         return None
-    texts, length = [], 0
-    quoted = bool(raw.get("root_id") or raw.get("parent_id"))
+    from .source import MEDIA_MARKERS, finish_message
+
+    texts, normalized, visible = [], [], []
+    reply_to = str(raw.get("parent_id") or raw.get("root_id") or "")
     for item in items:
         if (
             not isinstance(item, Mapping) or set(item) - (ITEM_FIELDS | NON_TEXT_FIELDS | EMPTY_LIST_FIELDS)
-            or any(item.get(name) is not None for name in NON_TEXT_FIELDS - {"ref_msg"})
-            or item.get("ref_msg") is not None and (not allow_readonly or not isinstance(item["ref_msg"], Mapping))
+            or any(item.get(name) is not None for name in {"tool_call_start_item", "tool_call_result_item"})
+            or item.get("ref_msg") is not None and not isinstance(item["ref_msg"], Mapping)
             or any(type(value) is not list or value
                    for name in EMPTY_LIST_FIELDS if (value := item.get(name)) is not None)
-            or type(item.get("type")) is not int or item["type"] != 1
+            or type(item.get("type")) is not int or item["type"] not in {1, 2, 3, 4, 5}
             or item.get("is_completed") is not None and item.get("is_completed") is not True
             or not valid_update(item.get("update_time_ms"), item.get("create_time_ms"), finished)
         ):
             return None
-        quoted = quoted or item.get("ref_msg") is not None
+        reference = item.get("ref_msg") or {}
+        referenced_id = reference.get("message_id")
+        if not reply_to and type(referenced_id) in (str, int) and str(referenced_id).isascii() and str(referenced_id).isdecimal():
+            reply_to = str(referenced_id)
+        if item["type"] != 1:
+            kind = {2: "image", 3: "voice", 4: "file", 5: "video"}[item["type"]]
+            media = item.get(kind + "_item")
+            if not isinstance(media, Mapping):
+                return None
+            normalized.append((kind, None))
+            voice_text = media.get("text") if kind == "voice" else None
+            visible.append(voice_text.strip() if isinstance(voice_text, str) and voice_text.strip() else MEDIA_MARKERS[kind])
+            continue
         text_item = item.get("text_item")
         if not isinstance(text_item, Mapping) or set(text_item) != {"text"}:
             return None
         text = text_item["text"]
         if not isinstance(text, str):
             return None
-        length += len(text)
-        if length > 8000:
-            return None
         if text.strip():
             texts.append(text.strip())
-    original = "\n".join(texts)
-    if (
-        not original or len(original) > 8000 or len(parts) != len(texts)
-        or not all(type(part) is plain_type and part.text == text for part, text in zip(parts, texts))
-    ):
-        return None
-    host_text = event.get_message_str()
-    matching = isinstance(host_text, str) and (
-        original == host_text.strip() or (
-            getattr(event, "is_at_or_wake_command", False) is True
-            and any(
-                original.startswith(prefix) and original[len(prefix):].strip() == host_text.strip()
-                for prefix in wake_prefixes if isinstance(prefix, str) and prefix
-            )
-        )
-    )
-    if not matching:
-        return None
-    return Incoming(
-        "weixin_oc", event.get_platform_id(), login.account_id, user, str(mid),
-        occurred / 1000, original, received_at=received, capture_allowed=not quoted,
-    )
+            normalized.extend([("text", "\n")] if normalized else [])
+            normalized.append(("text", text.strip()))
+            visible.append(text.strip())
+    return finish_message(event, plain_type, wake_prefixes, "weixin_oc", login.account_id, user,
+                          occurred / 1000, normalized, texts, visible_text="\n".join(visible), reply_to=reply_to)

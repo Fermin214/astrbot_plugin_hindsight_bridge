@@ -2,7 +2,6 @@ export function createMemories(view) {
   function referenceValues() {
     return { prompt: view.$("reference-prompt").value, exclude_assistant: view.$("reference-exclude").checked,
       capture_assistant: view.$("reference-capture-assistant").checked, recall_budget: view.$("reference-budget").value,
-      recall_on_quoted_or_link: view.$("reference-quoted").checked,
       types: ["world", "experience", "observation"].filter((type) => view.$("reference-" + type).checked),
       detail_limit: view.$("reference-limit").valueAsNumber, history_limit: view.$("reference-history").valueAsNumber };
   }
@@ -104,10 +103,11 @@ export function createMemories(view) {
   }
 
   function recallDescription(recall) {
-    if (!recall) return "尚未检索";
-    const labels = { success: "成功", empty: "无相关结果", error: "失败", skipped: "已跳过", on_demand: "按需读取" };
+    if (!recall) return "暂无记录";
+    const labels = { success: "成功交付细节", empty: "无相关结果", error: "读取失败", skipped: "已跳过",
+      on_demand: "按需工具未调用", background_only: "仅使用知识页", unavailable: "使用记录不可用" };
     const label = recall.outcome === "error" && recall.code?.includes("timeout") ? "超时" : labels[recall.outcome] || "结果未知";
-    let result = `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}`;
+    let result = recall.last_at ? `${new Date(recall.last_at * 1000).toLocaleString()} · ${label}` : label;
     if (recall.error_message) result += `：${recall.error_message}`;
     return result;
   }
@@ -145,6 +145,12 @@ export function createMemories(view) {
     view.$("bank-state").hidden = !view.$("bank-state").textContent;
     const counts = summary.counts || {};
     view.$("saved-count").textContent = Number.isSafeInteger(summary.saved_count) && summary.saved_count >= 0 ? summary.saved_count : !scope || scope.pending ? "待开通" : "暂不可用";
+    const totals = summary.bank_total;
+    view.$("bank-total").hidden = !totals;
+    view.$("bank-total").textContent = totals ? `记忆库总计：${totals.documents} 文档 · ${totals.memories} 条记忆` : "";
+    view.$("skip-warning").hidden = !summary.skip_warning;
+    view.$("skip-warning-message").textContent = summary.skip_warning
+      ? `连续 ${summary.skip_warning.count} 条私聊未保存：${summary.skip_warning.message}` : "";
     view.$("pending-count").textContent = ["ready", "submitting", "unknown", "tracking", "deferred", "reconcile_required", "held", "cancel_requested"].reduce((sum, key) => sum + (Number(counts[key]) || 0), 0);
     view.$("failed-count").textContent = (Number(counts.failed) || 0) + (Number(counts.dead) || 0);
     view.$("failed-count").classList.toggle("is-error", Number(view.$("failed-count").textContent) > 0);
@@ -234,7 +240,6 @@ export function createMemories(view) {
       for (const type of ["world", "experience", "observation"]) view.$("reference-" + type).checked = saved.types.includes(type);
       view.$("reference-exclude").checked = saved.exclude_assistant;
       view.$("reference-capture-assistant").checked = saved.capture_assistant ?? true;
-      view.$("reference-quoted").checked = saved.recall_on_quoted_or_link ?? false;
       view.$("reference-budget").value = saved.recall_budget ?? "mid";
       view.$("reference-limit").value = saved.detail_limit;
       view.$("reference-history").value = saved.history_limit;
@@ -293,12 +298,14 @@ export function createMemories(view) {
   }
 
   function activateUsageTab(name, focus = false) {
-    for (const kind of ["content", "text", "json"]) {
+    for (const kind of ["content", "text", "json", "skips"]) {
       const tab = view.$(`usage-tab-${kind}`);
       const selected = kind === name;
       tab.setAttribute("aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;
       view.$(`usage-panel-${kind}`).hidden = !selected;
+      view.$(`usage-panel-${kind}`).tabIndex = selected ? 0 : -1;
+      if (selected) tab.scrollIntoView?.({ block: "nearest", inline: "nearest", container: "nearest" });
       if (selected && focus) tab.focus();
     }
   }
@@ -307,11 +314,12 @@ export function createMemories(view) {
     view.usageReadRevision++;
     view.clearUsageDetail();
     view.$("usage-turn").replaceChildren();
+    view.renderSkips([]);
     view.activateUsageTab("content");
     if (view.$("usage-dialog").open) view.$("usage-dialog").close();
   }
 
-  async function openUsage() {
+  async function openUsage(tab = "content") {
     const draft = view.referenceDraft;
     if (!draft) return;
     const revision = ++view.usageReadRevision;
@@ -319,11 +327,16 @@ export function createMemories(view) {
     view.$("usage-picker").hidden = true;
     view.$("usage-turn").replaceChildren();
     view.$("usage-dialog").showModal();
+    view.activateUsageTab(tab);
     view.notify("正在读取使用记录…", false, "usage-feedback");
     try {
-      const { turns } = await view.bridge.apiGet(view.endpoint("usage", draft.id));
+      const { turns, skips = [] } = await view.bridge.apiGet(view.endpoint("usage", draft.id));
       if (revision !== view.usageReadRevision || view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
-      if (!turns.length) { view.notify("暂无使用记录。", false, "usage-feedback"); return; }
+      view.renderSkips(skips);
+      if (!turns.length) {
+        view.$("usage-deliveries").append(view.el("p", "hint", "暂无使用记录。"));
+        view.clearFeedback("usage-feedback");
+      }
       view.$("usage-turn").replaceChildren(...turns.map((turn) => {
         const summary = turn.summary || {};
         const labels = [new Date(turn.created_at * 1000).toLocaleString("zh-CN", { year: "numeric", month: "2-digit",
@@ -334,11 +347,41 @@ export function createMemories(view) {
         if (summary.status === "error") labels.push("读取失败");
         return view.option(turn.id, labels.join(" · "));
       }));
-      view.$("usage-picker").hidden = false;
-      await view.loadUsageTurn();
+      view.$("usage-picker").hidden = !turns.length;
+      if (turns.length) await view.loadUsageTurn();
     } catch (error) {
       if (revision === view.usageReadRevision && view.$("usage-dialog").open) view.notify(view.errorMessage(error), true, "usage-feedback");
     }
+  }
+
+  function renderSkips(skips) {
+    const reasons = { media_or_non_text: "媒体消息中没有可保存的文字", command_prefix: "命令或排除前缀",
+      before_accept_from: "消息早于开通或恢复时间", unsupported_message: "不支持的消息格式",
+      quoted_or_reply: "引用中没有可保存的新文字", bot_not_confirmed: "机器人身份未确认" };
+    const media = { image: "图片", mface: "表情包", sticker: "表情包", voice: "语音", record: "语音",
+      audio: "语音", file: "文件", video: "视频" };
+    view.$("usage-skips").replaceChildren(...skips.map((skip) => {
+      const item = view.el("article", "usage-card");
+      item.append(view.el("p", "usage-meta", new Date(skip.at * 1000).toLocaleString("zh-CN")));
+      item.append(view.el("p", "", reasons[skip.code] || "不支持的消息格式"));
+      if (skip.media_types?.length) item.append(view.el("p", "hint", skip.media_types.map((kind) => media[kind]).filter(Boolean).join(" · ")));
+      return item;
+    }));
+    if (!skips.length) view.$("usage-skips").append(view.el("p", "hint", "暂无跳过记录。"));
+    view.$("usage-clear-skips").disabled = !skips.length;
+  }
+
+  async function clearSkips() {
+    const draft = view.referenceDraft;
+    if (!draft) return;
+    await view.perform(view.$("usage-clear-skips"), "memory", async () => {
+      const response = await view.bridge.apiPost(view.endpoint("skips", draft.id), {
+        scope_revision: draft.scopeRevision, config_revision: draft.configRevision,
+      });
+      if (view.referenceDraft !== draft || !view.$("usage-dialog").open) return;
+      view.renderSkips(response.skips);
+      await view.refreshBootstrap();
+    }, "usage-feedback");
   }
 
   async function loadUsageTurn() {
@@ -807,5 +850,5 @@ export function createMemories(view) {
     });
   }
 
-  return { activateUsageTab, referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
+  return { renderSkips, clearSkips, activateUsageTab, referenceValues, readingValues, reflectValues, backgroundValues, editReading, editReflect, editReferences, refreshAccountPlatforms, updateAccountHint, addAccount, accountKey, accountScopes, updateUserChoices, scopeName, recallDescription, renderScope, clearReferenceDraft, renderReferences, loadReferences, countPrompt, saveReferences, clearUsageDetail, resetUsage, openUsage, loadUsageTurn, usageDelivery, renderReading, saveReading, renderReflect, saveReflect, backgroundSnapshot, backgroundPages, renderBackground, loadBackground, toggleBackground, changeBackground, saveBackground, pendingScopeHelp, selectScope, endpoint, requestAuthorization, prepareAuthorization, confirmAuthorization, saveAccounts, submitAccount, requestAccountRemoval, confirmAccountRemoval, setMode };
 }

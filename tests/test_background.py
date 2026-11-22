@@ -435,7 +435,7 @@ class ContextComposition(unittest.TestCase):
 
     def test_new_defaults_and_invalid_page_settings(self):
         self.assertEqual(context_limits({}), {
-            "tokens": 1200, "chars": 4000, "page_tokens": 400, "page_timeout": 1,
+            "tokens": 1200, "chars": 4000, "page_tokens": 400, "page_timeout": 3,
         })
         for key, values in (
             ("background_max_tokens", (None, True, 63, 8193, 400.0, "400")),

@@ -1,18 +1,11 @@
 """Feishu ingress through AstrBot's native Lark event and API client."""
 
 import json
-import math
+import re
 import time
 from dataclasses import dataclass
 
-from .identity import Incoming
-
-
-def identifier(value):
-    return (
-        isinstance(value, str) and bool(value) and value == value.strip()
-        and ":" not in value and all(ord(char) >= 32 and ord(char) != 127 for char in value)
-    )
+from .source import bound_account, identifier, private_event, valid_time as valid_message_time
 
 
 def milliseconds(value):
@@ -76,16 +69,8 @@ def bound_login(event, adapter, binding):
     ):
         return None
     login = native_login(adapter)
-    previous = binding.get("login")
-    if (
-        login is None or not isinstance(previous, LarkLogin) or not previous.matches(login)
-        or binding.get("bot_id") != login.bot_id
-        or binding.get("client") is not login.client
-        or getattr(event, "bot", None) is not login.api
-        or event.get_platform_id() != adapter.meta().id
-        or event.get_platform_name() != "lark"
-        or event.get_self_id() != login.open_id
-    ):
+    if (not bound_account(event, adapter, binding, login, login.bot_id if login else "", getattr(event, "bot", None),
+                          login.api if login else None) or event.get_self_id() != login.open_id):
         return None
     return login
 
@@ -105,7 +90,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     login = bound_login(event, adapter, binding)
     if (
         login is None or type(event) is not LarkMessageEvent
-        or not event.is_private_chat() or event.get_group_id()
+        or not private_event(event)
     ):
         return None
     raw = getattr(event.message_obj, "raw_message", None)
@@ -124,15 +109,15 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     valid_time = (
         type(occurred) is int and 1_000_000_000_000 <= occurred <= (time.time() + 300) * 1000
         and (raw.update_time is None or updated in (0, occurred))
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
+        and valid_message_time(occurred / 1000, received)
     )
     if inspect is not None:
         inspect(login.bot_id, occurred / 1000 if valid_time else None, received, lambda: message_shape(raw))
     if (
-        not valid_time or raw.message_type != "text"
-        or any(value and (not allow_readonly or not identifier(value)) for value in (raw.parent_id, raw.root_id))
-        or getattr(raw, "thread_id", None)
-        or raw.mentions or getattr(raw, "lark_agent_context", None) is not None
+        not valid_time or raw.message_type not in {"text", "post", "image", "audio", "file", "media"}
+        or any(value and not identifier(value) for value in (raw.parent_id, raw.root_id))
+        or getattr(raw, "thread_id", None) and not identifier(raw.thread_id)
+        or getattr(raw, "lark_agent_context", None) is not None
         or not isinstance(raw.content, str) or len(raw.content) > 64_000
     ):
         return None
@@ -140,34 +125,92 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
         content = json.loads(raw.content)
     except (ValueError, RecursionError):
         return None
-    if not isinstance(content, dict) or set(content) != {"text"}:
+    if not isinstance(content, dict):
         return None
-    original = content["text"]
-    if not isinstance(original, str) or not original.strip() or len(original) > 8000:
-        return None
-    parts, host_text = event.get_messages(), event.get_message_str()
-    if allow_readonly and raw.parent_id and isinstance(parts, list) and parts:
-        from astrbot.api.message_components import Reply
+    from .source import finish_message
 
-        if type(parts[0]) is Reply and parts[0].id == raw.parent_id:
-            parts = parts[1:]
-    if (
-        not isinstance(parts, list) or len(parts) != 1
-        or type(parts[0]) is not plain_type or parts[0].text != original.strip()
-        or not isinstance(host_text, str)
-    ):
+    mentions = {}
+    for mention in raw.mentions or ():
+        key = getattr(mention, "key", None)
+        identity = getattr(getattr(mention, "id", None), "open_id", None)
+        name = getattr(mention, "name", None)
+        if not identifier(key) or not identifier(identity) or not isinstance(name, str):
+            return None
+        mentions[key] = (identity, name)
+    normalized, texts, expected_mentions = [], [], []
+    if raw.message_type == "text":
+        if set(content) != {"text"} or not isinstance(content["text"], str):
+            return None
+        for text in re.split(r"(@_user_\d+)", content["text"]):
+            if text in mentions:
+                identity, name = mentions[text]
+                expected_mentions.append((identity, name))
+                normalized.append(("text", "@" + (name or identity)))
+            elif text.strip():
+                texts.append(text.strip())
+                normalized.append(("text", text))
+    elif raw.message_type == "post":
+        title, paragraphs = content.get("title", ""), content.get("content", [])
+        if not isinstance(title, str) or not isinstance(paragraphs, list):
+            return None
+        elements = [{"tag": "text", "text": title}] if title else []
+        for index, paragraph in enumerate(paragraphs):
+            if index or title:
+                elements.append({"tag": "text", "text": "\n"})
+            if isinstance(paragraph, list):
+                elements.extend(paragraph)
+            elif isinstance(paragraph, dict):
+                elements.append(paragraph)
+            else:
+                return None
+        for element in elements:
+            if not isinstance(element, dict):
+                return None
+            kind = element.get("tag")
+            if kind in {"text", "a"}:
+                text = element.get("text", "")
+                if not isinstance(text, str):
+                    return None
+                if kind == "a" and element.get("href"):
+                    if not isinstance(element["href"], str):
+                        return None
+                    text += "(" + element["href"].strip() + ")"
+                if text:
+                    texts.append(text)
+                    normalized.append(("text", text))
+            elif kind in {"img", "media"}:
+                normalized.append(("image" if kind == "img" else "video", None))
+            elif kind == "at" and element.get("user_id") in mentions:
+                identity, name = mentions[element["user_id"]]
+                expected_mentions.append((identity, name))
+                normalized.append(("text", "@" + (name or identity)))
+            else:
+                return None
+    else:
+        normalized.append(({"image": "image", "audio": "audio", "file": "file", "media": "video"}[raw.message_type], None))
+    parts = event.get_messages()
+    if not isinstance(parts, list) or [(part.qq, part.name) for part in parts if type(part).__name__ == "At"] != expected_mentions:
         return None
-    matching = original.strip() == host_text.strip() or (
-        getattr(event, "is_at_or_wake_command", False) is True
-        and any(
-            original.strip().startswith(prefix)
-            and original.strip()[len(prefix):].strip() == host_text.strip()
-            for prefix in wake_prefixes if isinstance(prefix, str) and prefix
-        )
-    )
-    if not matching:
-        return None
-    return Incoming(
-        "lark", event.get_platform_id(), login.bot_id, user, mid,
-        occurred / 1000, original, received_at=received, capture_allowed=not bool(raw.parent_id or raw.root_id),
-    )
+    visible, leading = [], True
+    for part in parts:
+        kind = type(part).__name__
+        if kind == "Reply":
+            continue
+        if leading and kind == "At" and part.qq == login.open_id:
+            leading = False
+            continue
+        if kind == "At":
+            visible.append("@" + (part.name or str(part.qq)))
+        elif type(part) is plain_type:
+            text = part.text if raw.message_type == "post" else part.text.strip()
+            if text:
+                visible.append(text)
+        elif kind in {"Image", "Record", "Video", "File"}:
+            visible.append({"Image": "[image]", "Record": "[audio]", "Video": "[video]",
+                            "File": getattr(part, "name", "") or "[file]"}[kind])
+        if kind != "Plain" or part.text.strip():
+            leading = False
+    return finish_message(event, plain_type, wake_prefixes, "lark", login.bot_id, user,
+                          occurred / 1000, normalized, texts,
+                          visible_text=("" if raw.message_type == "post" else " ").join(visible),
+                          reply_to=raw.parent_id or raw.root_id or "")

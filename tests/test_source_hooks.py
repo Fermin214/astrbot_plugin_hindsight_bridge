@@ -112,7 +112,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         old_event = self.event()
         old_event.message_obj.raw_message["message"].append({"type": "reply", "data": {}})
         self.plugin.record_skip(old_event, queue)
-        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "quoted_or_reply")
+        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "unsupported_message")
 
         self.bot.get_login_info.return_value = {"user_id": 1002}
         await self.plugin.prepare_sources()

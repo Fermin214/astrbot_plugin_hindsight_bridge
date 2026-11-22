@@ -298,6 +298,8 @@ export function createApp(view) {
     void view.refreshBootstrap().catch((error) => view.notify(view.errorMessage(error), true, "reference-feedback"));
   });
   view.$("usage-open").addEventListener("click", () => void view.openUsage());
+  view.$("skip-warning-open").addEventListener("click", () => void view.openUsage("skips"));
+  view.$("usage-clear-skips").addEventListener("click", () => void view.clearSkips());
   view.$("usage-turn").addEventListener("change", () => void view.loadUsageTurn());
   view.$("usage-dialog").addEventListener("close", () => { if (!view.$("usage-dialog").open) view.resetUsage(); });
   view.$("usage-copy-json").addEventListener("click", () => {
@@ -306,7 +308,7 @@ export function createApp(view) {
   });
   view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback", view.usageText)
     .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
-  const usageTabs = ["content", "text", "json"];
+  const usageTabs = ["content", "text", "json", "skips"];
   usageTabs.forEach((name, index) => {
     const tab = view.$(`usage-tab-${name}`);
     tab.addEventListener("click", () => view.activateUsageTab(name));

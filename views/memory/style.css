@@ -273,6 +273,10 @@ dialog p + p { margin-top: 14px; }
 #usage-dialog { width: min(760px, calc(100% - 32px)); }
 .usage-tabs { gap: 22px; margin-top: 18px; overflow-x: auto; flex-wrap: nowrap; }
 .usage-tabs button { flex: 0 0 auto; white-space: nowrap; }
+#bank-total { display: block; color: var(--muted); font-size: 12px; }
+#bank-total[hidden] { display: none; }
+#skip-warning { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+#skip-warning[hidden] { display: none; }
 .usage-delivery { margin-top: 16px; }
 .usage-card { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-subtle); }
 .usage-card-header { display: flex; justify-content: space-between; align-items: start; gap: 12px; }

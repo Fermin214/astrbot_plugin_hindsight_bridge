@@ -105,7 +105,8 @@ def save_options(queue, scope, *, revision, mode):
 
 def incoming_digest(incoming, deployment):
     return sha256(canonical([
-        incoming.scope(deployment).id, incoming.message_id, incoming.timestamp, sha256(incoming.text),
+        incoming.scope(deployment).id, incoming.message_id, incoming.timestamp,
+        incoming.text, incoming.host_text, incoming.reply_to, incoming.media_types,
     ]))
 
 

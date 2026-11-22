@@ -39,7 +39,7 @@ window.fixtureParameters = {
   deployment: {service_id: 'fixture-service', agent_id: 'fixture-agent'}
 };
 const fixtureSelection = () => ({revision: 0, prompt: '记忆提示', types: ['world', 'experience', 'observation'],
-  exclude_assistant: false, capture_assistant: true, recall_on_quoted_or_link: false,
+  exclude_assistant: false, capture_assistant: true,
   recall_budget: 'mid', detail_limit: 12, history_limit: 30});
 window.fixtureScope = {
   scope_id: 'one', bank: 'abm-v1-fixture-g0', platform_instance_id: 'qq', user_id: 'ExampleUserIdentifier0123456789AB',
@@ -52,6 +52,7 @@ window.fixtureScope = {
 window.fixtureOther = {
   ...structuredClone(window.fixtureScope), scope_id: 'two', bank: 'abm-v1-other-g0', user_id: 'OtherUser', owner_id: 'other-owner'
 };
+window.fixtureSkips = {one: [], two: []};
 window.fixtureReferences = {one: fixtureSelection(), two: fixtureSelection()};
 window.fixturePages = {
   one: [{page_id: 'kp-fixture', mental_model_id: 'mm-fixture', path: 'Folder / <script>not HTML</script>', index_stale: false},
@@ -123,7 +124,8 @@ window.AstrBotPluginView = {
     if (kind === 'references') return {selection: structuredClone(window.fixtureReferences[id]),
       scope_revision: scope.revision, config_revision: window.fixtureConfigRevision,
       prompt_tokens: window.fixtureReferences[id].prompt.length, prompt_limit: 1024};
-    if (kind === 'usage') return {turns: structuredClone(window.fixtureUsage[id]).map(({deliveries, ...turn}) => turn)};
+    if (kind === 'usage') return {turns: structuredClone(window.fixtureUsage[id]).map(({deliveries, ...turn}) => turn),
+      skips: structuredClone(window.fixtureSkips[id])};
     if (kind.startsWith('usage/')) return {turn: structuredClone(window.fixtureUsage[id].find(turn => turn.id === kind.slice(6)))};
     throw new Error('Unexpected GET: ' + route);
   },
@@ -141,6 +143,11 @@ window.AstrBotPluginView = {
     }
     const {id, kind, scope} = fixtureScopeFor(route);
     if (payload.scope_revision !== scope.revision) throw new Error('Stale scope');
+    if (kind === 'skips') {
+      window.fixtureSkips[id] = [];
+      if (scope.summary) delete scope.summary.skip_warning;
+      return {skips: []};
+    }
     if (kind === 'references') {
       if (payload.revision !== scope.reference_revision) throw new Error('Stale references');
       window.fixtureReferences[id] = {...payload, revision: payload.revision + 1};
@@ -221,7 +228,7 @@ async def five_cards(page, checks, name):
     await page.locator("#reading-mode").select_option("automatic")
     await dirty_state(page, "reading-save", False)
 
-    for field in ("reference-world", "reference-exclude", "reference-capture-assistant", "reference-quoted"):
+    for field in ("reference-world", "reference-exclude", "reference-capture-assistant"):
         checked = await page.locator("#" + field).is_checked()
         await page.locator("#" + field).set_checked(not checked)
         await dirty_state(page, "reference-save", True)
@@ -462,12 +469,38 @@ async def usage_tabs(page, checks, name, size):
     await saved_feedback(page, "reference-save", "reference-feedback")
     assert await page.evaluate("window.fixtureUsage.one.length") == 0
     await page.locator("#usage-open").click()
-    await page.locator("#usage-feedback").filter(has_text="暂无使用记录").wait_for()
+    await page.locator("#usage-deliveries").filter(has_text="暂无使用记录").wait_for()
     assert not await page.locator("#usage-picker").is_visible()
     assert await page.locator("#usage-json").input_value() == ""
     assert await page.locator("#usage-text").input_value() == ""
     await page.locator('#usage-dialog [data-close="usage-dialog"]').click()
-    checks.append(name + "_usage_three_horizontal_tabs_exact_text_json_and_frozen_legacy_snapshots")
+    await page.locator("#reference-history").fill("30")
+    await saved_feedback(page, "reference-save", "reference-feedback")
+    await page.evaluate("""() => {
+      window.fixtureSkips.one = Array.from({length: 5}, (_, index) => ({at: 1795295100 + index,
+        code: 'media_or_non_text', media_types: ['image']}));
+      window.fixtureScope.summary = {counts: {}, skip_warning: {count: 5, code: 'media_or_non_text',
+        message: '媒体消息中没有可保存的文字'}};
+    }""")
+    await page.clock.run_for(5500)
+    await page.locator("#skip-warning-open").wait_for()
+    await page.locator("#skip-warning-open").click()
+    await page.locator("#usage-tab-skips[aria-selected=true]").wait_for()
+    assert await page.locator("#usage-skips .usage-card").count() == 5
+    assert not await page.locator("#usage-picker").is_visible()
+    await page.locator("#usage-tab-skips").focus()
+    await page.keyboard.press("Home")
+    assert await page.locator("#usage-tab-content").get_attribute("aria-selected") == "true"
+    await page.keyboard.press("End")
+    assert await page.locator("#usage-tab-skips").get_attribute("aria-selected") == "true"
+    assert await page.locator("#usage-dialog").evaluate("node => node.scrollWidth <= node.clientWidth"), name
+    await page.screenshot(path=str(OUTPUT / ("usage-skips-" + name + ".png")))
+    await page.locator("#usage-clear-skips").click()
+    await page.locator("#usage-skips").filter(has_text="暂无跳过记录").wait_for()
+    await page.locator('#usage-dialog [data-close="usage-dialog"]').click()
+    await page.clock.run_for(5500)
+    assert not await page.locator("#skip-warning").is_visible()
+    checks.append(name + "_usage_four_horizontal_tabs_exact_snapshots_zero_turn_skips_keyboard_and_warning_clear")
 
 
 async def main(port):

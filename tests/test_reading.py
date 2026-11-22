@@ -249,8 +249,8 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
         request.prompt = "source"
         scope = self.scope()
         if readonly:
-            self.incoming = replace(self.incoming, capture_allowed=False)
-            self.plugin.incoming[event] = self.incoming
+            self.plugin.outbox.set_mode(scope["scope_id"], "readonly")
+            scope = self.scope()
             save_reference_options(self.plugin.outbox, scope, **{
                 **reference_options(self.plugin.outbox, scope), "recall_on_quoted_or_link": True,
             })
@@ -271,7 +271,7 @@ class ToolBoundaries(unittest.IsolatedAsyncioTestCase):
     async def test_readonly_tools_cannot_read_after_bot_identity_changes(self):
         event, context = await self.ready(readonly=True)
         queue = self.plugin.outbox
-        self.assertFalse(self.incoming.capture_allowed)
+        self.assertTrue(self.incoming.capture_allowed)
         queue.access.observe_bot("qq", "aiocqhttp", "another-bot")
         with patch.object(self.tools, "read", AsyncMock()) as read:
             self.assertIn("reading_changed", await self.tools.execute(context, "recall", {"query": "q"}))

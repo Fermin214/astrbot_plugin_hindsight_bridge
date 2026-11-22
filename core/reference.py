@@ -61,15 +61,13 @@ def _valid_history_limit(limit):
     return type(limit) is int and 0 <= limit <= HISTORY_LIMIT_MAX
 
 
-def _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant,
-              recall_on_quoted_or_link):
+def _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant):
     if (
         not isinstance(prompt, str) or not isinstance(types, list) or len(types) > len(REFERENCE_TYPES)
         or any(kind not in REFERENCE_TYPES for kind in types) or len(set(types)) != len(types)
         or type(exclude_assistant) is not bool or type(detail_limit) is not int
         or not 0 <= detail_limit <= DETAIL_LIMIT_MAX or not _valid_history_limit(history_limit)
         or recall_budget not in RECALL_BUDGETS or type(capture_assistant) is not bool
-        or type(recall_on_quoted_or_link) is not bool
     ):
         raise QueueError("reference_settings_invalid")
 
@@ -81,7 +79,6 @@ def _options(stored):
         "history_limit": stored.get("history_limit", 30),
         "recall_budget": stored.get("recall_budget", "mid"),
         "capture_assistant": stored.get("capture_assistant", True),
-        "recall_on_quoted_or_link": stored.get("recall_on_quoted_or_link", False),
     }
     _validate(**result)
     return {"revision": stored["revision"], **result}
@@ -113,17 +110,13 @@ def save_reference_options(queue, scope, *, revision, prompt, types, exclude_ass
             recall_budget = previous["recall_budget"]
         if capture_assistant is UNSET:
             capture_assistant = previous["capture_assistant"]
-        if recall_on_quoted_or_link is UNSET:
-            recall_on_quoted_or_link = previous["recall_on_quoted_or_link"]
-        _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant,
-                  recall_on_quoted_or_link)
+        _validate(prompt, types, exclude_assistant, detail_limit, history_limit, recall_budget, capture_assistant)
         if token_count(prompt) > PROMPT_TOKEN_LIMIT:
             raise QueueError("reference_prompt_too_long")
         options = {
             "revision": revision + 1, "prompt": prompt, "types": types, "exclude_assistant": exclude_assistant,
             "detail_limit": detail_limit, "history_limit": history_limit,
             "recall_budget": recall_budget, "capture_assistant": capture_assistant,
-            "recall_on_quoted_or_link": recall_on_quoted_or_link,
         }
         control.db.execute(
             "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -171,6 +164,16 @@ class ReferenceHistory:
                         turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE, payload TEXT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS reference_turn ON deliveries(turn_id);
+                    CREATE TABLE IF NOT EXISTS skips(
+                        binding TEXT NOT NULL, event_key TEXT NOT NULL, created_at REAL NOT NULL,
+                        code TEXT NOT NULL, media TEXT NOT NULL,
+                        PRIMARY KEY(binding,event_key)
+                    );
+                    CREATE INDEX IF NOT EXISTS skip_time ON skips(binding,created_at DESC);
+                    CREATE TABLE IF NOT EXISTS skip_seen(
+                        binding TEXT NOT NULL, event_key TEXT NOT NULL,
+                        PRIMARY KEY(binding,event_key)
+                    );
                 """)
                 if os.name != "nt":
                     os.chmod(self.path, 0o600)
@@ -232,6 +235,10 @@ class ReferenceHistory:
                         limit = limits.get(binding, 30) if binding in bindings else 0
                         if limit is not None and count > limit:
                             self._trim(database, binding, limit)
+                    for row in database.execute("SELECT binding FROM skip_seen UNION SELECT binding FROM skips").fetchall():
+                        binding = row["binding"]
+                        if binding not in bindings or limits.get(binding, 30) == 0:
+                            self._clear_skips(database, binding)
         except (sqlite3.Error, OSError):
             self.close()
             self.revision = None
@@ -245,6 +252,77 @@ class ReferenceHistory:
             "DELETE FROM turns WHERE id IN (SELECT id FROM turns WHERE binding=? "
             "ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?)", (binding, limit),
         )
+        if limit == 0:
+            self._clear_skips(database, binding)
+
+    @staticmethod
+    def _clear_skips(database, binding):
+        database.execute("DELETE FROM skips WHERE binding=?", (binding,))
+        database.execute("DELETE FROM skip_seen WHERE binding=?", (binding,))
+
+    def record_skip(self, scope, event_key, code, media=()):
+        try:
+            binding = _scope_binding(self.queue, scope)
+            if not binding or scope["mode"] != "active" or not reference_options(self.queue, scope)["history_limit"]:
+                return False
+            with self._open() as database:
+                if not database.execute("INSERT OR IGNORE INTO skip_seen VALUES (?,?)", (binding, event_key)).rowcount:
+                    return False
+                database.execute("INSERT INTO skips VALUES (?,?,?,?,?)", (
+                    binding, event_key, time.time(), code, canonical(list(media)),
+                ))
+                database.execute("DELETE FROM skips WHERE binding=? AND event_key NOT IN ("
+                                 "SELECT event_key FROM skips WHERE binding=? ORDER BY created_at DESC,rowid DESC LIMIT 20)",
+                                 (binding, binding))
+            return True
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            self.warning("reference_history_unavailable")
+            return False
+
+    def skips(self, scope):
+        binding = self._read_binding(scope)
+        if not self.path.exists() or not reference_options(self.queue, scope)["history_limit"]:
+            return []
+        try:
+            return [{"at": row["created_at"], "code": row["code"], "media_types": json.loads(row["media"])}
+                    for row in self._open().execute("SELECT * FROM skips WHERE binding=? ORDER BY created_at DESC,rowid DESC", (binding,))]
+        except (sqlite3.Error, OSError, ValueError):
+            raise QueueError("reference_history_unavailable") from None
+
+    def clear_skips(self, scope):
+        binding = self._read_binding(scope)
+        try:
+            if self.path.exists():
+                with self._open() as database:
+                    database.execute("DELETE FROM skips WHERE binding=?", (binding,))
+        except (sqlite3.Error, OSError):
+            raise QueueError("reference_history_unavailable") from None
+
+    def latest(self, scope):
+        binding = self._read_binding(scope)
+        if not self.path.exists() or not reference_options(self.queue, scope)["history_limit"]:
+            return None
+        try:
+            database = self._open()
+            turn = database.execute("SELECT id,created_at FROM turns WHERE binding=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (binding,)).fetchone()
+            if not turn:
+                return None
+            deliveries = [json.loads(row["payload"]) for row in database.execute(
+                "SELECT payload FROM deliveries WHERE turn_id=? ORDER BY rowid", (turn["id"],),
+            )]
+            if not deliveries:
+                return None
+            last = deliveries[-1]
+            error = last.get("status") == "error"
+            details = any(item.get("items") for item in deliveries)
+            pages = any(item.get("pages") for item in deliveries)
+            outcome = ("error" if error else "success" if details else "background_only" if pages
+                       else "on_demand" if deliveries[0].get("status") == "not_called" and len(deliveries) == 1 else "empty")
+            return {"outcome": outcome, "code": last.get("code", "") if error else "",
+                    "last_at": turn["created_at"], "elapsed_ms": deliveries[0].get("elapsed_ms"),
+                    "consecutive_failures": 0, "persistent": True}
+        except (sqlite3.Error, OSError, ValueError):
+            raise QueueError("reference_history_unavailable") from None
 
     def trim(self, binding, limit):
         if self.path.exists():

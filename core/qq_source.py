@@ -1,13 +1,15 @@
 """Native QQ C2C contracts; authentication and transport remain in AstrBot."""
 
 import math
+import base64
+import json
 import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .identity import Incoming
+from .source import bound_account, private_event, valid_time as valid_message_time
 
 
 RFC3339 = re.compile(
@@ -113,15 +115,7 @@ def bound_login(event, adapter, binding):
     if not binding or binding.get("invalid_login") or binding.get("adapter") is not adapter:
         return None
     login = native_login(adapter)
-    previous = binding.get("login")
-    if (
-        login is None or not isinstance(previous, QQLogin) or not previous.matches(login)
-        or binding.get("bot_id") != login.appid
-        or binding.get("client") is not login.client
-        or getattr(event, "bot", None) is not login.client
-        or event.get_platform_id() != adapter.meta().id
-        or event.get_platform_name() != adapter.meta().name
-    ):
+    if not bound_account(event, adapter, binding, login, login.appid if login else "", getattr(event, "bot", None)):
         return None
     return login
 
@@ -153,9 +147,23 @@ def message_shape(data):
     return "unsupported_message"
 
 
+def face_text(content):
+    def replace(match):
+        encoded = re.search(r'ext="([^"]*)"', match[0])
+        if encoded:
+            try:
+                name = json.loads(base64.b64decode(encoded[1]).decode("utf-8")).get("text")
+                if isinstance(name, str) and name:
+                    return "[表情:" + name + "]"
+            except (ValueError, UnicodeError, AttributeError):
+                pass
+        return "[表情]"
+    return re.sub(r"<faceType=\d+[^>]*>", replace, content)
+
+
 def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
-    if login is None or not event.is_private_chat() or event.get_group_id():
+    if login is None or not private_event(event):
         return None
     c2c_type, at_type, _, _, _, event_type = native_types(event.get_platform_name())
     raw = getattr(event.message_obj, "raw_message", None)
@@ -185,8 +193,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
     received = getattr(event, "created_at", None)
     valid_time = (
         occurred is not None and data["timestamp"] == getattr(raw, "timestamp", None)
-        and type(received) in (int, float) and math.isfinite(received)
-        and 0 < received <= time.time() + 300
+        and valid_message_time(occurred, received)
     )
     if inspect is not None:
         inspect(login.appid, occurred if valid_time else None, received, lambda: message_shape(data))
@@ -194,8 +201,6 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
         return None
     quoted = data.get("message_reference") is not None or data.get("message_type") == 103
     if quoted:
-        if not allow_readonly:
-            return None
         reference = data.get("message_reference")
         if reference is not None and (
             not isinstance(reference, Mapping) or set(reference) - {"message_id", "ignore_get_message_error"}
@@ -214,38 +219,37 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
             return None
     if (
         data.get("parallel_message") is not None or type(data.get("message_type")) is not int
-        or data["message_type"] not in ((0, 103) if quoted else (0,)) or not isinstance(original, str)
+        or data["message_type"] not in (0, 7, 103) or not isinstance(original, str)
         or original != getattr(raw, "content", None) or not original.strip() or len(original) > 8000
     ):
         return None
-    for name in ("attachments",) if quoted else ("attachments", "msg_elements"):
-        if name in data and data[name] is not None:
-            if not isinstance(data[name], list) or data[name]:
-                return None
-    components = event.get_messages()
-    if quoted and isinstance(components, list):
-        from astrbot.api.message_components import Reply
-
-        components = components[1:] if components and type(components[0]) is Reply else components
-    if (
-        not isinstance(components, list) or len(components) != 2
-        or type(components[0]) is not at_type or components[0].qq != "qq_official"
-        or type(components[1]) is not plain_type
-        or original.strip() != components[1].text
+    if not quoted and data.get("msg_elements") is not None and (
+        not isinstance(data["msg_elements"], list) or data["msg_elements"]
     ):
         return None
-    host_text = event.get_message_str()
-    if not isinstance(host_text, str):
+    components = event.get_messages()
+    parts = [part for part in components if type(part).__name__ != "Reply"] if isinstance(components, list) else []
+    if (
+        not parts or type(parts[0]) is not at_type or parts[0].qq != "qq_official"
+        or sum(type(part) is at_type for part in parts) != 1
+    ):
         return None
-    matching = original.strip() == host_text.strip() or (
-        getattr(event, "is_at_or_wake_command", False) is True
-        and any(
-            original.strip().startswith(prefix)
-            and original.strip()[len(prefix):].strip() == host_text.strip()
-            for prefix in wake_prefixes if isinstance(prefix, str) and prefix
-        )
-    )
-    if not matching:
+    from .source import finish_message
+
+    visible = face_text(original.strip())
+    normalized = [("text", face_text(original))]
+    attachments = data.get("attachments")
+    if attachments is None:
+        attachments = []
+    if not isinstance(attachments, list):
         return None
-    return Incoming("qq_official", event.get_platform_id(), login.appid,
-                    user, mid, occurred, original, received_at=received, capture_allowed=not quoted)
+    for attachment in attachments:
+        if not isinstance(attachment, Mapping) or not isinstance(attachment.get("content_type"), str):
+            return None
+        media_type = attachment["content_type"].split("/", 1)[0]
+        normalized.append((media_type if media_type in {"image", "audio", "video"} else "file", None))
+    reference = data.get("message_reference") or {}
+    element = (data.get("msg_elements") or [{}])[0] if quoted else {}
+    reply_to = reference.get("message_id") or element.get("id") or element.get("message_id") or ""
+    return finish_message(event, plain_type, wake_prefixes, "qq_official", login.appid, user,
+                          occurred, normalized, [visible], reply_to=str(reply_to))
