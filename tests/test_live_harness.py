@@ -22,6 +22,12 @@ spec.loader.exec_module(harness)
 
 
 class LiveHarnessTests(unittest.TestCase):
+    def test_baseline_resolves_public_version_and_rejects_mismatched_version(self):
+        commit = harness.baseline_commit("v0.5.0", "0.5.0")
+        self.assertEqual(len(commit), 40)
+        with self.assertRaisesRegex(ValueError, "基线提交与指定版本不符"):
+            harness.baseline_commit("v0.5.0", "0.4.0")
+
     def test_zero_exit_requires_a_completed_report_for_the_selected_package(self):
         digest = "a" * 64
         complete = {"complete": True, "passed": ["final_delivery"], "candidate_tree_sha256": digest}

@@ -183,6 +183,11 @@ class Acceptance:
             "acceptance_scope": "existing-service bridge end-to-end with real models and browser",
             "not_covered": ["real QQ account and platform delivery", "execution of managed-service installation wizard"],
             "candidate_tree_sha256": json.loads((ROOT / "package-inventory.json").read_text())["tree_sha256"],
+            "baseline_version": self.settings["baseline_version"],
+            "baseline_revision": self.settings["baseline_revision"],
+            "candidate_revision": self.settings["candidate_revision"],
+            "candidate_working_tree": self.settings["candidate_working_tree"],
+            "initial_queue": [],
             "passed": [], "measurements": {}, "complete": False,
         }
         self.runtime = ROOT / "verification/data/plugin_data" / NAME / "runtime.sqlite3"
@@ -195,6 +200,26 @@ class Acceptance:
 
     def save(self):
         (ROOT / "live-e2e-report.json").write_text(json.dumps(self.report, indent=2) + "\n")
+
+    def record_baseline(self):
+        self.report["initial_queue"] = database(
+            self.runtime, "SELECT id,operation_id,bank,generation,state,created_at FROM outbox ORDER BY created_at,id",
+        )
+        destination = ROOT / "baseline-state"
+        destination.mkdir(mode=0o700)
+        control = self.runtime.parent.with_name(NAME + "_control") / "control.sqlite3"
+        snapshots = {}
+        for source in (self.runtime, control, self.runtime.parent / "references.sqlite3"):
+            if not source.is_file():
+                continue
+            target = destination / source.name
+            target.touch(mode=0o600)
+            with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original, closing(sqlite3.connect(target)) as copy:
+                original.backup(copy)
+            snapshots[source.name] = hashlib.sha256(target.read_bytes()).hexdigest()
+        assert {"runtime.sqlite3", "control.sqlite3"} <= snapshots.keys()
+        self.report["baseline_snapshots"] = snapshots
+        self.save()
 
     async def http(self, method, path, *, payload=None, form=None, auth=True):
         headers = {"Authorization": "Bearer " + self.token} if auth and self.token else {}
@@ -762,6 +787,7 @@ class Acceptance:
                 await asyncio.sleep(1)
                 backlog = [row["id"] for row in self.tasks() if row["state"] not in {"done", "discarded"}]
                 assert backlog
+                self.record_baseline()
                 candidate_auth_started = time.time()
                 await self.install("candidate-upgrade.zip")
                 await self.control("start_hindsight")
@@ -776,7 +802,7 @@ class Acceptance:
                 assert all(row["state"] == "done" for row in self.tasks())
                 assert all(any(row["id"] == identity for row in self.tasks()) for identity in backlog)
                 assert (await self.http("GET", usage_route + "/" + old_turn_id))["turn"] == old_snapshot
-                self.passed("real_upgrade_from_public_v0_4_0_preserves_backlog_config_bank_and_frozen_usage_snapshot")
+                self.passed("real_upgrade_preserves_backlog_config_bank_and_frozen_usage_snapshot")
 
                 snapshot = await self.bootstrap()
                 await self.http("POST", self.prefix + "/settings/save", payload={

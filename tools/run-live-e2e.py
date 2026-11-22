@@ -116,6 +116,18 @@ def private_json(path, value):
         json.dump(value, file, indent=2)
 
 
+def baseline_commit(revision, version):
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "--verify", "--end-of-options", revision + "^{commit}"],
+        cwd=ROOT, text=True,
+    ).strip()
+    metadata = subprocess.check_output(["git", "show", commit + ":metadata.yaml"], cwd=ROOT, text=True)
+    declared = re.search(r"^version:\s*[\"']?v?([^\s\"']+)", metadata, re.MULTILINE)
+    if not declared or declared[1] != version.removeprefix("v"):
+        raise ValueError("基线提交与指定版本不符")
+    return commit
+
+
 def extraction_response(request, raw):
     schema = request.get("response_format", {}).get("json_schema", {}).get("schema", {})
     item = schema.get("properties", {}).get("facts", {}).get("items", {})
@@ -485,6 +497,19 @@ class Environment:
             "initial_password": "Delivery-Initial-2026!",
             "admin_password": "Delivery-Acceptance-2026!", "admin_name": "delivery-admin",
         }
+        self.settings.update(
+            baseline_version=getattr(args, "baseline_version", "0.5.0"),
+            baseline_revision=baseline_commit(
+                getattr(args, "baseline_revision", None) or "v" + getattr(args, "baseline_version", "0.5.0"),
+                getattr(args, "baseline_version", "0.5.0"),
+            ),
+            candidate_revision=subprocess.check_output(
+                ["git", "rev-parse", "--verify", (getattr(args, "revision", None) or "HEAD") + "^{commit}"],
+                cwd=ROOT, text=True,
+            ).strip(),
+            candidate_working_tree=not bool(getattr(args, "revision", None)),
+        )
+        self.revision = getattr(args, "revision", None)
         self.settings["hindsight_url"] = f'http://127.0.0.1:{self.settings["hindsight_port"]}'
         self.gateway = Gateway(self)
         gateway_url = f"http://127.0.0.1:{self.gateway.server_port}"
@@ -596,9 +621,12 @@ class Environment:
             return False
 
     def start(self):
-        run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--output", str(self.output))
+        source = ["--revision", self.revision] if self.revision else ["--working-tree"]
+        run(sys.executable, str(ROOT / "tools/build-test-package.py"), "--distribution", *source,
+            "--output", str(self.output))
         with (self.output / "released-install.zip").open("wb") as file:
-            run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/", "v0.4.0", cwd=ROOT, stdout=file)
+            run("git", "archive", "--format=zip", "--prefix=astrbot_plugin_hindsight_bridge/",
+                self.settings["baseline_revision"], cwd=ROOT, stdout=file)
         self.docker("volume", "create", "--label", "hindsight-bridge.test=" + self.owner, self.volume, stdout=subprocess.DEVNULL)
         self.launch("db", "hindsight-bridge-delivery-postgres:17", "--memory", "512m", "--shm-size", "128m",
                     "-e", "POSTGRES_USER=hindsight", "-e", "POSTGRES_DB=hindsight", "-e", "POSTGRES_PASSWORD=" + self.settings["database_password"],
@@ -687,6 +715,9 @@ def main():
     parser.add_argument("--chat-model", default="remote-magpie/workbuddy-ai/deepseek-v4.1-flash-sg")
     parser.add_argument("--astrbot-version", choices=("4.29.1", "4.29.4"), default="4.29.1")
     parser.add_argument("--hindsight-version", choices=("1.1.0", "1.2.0"), default="1.2.0")
+    parser.add_argument("--baseline-version", default="0.5.0")
+    parser.add_argument("--baseline-revision", help="commit or tag matching the baseline version")
+    parser.add_argument("--revision", help="verify the distribution files at this commit")
     parser.add_argument("--scenario", choices=("full", "accepted", "connection"), default="full")
     args = parser.parse_args()
     state = Environment(args)

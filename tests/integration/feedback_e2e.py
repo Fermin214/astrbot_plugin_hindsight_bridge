@@ -19,13 +19,13 @@ class Feedback(Acceptance):
     def __init__(self):
         super().__init__()
         self.report.update(
-            acceptance_scope="native Dashboard feedback, 0.2.6 upgrade, control migration and snapshot recovery",
+            acceptance_scope="native Dashboard feedback, baseline upgrade and snapshot recovery",
             chat_model="synthetic OpenAI fixture", embedding_model="synthetic 64-dimension fixture", embedding_dimensions=64, rerank_model="rrf",
             not_covered=["real QQ login", "production model quality"],
         )
         if self.settings.get("feedback_only"):
             self.report["acceptance_scope"] = "native Dashboard page feedback, identity invalidation and snapshot recovery"
-            self.report["not_covered"].append("0.2.6 upgrade and external control migration")
+            self.report["not_covered"].append("baseline upgrade")
         if self.settings.get("view_only"):
             self.report["acceptance_scope"] = "native Dashboard responsive layout and invalidated selection"
             self.report["not_covered"].append("chat feedback and business snapshot recovery")
@@ -321,13 +321,12 @@ class Feedback(Acceptance):
                 core_hash = hashlib.sha256(core.read_bytes()).hexdigest()
                 full = not self.settings.get("feedback_only")
                 candidate_upgrade = any(self.settings.get(key) for key in (
-                    "single_page", "multi_page", "read_tools", "reflect", "references",
+                    "single_page", "multi_page", "read_tools", "reflect", "references", "upgrade_only",
                 ))
                 upgrading = full or candidate_upgrade
                 await self.install("baseline-install.zip" if upgrading else "candidate-install.zip")
-                legacy = ROOT / "verification/legacy-control"
                 await self.config(api_url=self.settings["memory_url"], api_key=self.settings["memory_key"],
-                                  service_id=self.settings["owner"], control_state_dir=str(legacy) if full else "", allowed_accounts=[
+                                  service_id=self.settings["owner"], allowed_accounts=[
                                       {"__template_key": "account", "platform_instance_id": "delivery-onebot", "user_id": str(user)}
                                       for user in (ALICE, BOB)
                                   ])
@@ -341,37 +340,11 @@ class Feedback(Acceptance):
                 bank, identifier = scope["bank"], scope["scope_id"]
                 short = await self.page(bank, "Short background")
                 await self.select(short)
-                if candidate_upgrade:
+                if upgrading:
+                    self.record_baseline()
                     await self.install("candidate-upgrade.zip")
                     await self.usable()
                     assert (await self.scope())["bank"] == bank
-                if full:
-                    settings = database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key")
-                    mode = legacy.stat().st_mode
-                    await self.install("candidate-upgrade.zip")
-                    rejected = await self.bootstrap()
-                    assert "control_directory_outside_plugin" in rejected["status"]["label"], rejected["status"]
-                    assert database(legacy / "control.sqlite3", "SELECT key,value FROM settings ORDER BY key") == settings
-                    assert legacy.stat().st_mode == mode
-                    target = ROOT / "control-volume"
-                    assert not (target / "control.sqlite3").exists()
-                    self.passed("native_026_upgrade_rejects_external_path_without_replacement_journal_or_external_mutation")
-
-                    config_file = ROOT / "verification/data/config" / (NAME + "_config.json")
-                    def migrate():
-                        assert not list(target.iterdir())
-                        shutil.copytree(legacy, target, dirs_exist_ok=True)
-                        value = json.loads(config_file.read_text(encoding="utf-8-sig"))
-                        value["control_state_dir"] = ""
-                        config_file.write_text(json.dumps(value, indent=2))
-                    await self.restart(migrate)
-                    migrated = await self.scope()
-                    assert migrated["bank"] == bank and migrated["mode"] == scope["mode"]
-                    assert migrated["background"]["page_id"] == short and migrated["background"]["enabled"]
-                    latest = dict((row["key"], row["value"]) for row in database(target / "control.sqlite3", "SELECT key,value FROM settings"))
-                    original = dict((row["key"], row["value"]) for row in settings)
-                    assert all(latest[key] == original[key] for key in ("deployment_id", "control_id", "revision"))
-                    self.passed("stopped_full_control_copy_to_dedicated_mount_preserves_identity_revision_bank_mode_selection")
                 await self.action(identifier, "mode", mode="readonly")
                 await self.plugin_descriptions(page)
                 await page.goto(self.dashboard + "/#/plugin-view/" + NAME + "/memory")
