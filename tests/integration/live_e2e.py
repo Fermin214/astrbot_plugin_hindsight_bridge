@@ -262,11 +262,14 @@ class Acceptance:
             "action": "confirm", "platform_instance_id": "delivery-onebot", "user_id": str(user),
             "config_revision": state["config_revision"], "confirmation": prepared["confirmation"],
         })
+        await self.wait_for_authorization(user)
+
+    async def wait_for_authorization(self, user):
         scope = next(row for row in (await self.bootstrap())["scopes"]
                      if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
         configuration = await self.config()
         control_directory = Path(configuration.get("control_state_dir") or self.runtime.parent.parent / (NAME + "_control"))
-        boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE source_id=?", (scope["scope_id"],))[0]["accept_from"]
+        boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
         boundary = math.ceil(boundary)
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
@@ -384,11 +387,11 @@ class Acceptance:
             return []
         return database(self.runtime, "SELECT id,state,operation_id,last_error FROM outbox")
 
-    async def drained(self):
+    async def drained(self, *, excluding=()):
         settled = None
         async def check():
             nonlocal settled
-            rows = self.tasks()
+            rows = [row for row in self.tasks() if row["id"] not in excluding]
             failed = [row for row in rows if row["state"] == "failed"]
             if failed:
                 raise RuntimeError("Retain task failed: " + str(failed[0]["last_error"]))
@@ -455,6 +458,7 @@ class Acceptance:
                 ) else None
 
             await until(lambda: held(operation_id), timeout=30)
+            await self.drained(excluding={task["id"]})
             await self.action(scope_id, "maintenance_begin")
             maintenance = True
             state = (await self.action(scope_id, "maintenance_status"))["maintenance"]
@@ -649,6 +653,7 @@ class Acceptance:
             await page.screenshot(path=str(ROOT / "authorization-mobile.png"), full_page=True)
             await context.close()
             await browser.close()
+        await self.wait_for_authorization(ALICE)
         self.passed("real_mobile_browser_explicit_identity_authorization")
         self.passed("real_invalidated_confirmation_closes_dialog_and_new_authorization_recovers")
 
