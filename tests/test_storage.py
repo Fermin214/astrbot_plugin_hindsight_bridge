@@ -31,6 +31,17 @@ class MainDatabase(unittest.TestCase):
         self.queue.activate(self.incoming, self.queue.access.authorization("onebot", "alice")["revision"])
         self.incoming = replace(self.incoming, received_at=time.time() + 1)
 
+    def test_windows_file_sync_uses_writeable_handle_and_skips_directories(self):
+        path = self.root / "snapshot"
+        path.write_bytes(b"committed snapshot")
+        with patch.object(storage.os, "name", "nt"), patch.object(storage.os, "open", wraps=os.open) as opened:
+            storage.sync_path(path)
+            opened.assert_called_once_with(path, os.O_RDWR)
+            opened.reset_mock()
+            storage.sync_path(self.root)
+            opened.assert_not_called()
+        self.assertEqual(path.read_bytes(), b"committed snapshot")
+
     def test_shared_connection_and_durable_pragmas(self):
         self.assertIs(self.queue.db, self.queue.control.db)
         self.assertEqual(self.queue.db.execute("PRAGMA journal_mode").fetchone()[0], "wal")

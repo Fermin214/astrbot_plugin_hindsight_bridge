@@ -106,7 +106,7 @@ def inventory(directory, *, exclude=()):
 def sync_path(path):
     if path.is_symlink() or (os.name == "nt" and path.is_dir()):
         return
-    descriptor = os.open(path, os.O_RDONLY)
+    descriptor = os.open(path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:

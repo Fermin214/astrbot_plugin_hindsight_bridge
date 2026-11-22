@@ -207,7 +207,7 @@ async def main():
             assert metadata and metadata.star_cls and not manager.failed_plugin_dict
             plugin = metadata.star_cls
             candidate_sha256 = verify_installed_candidate(manager)
-            assert metadata.config["recall_timeout"] == 10
+            assert metadata.config["recall_timeout"] == 15 and metadata.config["background_timeout"] == 3
             assert plugin.outbox is None
             routes = {row[0] for row in context.registered_web_apis if NAME in row[0]}
             assert {
