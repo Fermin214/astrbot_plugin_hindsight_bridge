@@ -417,6 +417,17 @@ class Acceptance:
     async def extended_message_and_operations(self, scope):
         marker = "Willow-Extension-180"
         bank, scope_id = scope["bank"], scope["scope_id"]
+        route = self.prefix + "/scopes/" + scope_id + "/references"
+        original = (await self.http("GET", route))["selection"]
+
+        async def settings(selection):
+            stored = await self.http("GET", route)
+            await self.http("POST", route, payload={
+                **selection, "revision": stored["selection"]["revision"],
+                "scope_revision": stored["scope_revision"], "config_revision": stored["config_revision"],
+            })
+
+        await settings({**original, "capture_assistant": False})
         started = time.time()
         future = int(started) + 180
         maintenance = False
@@ -497,6 +508,7 @@ class Acceptance:
                 await self.action(scope_id, "maintenance_resume")
                 boundary = database(self.runtime, "SELECT accept_from FROM scopes WHERE scope_id=?", (scope_id,))[0]["accept_from"]
                 await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform maintenance reception boundary")
+            await settings(original)
         rows = await self.memories(bank)
         assert marker in json.dumps(rows)
         assert next(row for row in self.tasks() if row["id"] == task["id"])["state"] == "done"
