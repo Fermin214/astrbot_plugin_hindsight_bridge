@@ -901,7 +901,7 @@ test("chat reference loads legacy defaults and saves independent recall and capt
       assert.equal(payload.recall_budget, "high");
       assert.equal(payload.capture_assistant, false);
       assert.equal(payload.exclude_assistant, true);
-      assert.equal(payload.recall_on_quoted_or_link, true);
+      assert.equal("recall_on_quoted_or_link" in payload, false);
       return { selection: { ...payload, revision: 4 }, prompt_tokens: 0 };
     },
   };
@@ -910,10 +910,8 @@ test("chat reference loads legacy defaults and saves independent recall and capt
   await context.loadReferences(draft);
   assert.equal(context.$("reference-budget").value, "mid");
   assert.equal(context.$("reference-capture-assistant").checked, true);
-  assert.equal(context.$("reference-quoted").checked, false);
   context.$("reference-budget").value = "high";
   context.$("reference-capture-assistant").checked = false;
-  context.$("reference-quoted").checked = true;
   await context.saveReferences();
   assert.equal(draft.revision, 4);
 });
@@ -926,6 +924,43 @@ test("connection errors retain specific guidance and existing services hide mode
   context.document.querySelector = () => ({ value: "existing" });
   context.updateConnectionMode();
   assert.equal(context.$("models-settings").hidden, true);
+});
+
+test("zero usage turns can open five private skip records without rendering chat previews", async () => {
+  const context = harness();
+  loadFunctions(context, ["openUsage", "renderSkips", "activateUsageTab", "clearUsageDetail"]);
+  context.referenceDraft = { id: "one" };
+  context.bridge = { apiGet: async () => ({ turns: [], skips: Array.from({ length: 5 }, () => ({
+    at: 1, code: "media_or_non_text", media_types: ["image"], preview: "PRIVATE_CHAT_PREVIEW",
+  })) }) };
+  await context.openUsage("skips");
+  assert.equal(context.$("usage-dialog").open, true);
+  assert.equal(context.$("usage-tab-skips").attributes["aria-selected"], "true");
+  assert.equal(context.$("usage-panel-skips").hidden, false);
+  assert.equal(context.$("usage-picker").hidden, true);
+  assert.equal(context.$("usage-skips").children.length, 5);
+  assert.equal(context.$("usage-clear-skips").disabled, false);
+  assert.equal(JSON.stringify(context.$("usage-skips").children).includes("PRIVATE_CHAT_PREVIEW"), false);
+});
+
+test("remote totals distinguish an empty Bank from unavailable counts and display skip warnings", () => {
+  const context = harness();
+  loadFunctions(context, ["renderScope"]);
+  context.scopeId = "one";
+  context.data = { config: { allowed_accounts: [] }, status: {}, scopes: [{
+    scope_id: "one", mode: "active", bank: "bank", summary: {
+      bank_total: { documents: 0, memories: 0 },
+      skip_warning: { count: 5, message: "媒体消息中没有可保存的文字" },
+    },
+  }] };
+  context.renderScope();
+  assert.equal(context.$("bank-total").hidden, false);
+  assert.equal(context.$("bank-total").textContent, "记忆库总计：0 文档 · 0 条记忆");
+  assert.equal(context.$("skip-warning").hidden, false);
+  context.data.scopes[0].summary = {};
+  context.renderScope();
+  assert.equal(context.$("bank-total").hidden, true);
+  assert.equal(context.$("skip-warning").hidden, true);
 });
 
 function backgroundHarness() {

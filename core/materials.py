@@ -138,6 +138,7 @@ def retain_payload(
     zone: str | None,
     *,
     assistant=False,
+    quote="",
 ) -> dict:
     def line(message):
         return (
@@ -153,8 +154,10 @@ def retain_payload(
         "历史语境只用于理解指代，只从新增消息抽取新增信息。"
         "user 是用户原文，assistant 是助手陈述；区分用户事实与助手陈述。"
         "助手建议不等于用户接受；助手承诺或声称已完成，不等于操作实际执行或结果发生。\n"
+        "[图片]/[表情包]/[语音]/[文件]/[视频] 仅表示原消息附带媒体，切勿凭空臆测媒体内容。\n"
         "【历史语境】\n"
         + ("\n".join(line(m) for m in history) or "无")
+        + ("\n【引用背景（仅用于理解指代，勿重复抽取）】\n" + quote[:200] if quote else "")
         + ("\n【新增助手正文】\n" if assistant else "\n【本次新增用户消息】\n")
         + line(current)
     )

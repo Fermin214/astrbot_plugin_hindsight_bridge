@@ -64,6 +64,9 @@ class InMemoryPanel(module.MemoryPanel):
 
 class PanelTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        web = patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=SimpleNamespace(username="admin"))})
+        web.start()
+        self.addCleanup(web.stop)
         support = patch.object(module, "local_installation_supported", return_value=True)
         self.installation_supported = support.start()
         self.addCleanup(support.stop)
@@ -1126,6 +1129,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         return scope, queue, maintenance
 
     async def action(self, action, *, method="POST", scope_id="scope-1", **payload):
+        scope = self.panel.scope(scope_id)
+        payload = {"scope_revision": scope["revision"], "config_revision": self.panel.config_revision(), **payload}
         self.panel.body = AsyncMock(return_value={"action": action, **payload})
         request = SimpleNamespace(method=method, query={"action": action, **payload}, username="admin")
         with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(request=request)}):
@@ -1192,7 +1197,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         scope, queue, _ = self.management_resources()
         scope["allowed"] = False
         queue.control.set_bank_state = Mock()
-        queue.apply_control = Mock()
         self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), bank_exists=AsyncMock(return_value=False))
         with self.assertRaisesRegex(module.PanelError, "原记忆库仍不存在"):
             await self.action("bank_check")
@@ -1201,13 +1205,11 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await self.action("bank_check")
         queue.control.set_bank_state.assert_called_once_with("connection-1", "bank-1", "established")
         queue.set_mode.assert_not_called()
-        queue.apply_control.assert_called_once_with()
 
     async def test_bank_check_rejects_bank_rotation_during_remote_read(self):
         scope, queue, _ = self.management_resources()
         queue.scope_owner.side_effect = lambda identifier: dict(scope)
         queue.control.set_bank_state = Mock()
-        queue.apply_control = Mock()
         async def rotate(bank):
             scope["bank"] = "new-bank"
             queue.control.owner.return_value["bank"] = "new-bank"
@@ -1216,7 +1218,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(module.PanelError, "记忆范围已变化"):
             await self.action("bank_check")
         queue.control.set_bank_state.assert_not_called()
-        queue.apply_control.assert_not_called()
 
     async def test_get_actions_are_read_only_and_content_actions_are_removed(self):
         _, _, maintenance = self.management_resources()
@@ -1257,6 +1258,27 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         for name in ("memories", "detail", "search", "export"):
             self.assertNotIn((name, "GET"), routes)
             self.assertNotIn((name, "POST"), routes)
+
+    async def test_all_registered_routes_require_login_before_running_handlers(self):
+        register = Mock()
+        self.plugin.context.register_web_api = register
+        module.MemoryPanel(self.plugin)
+        request = SimpleNamespace(username="")
+        response = Mock(side_effect=lambda message, **options: {"error": message})
+        with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
+            request=request, error_response=response, json_response=Mock(),
+        )}):
+            for call in register.call_args_list:
+                with self.subTest(route=call.args[0]):
+                    result = await call.args[1]()
+                    self.assertEqual(result["error"], "请使用 AstrBot 管理账号登录。")
+
+    async def test_all_posted_scope_actions_reject_stale_scope_and_configuration(self):
+        self.management_resources()
+        for action in ("mode", "retry", "maintenance_begin", "maintenance_resume", "bank_check", "forget_prepare", "forget_confirm"):
+            for version in ({"scope_revision": 0}, {"config_revision": "stale"}):
+                with self.subTest(action=action, version=version), self.assertRaises(module.QueueError):
+                    await self.action(action, **version)
 
     async def test_real_maintenance_missing_bank_recovers_only_by_explicit_rotation(self):
         @asynccontextmanager

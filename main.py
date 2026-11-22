@@ -43,6 +43,7 @@ from .core.reflection import Reflection
 from .core.source import (
     PLATFORMS, inspect_header, local_runner, native_login, pin_client_login, platform_details,
     platform_record, prepare_bot_identity,
+    excluded_prefix as source_excluded_prefix, message_media,
 )
 from .core.worker import Worker
 
@@ -51,7 +52,7 @@ SKIP_MESSAGES = {
     "bot_not_confirmed": "机器人未连接或身份未确认",
     "before_accept_from": "消息早于开通或恢复时间",
     "quoted_or_reply": "引用或回复消息",
-    "media_or_non_text": "包含媒体或非纯文字内容",
+    "media_or_non_text": "媒体消息中没有可保存的文字",
     "command_prefix": "命令或排除前缀",
     "unsupported_message": "不支持的消息格式",
 }
@@ -107,7 +108,7 @@ class HindsightBridge(Star):
             "invalid_background_max_tokens": "知识页长度上限须设为 64 到 8192 token，请修改插件配置",
             "recall_content_unavailable": "检索结果无法放入当前记忆长度限制，请检查记忆内容与字符上限",
             "timeout": "记忆服务响应超时",
-            "recall_timeout": "查找记忆超时，可增加「检索超时」或检查服务负载",
+            "recall_timeout": "查找记忆超时，可增加「检索超时」或将检索预算设为「低」",
             "tokenizer_timeout": "分词器加载超时，请检查 AstrBot 的网络后重载插件",
             "tokenizer_load_failed": "分词器加载失败，请检查分词编码名称、网络和缓存目录权限后重载插件",
             "queue_capacity_reached": "本地队列已满，请恢复连接并处理积压",
@@ -120,7 +121,7 @@ class HindsightBridge(Star):
             "maintenance_active": "保存和记忆查询已暂停。请管理员在插件页查看进度，完成操作后点击「解除读写暂停」",
             "maintenance_pending": "还有记录未处理完。请在插件页查看进度，等待完成，或放弃未发送及保存失败的记录",
             "maintenance_unknown_operation": "记录的保存或取消结果还无法确认；请管理员修复服务后检查暂停进度。需要清空全部旧记忆时，可使用清空操作重新开始",
-            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南备份 runtime.sqlite3 和最新 control.sqlite3，完成转换后重载插件",
+            "legacy_corrections_require_handover": "旧版插件的本地更正需要转存；请管理员按备份与恢复指南完整备份旧数据，完成转换后重载插件",
             "message_before_accept_from": "消息早于采集时间下限",
             "authorization_changed": "账号授权已变化，请管理员在插件页确认当前机器人身份",
             "command_already_applied": "这条命令已处理，请发送一条新命令",
@@ -227,7 +228,6 @@ class HindsightBridge(Star):
                 max_tasks=int(self.config.get("queue_max_tasks", 10000)),
                 max_bytes=int(self.config.get("queue_max_mib", 64)) * 1024 * 1024,
                 control_directory=control_directory,
-                control_root=self.control_root(),
                 agent_id=str(self.config.get("agent_id", "default")),
                 warning=self.warning,
             )
@@ -256,7 +256,6 @@ class HindsightBridge(Star):
             await self._close_resources()
 
     def control_root(self):
-        # Derive the allocation before resolving links, so a redirected root is rejected.
         return (
             (Path(get_astrbot_data_path()) / "plugin_data").resolve()
             / "astrbot_plugin_hindsight_bridge_control"
@@ -269,12 +268,9 @@ class HindsightBridge(Star):
         if not directory.is_absolute():
             raise QueueError("control_directory_must_be_absolute")
         try:
-            resolved = directory.resolve()
-            if root.resolve() != root or not resolved.is_relative_to(root):
-                raise QueueError("control_directory_outside_plugin")
+            return directory.resolve()
         except (OSError, RuntimeError):
             raise QueueError("control_directory_invalid") from None
-        return resolved
 
     def refresh_permissions(self):
         if self.outbox is not None:
@@ -319,11 +315,9 @@ class HindsightBridge(Star):
                 if evidence is not None:
                     source = json.loads(row["identity_json"])
                     if source[3] != evidence["bot_id"]:
-                        self.outbox.db.execute(
-                            "UPDATE scopes SET allowed=0 WHERE connection_id=? AND scope_id=?",
-                            (self.outbox.connection_id, row["scope_id"]),
-                        )
-            self.outbox.db.commit()
+                        self.outbox.suspended_sources.add(row["scope_id"])
+                    else:
+                        self.outbox.suspended_sources.discard(row["scope_id"])
 
     async def prepare_sources(self, platform=None):
         getter = getattr(self.context, "get_platform_inst", None)
@@ -413,20 +407,10 @@ class HindsightBridge(Star):
         )
 
     def excluded_prefix(self, text):
-        prefixes = ("/", *self.config.get("command_prefixes", []))
-        return any(text.lstrip().startswith(prefix) for prefix in prefixes if prefix)
+        return source_excluded_prefix(text, self.config.get("command_prefixes", []))
 
     def snapshot(self, event):
         incoming = self.authorized_source(event, allow_readonly=True)
-        if incoming is not None and not incoming.capture_allowed:
-            scope = self.outbox.scope_owner(incoming.scope(self.outbox.deployment_id).id)
-            try:
-                enabled = bool(scope and reference_options(self.outbox, scope)["recall_on_quoted_or_link"])
-            except (QueueError, sqlite3.Error):
-                self.warning("reference_settings_invalid")
-                return None
-            if not enabled:
-                return None
         return incoming if incoming is not None and not self.excluded_prefix(incoming.text) else None
 
     def record_skip(self, event, queue):
@@ -449,8 +433,12 @@ class HindsightBridge(Star):
         active_source = Scope(queue.deployment_id, platform["logical_type"], platform_id, bot_id, user_id) if bot_id else None
         confirmed = (
             grant and grant["enabled"] and active_source and grant["source_id"] == active_source.id
+            and not binding.get("invalid_login")
             and getter and getter(platform_id) is binding.get("adapter") and binding.get("adapter") is not None
         )
+        scope = queue.scope_owner(grant["source_id"]) if grant and grant["source_id"] else None
+        if scope and scope["mode"] != "active":
+            return
         code = None
         invalid_time = False
         classify = None
@@ -492,7 +480,19 @@ class HindsightBridge(Star):
             if confirmed:
                 return
             code = "bot_not_confirmed"
-        self.skip_outcomes[account] = (grant["revision"] if grant else None, invalid_time, {"code": code, "at": time.time()})
+        outcome = {"code": code, "at": time.time()}
+        if confirmed and scope:
+            message_id = str(getattr(event.message_obj, "message_id", "") or "")
+            if not message_id:
+                return
+            event_key = active_source.event_key(message_id)
+            if queue.db.execute("SELECT 1 FROM events WHERE connection_id=? AND scope_id=? AND event_key=?",
+                                (queue.connection_id, scope["scope_id"], event_key)).fetchone():
+                return
+            if not queue.references.record_skip(scope, event_key, code, message_media(event)):
+                return
+            outcome["bank"] = scope["bank"]
+        self.skip_outcomes[account] = (grant["revision"] if grant else None, invalid_time, outcome)
 
     def skip_status(self, platform, user):
         if self.outbox is None or self.stopping:
@@ -502,15 +502,26 @@ class HindsightBridge(Star):
                 return None
         except ValueError:
             return None
-        record = self.skip_outcomes.get((platform, user))
-        if record is None:
-            return None
-        revision, invalid_time, outcome = record
         grant = self.outbox.access.authorization(platform, user)
+        record = self.skip_outcomes.get((platform, user))
+        scope = self.outbox.scope_owner(grant["source_id"]) if grant and grant["source_id"] else None
+        if record is None:
+            try:
+                skips = self.outbox.references.skips(scope) if scope and self.outbox.can_recall(scope, manual=True) else []
+                return {**skips[0], "message": SKIP_MESSAGES[skips[0]["code"]]} if skips else None
+            except QueueError:
+                return None
+        revision, invalid_time, outcome = record
         if revision != (grant["revision"] if grant else None):
+            return None
+        if outcome.get("bank") and (not scope or outcome["bank"] != scope["bank"]):
             return None
         message = "消息时间异常，请检查平台和 AstrBot 的时钟" if invalid_time else SKIP_MESSAGES[outcome["code"]]
         return {**outcome, "message": message}
+
+    @staticmethod
+    def skip_reason(code):
+        return SKIP_MESSAGES[code]
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=100)
     async def observe_incoming(self, event: AstrMessageEvent):
@@ -584,7 +595,11 @@ class HindsightBridge(Star):
     def recall_status(self, scope):
         value = self.recall_outcomes.get((self.outbox.connection_id, scope["owner_id"]), {})
         if value.get("bank") != scope["bank"] or value.get("revision") != scope["revision"]:
-            return None
+            try:
+                return self.outbox.references.latest(scope) if self.outbox.can_recall(scope, manual=True) else None
+            except QueueError as exc:
+                return {"outcome": "unavailable", "code": str(exc), "last_at": None,
+                        "elapsed_ms": None, "consecutive_failures": 0}
         return {key: value[key] for key in (
             "outcome", "code", "last_at", "elapsed_ms", "consecutive_failures",
         )}
@@ -595,6 +610,8 @@ class HindsightBridge(Star):
             delivered["status"] = "filtered" if not settings["types"] else "limit"
             return ""
         timeout = recall_timeout(self.config)
+        deadline = time.monotonic() + timeout
+        read_deadline = deadline - min(0.1, timeout / 5)
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
         limits = context_limits(self.config)
         result_tokens, limit = limits["tokens"], limits["chars"]
@@ -602,12 +619,12 @@ class HindsightBridge(Star):
         sequence = client.next_connection_sequence()
         stage = "auth"
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout_at(deadline):
                 query = recall_query(current, history, budget=budget, name=client.tokenizer)
-                await client.ensure_auth(timeout=timeout, _connection_sequence=sequence)
+                await client.ensure_auth(timeout=max(0.001, read_deadline - time.monotonic()), _connection_sequence=sequence)
                 stage = "recall"
                 results = await client.recall(
-                    bank, query, result_tokens, timestamp=timestamp, timeout=timeout,
+                    bank, query, result_tokens, timestamp=timestamp, timeout=max(0.001, read_deadline - time.monotonic()),
                     budget=settings["recall_budget"] if settings is not None else recall_budget,
                     **({"types": settings["types"]} if settings is not None else {}),
                 )
@@ -631,6 +648,7 @@ class HindsightBridge(Star):
     async def recall_background(self, event, guard, current, history, *, timestamp, include_facts, prefix, delivered):
         timeout = recall_timeout(self.config)
         deadline = time.monotonic() + timeout
+        read_deadline = deadline - min(0.1, timeout / 5)
         limits = context_limits(self.config)
         tokens, chars = limits["tokens"], limits["chars"]
         budget = max(32, min(400, int(self.config.get("recall_query_tokens", 380))))
@@ -655,9 +673,6 @@ class HindsightBridge(Star):
                 code = exc.code if isinstance(exc, HindsightError) else "background_timeout"
             return {"reference": selected, "page": page, "code": code}
 
-        async def read_pages():
-            return await asyncio.gather(*(read_page(selected) for selected in guard.selection["pages"]))
-
         async def read_facts(query):
             if not include_facts:
                 return [], ""
@@ -665,10 +680,10 @@ class HindsightBridge(Star):
                 delivered["status"] = "filtered" if not guard.settings["types"] else "limit"
                 return [], ""
             try:
-                async with asyncio.timeout_at(deadline - min(0.02, timeout / 10)):
+                async with asyncio.timeout_at(read_deadline):
                     rows = await guard.client.recall(
                         guard.scope["bank"], query, tokens, timestamp=timestamp,
-                        timeout=max(0.001, deadline - time.monotonic()),
+                        timeout=max(0.001, read_deadline - time.monotonic()),
                         types=guard.settings["types"],
                         budget=guard.settings["recall_budget"],
                     )
@@ -682,15 +697,19 @@ class HindsightBridge(Star):
         try:
             async with asyncio.timeout_at(deadline):
                 query = recall_query(current, history, budget=budget, name=guard.client.tokenizer)
-                await guard.client.ensure_auth(timeout=max(0.001, deadline - time.monotonic()))
+                await guard.client.ensure_auth(timeout=max(0.001, read_deadline - time.monotonic()))
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
                 stage = "recall"
-                page_deadline = time.monotonic() + min(
-                    limits["page_timeout"], max(0, deadline - time.monotonic()) / 4,
-                )
-                tasks = [asyncio.create_task(read_pages()), asyncio.create_task(read_facts(query))]
-                reads, (rows, recall_code) = await asyncio.gather(*tasks)
+                page_deadline = min(time.monotonic() + limits["page_timeout"], read_deadline)
+                tasks = [asyncio.create_task(read_page(selected)) for selected in guard.selection["pages"]]
+                tasks.append(asyncio.create_task(read_facts(query)))
+                done, pending = await asyncio.wait(tasks, timeout=max(0, read_deadline - time.monotonic()))
+                reads = [task.result() if task in done else {"reference": selected, "page": None, "code": "background_timeout"}
+                         for task, selected in zip(tasks[:-1], guard.selection["pages"])]
+                rows, recall_code = tasks[-1].result() if tasks[-1] in done else ([], "recall_timeout")
+                for task in pending:
+                    task.cancel()
                 if not guard.valid(self, event):
                     raise QueueError("background_changed")
                 auth_code = next((code for code in (recall_code, *(read["code"] for read in reads))
@@ -711,7 +730,6 @@ class HindsightBridge(Star):
                     raise HindsightError("recall_timeout")
                 if any(item["code"] == "bank_missing" for item in outcomes):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
-                    guard.queue.apply_control()
                     raise HindsightError("bank_missing")
                 return block, recall_code, facts_used, {
                     "code": next((item["code"] for item in outcomes if item["code"]), ""),
@@ -759,7 +777,7 @@ class HindsightBridge(Star):
         added = appended_history(rows, anchor["history_before"])
         if not added:
             return False
-        text = final_reply(added, anchor["text"])
+        text = final_reply(added, anchor["host_text"], anchor.get("media_types", ()))
         if not text or (expected is not None and text != expected):
             return False
         captured = self.outbox.capture_assistant(anchor["task_id"], text)
@@ -792,7 +810,7 @@ class HindsightBridge(Star):
         ):
             return
         rows = persistent_messages(run_context.messages)
-        expected = final_reply(rows, turn["incoming"].text)
+        expected = final_reply(rows, turn["incoming"].host_text, turn["incoming"].media_types)
         if not expected:
             return
         task = asyncio.create_task(
@@ -916,9 +934,11 @@ class HindsightBridge(Star):
         if turn.snapshot_id:
             extra = {}
             if isinstance(delivery, dict):
+                if status == "error" and isinstance(delivery.get("error"), str):
+                    extra["code"] = delivery["error"]
                 if kind == "recall" and isinstance(delivery.get("items"), list):
                     extra["items"] = delivery["items"]
-                if kind == "read_page":
+                if kind == "read_page" and not delivery.get("error") and delivery.get("content"):
                     extra["pages"] = [{key: delivery[key] for key in (
                         "page_id", "mental_model_id", "version", "last_refreshed_at", "name", "is_stale", "content", "text",
                     ) if key in delivery}]
@@ -960,9 +980,6 @@ class HindsightBridge(Star):
             scope = self.outbox.scope(incoming)
             if not self.outbox.can_recall(scope):
                 self.record_recall(scope, "skipped", started)
-                return
-            if not incoming.capture_allowed and not reference_options(self.outbox, scope)["recall_on_quoted_or_link"]:
-                self.record_skip(event, self.outbox)
                 return
             if incoming.timestamp < scope["accept_from"] or not self.outbox.accepts(incoming):
                 self.record_recall(scope, "skipped", started, "message_before_accept_from")
@@ -1064,6 +1081,7 @@ class HindsightBridge(Star):
                                       "empty": "no_match", "error": "error"}[outcome]
                             turn_id = self.outbox.references.start(scope, conversation, incoming.message_id, {
                                 "status": status, **delivered, "kind": "request", "text": text, "code": code,
+                                "elapsed_ms": round((time.monotonic() - started) * 1000),
                             })
                             turn = self.read_tools.tool_turns.get(event)
                             if turn:
@@ -1118,7 +1136,7 @@ class HindsightBridge(Star):
             raise QueueError("authorization_changed")
         try:
             result = self.outbox.access.run(command, scope, operation)
-            self.outbox.apply_control()
+            self.outbox.references.reconcile()
             return result
         except (OSError, sqlite3.DatabaseError):
             self.outbox.recovering = True
@@ -1296,7 +1314,7 @@ class HindsightBridge(Star):
                         return "记忆范围已变化，请重新开启。"
                 self.apply_command(
                     event, scope, command,
-                    lambda: self.outbox.set_mode(scope["scope_id"], mode, journal_only=True),
+                    lambda: self.outbox.set_mode(scope["scope_id"], mode),
                 )
                 self.worker.wake.set()
             except QueueError as exc:
@@ -1406,7 +1424,7 @@ class HindsightBridge(Star):
                 command = self.prepare_command(event, scope, "forget", (sha256(confirmation),))
                 self.apply_command(
                     event, scope, command,
-                    lambda: self.outbox.forget(scope["scope_id"], journal_only=True),
+                    lambda: self.outbox.forget(scope["scope_id"]),
                 )
                 self.worker.wake.set()
                 yield event.plain_result(

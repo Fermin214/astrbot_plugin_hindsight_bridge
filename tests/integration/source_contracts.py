@@ -35,11 +35,11 @@ def adapter(instance):
     }, {}, asyncio.Queue())
 
 
-async def event(host, text, *, bot=1001, mid=1):
+async def event(host, text, *, bot=1001, mid=1, segments=None):
     raw = Event({
         "time": int(time.time()) + 1, "self_id": bot, "post_type": "message",
         "message_type": "private", "sub_type": "friend", "user_id": 2001,
-        "message_id": mid, "message": [{"type": "text", "data": {"text": text}}],
+        "message_id": mid, "message": segments if segments is not None else [{"type": "text", "data": {"text": text}}],
         "raw_message": text, "font": 0, "sender": {"user_id": 2001, "nickname": "fixture"},
     })
     return host.create_event(await host.convert_message(raw))
@@ -81,7 +81,7 @@ async def main():
             bridge.config = {"allowed_accounts": [{"platform_instance_id": "fixture", "user_id": "2001"}]}
             bridge.source_accounts = {"fixture": {"bot_id": "1001"}}
             bridge.skip_outcomes = {}
-            for kind, expected in (("image", "media_or_non_text"), ("reply", "quoted_or_reply")):
+            for kind, expected in (("image", "media_or_non_text"), ("reply", "unsupported_message")):
                 sample = await event(host, "skipped text")
                 sample.message_obj.raw_message["message"].append({"type": kind, "data": {}})
                 assert native_header(sample, Plain, adapter=host) is None
@@ -93,19 +93,32 @@ async def main():
             sample = await event(host, "read existing memories", mid=40)
             sample.message_obj.raw_message["message"].insert(0, {"type": "reply", "data": {"id": "9"}})
             sample.message_obj.message.insert(0, Reply(id="9", chain=[Plain("quoted content")]))
-            assert native_header(sample, Plain, adapter=host) is None
             with patch.object(host.get_client(), "call_action") as platform_io:
-                readonly = native_header(sample, Plain, adapter=host, allow_readonly=True)
+                quoted = native_header(sample, Plain, adapter=host)
             platform_io.assert_not_called()
-            assert readonly and readonly.capture_allowed is False and readonly.text == "read existing memories"
-            assert bridge.snapshot(sample) is None
+            assert quoted and quoted.capture_allowed and quoted.text == "read existing memories"
+            assert quoted.reply_to == "9" and "quoted content" not in quoted.text
+            assert bridge.snapshot(sample) == quoted
             scope = queue.scope(incoming)
             save_reference_options(queue, scope, **{
                 **reference_options(queue, scope), "recall_on_quoted_or_link": True,
             })
-            assert bridge.snapshot(sample) == readonly
+            assert bridge.snapshot(sample) == quoted
             sample.message_obj.raw_message["message"].append({"type": "image", "data": {"file": "synthetic"}})
-            assert native_header(sample, Plain, adapter=host, allow_readonly=True) is None
+            assert native_header(sample, Plain, adapter=host).text == "read existing memories[图片]"
+            mixed = await event(host, "带图和表情的文字", mid=41, segments=[
+                {"type": "text", "data": {"text": "带图和表情的文字"}},
+                {"type": "face", "data": {"id": "14"}},
+                {"type": "image", "data": {"file": "https://example.invalid/image.png"}},
+                {"type": "mface", "data": {"summary": "不采信的表情包说明"}},
+            ])
+            mixed_header = native_header(mixed, Plain, adapter=host)
+            assert mixed_header.text == "带图和表情的文字[表情][图片][表情包]"
+            assert mixed_header.host_text == "带图和表情的文字" and mixed_header.capture_allowed
+            pure_media = await event(host, "", mid=42, segments=[
+                {"type": "image", "data": {"file": "https://example.invalid/image.png"}},
+            ])
+            assert native_header(pure_media, Plain, adapter=host) is None
             after_grant_event = await event(host, "new authorized", mid=4)
             after_grant = bridge.snapshot(after_grant_event)
             assert after_grant.received_at == after_grant_event.created_at
@@ -160,17 +173,15 @@ async def main():
                     header, header.scope(queue.deployment_id), scope, "mode", ("active",),
                 )
                 queue.access.run(command, scope, lambda: queue.set_mode(
-                    scope["scope_id"], "active", journal_only=True,
+                    scope["scope_id"], "active",
                 ))
-                queue.apply_control()
                 next_scope = queue.scope(header)
                 next_command = queue.access.command(
                     old_command, old_command.scope(queue.deployment_id), next_scope, "mode", ("paused",),
                 )
                 queue.access.run(next_command, next_scope, lambda: queue.set_mode(
-                    next_scope["scope_id"], "paused", journal_only=True,
+                    next_scope["scope_id"], "paused",
                 ))
-                queue.apply_control()
                 assert queue.scope(header)["mode"] == "paused"
         finally:
             queue.close()
@@ -211,6 +222,8 @@ async def main():
             "queued_event_from_replaced_client_rejected",
             "queued_event_with_original_recipient_rejected_after_rebinding",
             "frozen_old_bank_and_operation_preserved",
+            "native_face_mface_image_segments_keep_text_and_host_anchor_and_skip_pure_media",
+            "native_reply_id_saves_new_text_without_trusting_host_quoted_body",
             "host_clock_rollback_does_not_reject_new_command_message_keys",
         ],
     }, indent=2))

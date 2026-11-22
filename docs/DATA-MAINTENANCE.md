@@ -1,53 +1,49 @@
 # 备份、升级与恢复
 
-本文介绍插件自身数据的备份与恢复，以及配套 Hindsight 服务的运维操作（连接已有服务时，服务数据与升级由原有部署自行管理）。个人记忆的日常查看与导出见 [使用指南](USAGE.md)。
+本文介绍插件自身数据及专属配套资源的维护。连接已有 Hindsight 时，服务数据与升级由原有部署管理；个人记忆查看与导出见 [使用指南](USAGE.md)。
 
 ## 数据目录与构成
 
-完整备份需要包含插件业务数据、控制数据与插件配置；如果使用配套部署，还应备份配套的 PostgreSQL 数据库、安装目录与模型配置文件：
+插件数据统一位于 AstrBot 的 `data/plugin_data/astrbot_plugin_hindsight_bridge/`：
 
-| 数据 | 默认位置 | 内容说明 |
-| --- | --- | --- |
-| 插件业务数据 | AstrBot 的 `data/plugin_data/astrbot_plugin_hindsight_bridge/` | 待保存队列、去重记录、短期语境窗口与配套 `setup.json` |
-| 插件控制数据 | AstrBot 的 `data/plugin_data/astrbot_plugin_hindsight_bridge_control/` | 部署身份、用户与 Bank 绑定、代次、记忆模式、暂停状态与清空记录 |
-| 配套 Hindsight 数据与配置 | 配套 PostgreSQL 数据卷、安装目录与设置卷 | 已整理的长期记忆、知识页正文、操作历史、`models.json` 与 `.env` |
+| 文件 / 目录 | 内容 |
+| --- | --- |
+| `bridge.sqlite3` | 单主库：身份、授权、Bank 代次、设置、持久化队列、命令回执、暂停与清空进度 |
+| `bridge.sqlite3-wal` / `bridge.sqlite3-shm` | SQLite 运行侧文件；运行时不得手动删除 |
+| `references.sqlite3` | 独立使用记录与跳过记录库，上限 64 MiB；故障不阻塞消息入队 |
+| `setup.json` | 配套服务连接与安装状态，含敏感配置 |
+| `legacy-v0.5-backup/` | 0.5.0 启动迁移前的完整双目录备份，含历史聊天内容副本 |
 
-控制目录路径 `control_state_dir` 建议留空使用默认位置；如需填写自定义路径，只能设为默认控制目录内部的子目录（且不能通过符号链接指向外部）。
+完整备份还应另存 AstrBot 的插件配置。使用配套 Hindsight 时，另存 PostgreSQL 数据库、安装目录、`.env` 和 `models.json`；插件 SQLite 快照不能替代远端记忆库备份。
 
-通过安装器部署的服务文件在宿主机运行账号的 `~/.local/share/astrbot-memory-<id>/`（若自定义了 `HINDSIGHT_INSTALL_ROOT`，以实际输出路径为准），内含 `.env` 与 `compose.yaml`，数据库服务名为 `memory-db`，分别使用 `memory_postgres`（记忆库数据）与 `memory_settings`（模型配置 `models.json`）两个数据卷。
+0.6.0 不再运行独立 `control.sqlite3`。旧 `control_state_dir` 仅用于定位迁移来源，迁移完成后无需单独挂载或备份控制目录。
 
-> **恢复原则**：用旧业务快照恢复时，**必须保留最新的控制数据**。例如周一备份、周二清空了记忆、周三用周一备份恢复，周二的清空记录仍需生效，否则旧消息会重新写入。同样，知识页开关和顺序也以最新控制库为准。
+> **恢复原则**：恢复 `bridge.sqlite3` 整库快照会同时恢复快照时刻的授权、设置、队列和清空状态。**不要用清空记忆或撤权前的旧快照覆盖运行库**；不再支持“旧业务库 + 最新控制库”混拼恢复。
 
 ## 备份插件数据
 
-插件自带 `scripts/backup.py`，通过 SQLite 在线备份接口导出业务快照与清单，同时保存一份独立的最新控制库副本。
-
-下面以 Linux 容器部署（AstrBot 目录 `/AstrBot`、默认控制目录）为例，在 AstrBot 的 Python 环境执行：
+在 AstrBot 所用的 Python 环境运行 `scripts/backup.py`。脚本通过 SQLite 在线备份接口读取已提交数据，包含 WAL 中的内容，无需停用插件：
 
 ```bash
 python /AstrBot/data/plugins/astrbot_plugin_hindsight_bridge/scripts/backup.py \
   --data-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge \
-  --control-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control \
-  --output /AstrBot/data/backups/hindsight-business-YYYYMMDD \
-  --latest-control /AstrBot/data/backups/hindsight-control-latest/control.sqlite3 \
+  --output /AstrBot/data/backups/hindsight-YYYYMMDD \
   --backend-version 1.2.0
 ```
 
-使用 Docker Compose 时，可在命令前加 `docker compose exec -T astrbot`（`astrbot` 替换为实际容器服务名）。Windows 的备份命令见 [Windows 原生部署](WINDOWS.md#备份与恢复)。
+使用 Docker Compose 时，可在命令前加 `docker compose exec -T astrbot`，服务名按实际部署填写。Windows 命令见 [Windows 原生部署](WINDOWS.md#备份与恢复)。
 
-参数说明：
-- `--output`：每次需指定尚不存在的新目录（将 `YYYYMMDD` 换为日期），且位置必须在两个插件数据目录之外。
-- `--control-dir`：使用自定义子目录时对应修改。
-- `--backend-version`：填写当前 Hindsight 版本（可在 `/v1/version` 核对），省略则记录为未知。
-- `--latest-control`：固定指向同一个控制库副本路径。每次更新前，脚本会自动将旧副本归档到同级 `*.archive-*/control.sqlite3`，避免并发写入或版本错乱；若检测到控制库身份不符、修订倒退，或丢失了已确认的清空/解阻记录，脚本会报错拒绝覆盖，并将冲突副本留存在归档目录供核对。
+- `--output` 必须是插件数据目录之外、尚不存在的新目录。
+- `--backend-version` 填写 `/v1/version` 返回的实际 Hindsight 版本；省略时清单记为未知。
+- 输出包含 `bridge.sqlite3`、`manifest.json`，以及存在时的 `references.sqlite3`。清单记录数据库格式、部署身份、时间和文件 SHA-256。
+- 主库和使用记录各自在线取快照；恢复时按主库授权及代次核验使用记录，过期记录会被清理。
+- `--control-dir` 和 `--latest-control` 已移除。
 
-备份完成后会生成 `runtime.sqlite3`、`manifest.json` 及控制库副本。请连同插件配置与 `setup.json` 一起复制到异机保存。
-
-> 对话参考「使用记录」单独存放在业务目录的 `references.sqlite3` 中，常规备份脚本不包含此文件。
+连同插件配置及 `setup.json` 复制到异机保存。备份包含聊天内容和用户提示，按敏感资料保管；POSIX 输出目录为 `0700`、文件为 `0600`。
 
 ## 备份配套 Hindsight 数据库
 
-停用插件并停止配套 Hindsight 的写入后，在配套服务安装目录执行：
+配套安装目录默认在运行账号的 `~/.local/share/astrbot-memory-<id>/`；如设置了 `HINDSIGHT_INSTALL_ROOT`，以实际路径为准。停用插件并停止其他客户端写入后执行：
 
 ```bash
 docker compose stop memory-api
@@ -55,59 +51,69 @@ docker compose exec -T memory-db pg_dump -U hindsight -d hindsight -Fc -f /tmp/h
 docker compose cp memory-db:/tmp/hindsight-backup.dump ./hindsight-backup.dump
 ```
 
-同时另存安装目录下的 `.env`、`compose.yaml` 以及 `memory_settings` 卷里的 `models.json`。备份完毕后启动 `memory-api` 并重新启用插件。
-
-> 完整备份配套记忆库必须按本节导出 PostgreSQL，插件数据备份和 Hindsight Control Plane 的个人记忆导出都不能替代数据库备份。
+另存 `.env`、`compose.yaml` 和 `memory_settings` 卷中的 `models.json`。完成后启动 `memory-api` 并启用插件。Hindsight Control Plane 的个人记忆导出不能替代 PostgreSQL 全量备份。
 
 ## 在官方面板修改记忆
 
-浏览器打开 Hindsight 官方 Control Plane（地址在 **插件设置 → Hindsight 服务连接** 复制），用 **用户与记忆** 顶部的 **Bank ID** 定位对应用户的记忆库。浏览、搜索、单条更正和导出直接在官方面板进行即可，无需暂停插件。访问与密钥获取见 [部署说明](../deploy/README.md#五打开官方-control-plane)。
+从 **插件设置 → Hindsight 服务连接** 复制官方 Control Plane 地址，用 **用户与记忆** 顶部的 Bank ID 定位用户。浏览、搜索、单条更正和导出无需暂停插件。
 
-需要注意的边界情况：
-- **误删整个 Bank**：在官方页面直接删除整库后，插件会报告 `bank_missing` 并暂停该用户读写（不会自动新建覆盖）。若需保留旧记忆，先从数据库备份恢复原 Bank，再点击 **查看暂停状态 → 核对记忆库**；若打算重新开始，直接点 **清空记忆** 作废旧任务后切回「读写记忆」即可。
-- **处理读写暂停**：升级或断连故障后若出现 **查看暂停状态**，点击后页面会核对在途与已接收任务。核对通过后点 **解除读写暂停** 即可恢复；确认不需要的未发送/失败记录可勾选后 **放弃记录**（已发往后端但结果不明的记录不可放弃）。
+- **误删整个 Bank**：插件报告 `bank_missing`，暂停该用户读写，不会自动创建空库覆盖。要保留旧记忆，先恢复原 Bank，再点 **查看暂停状态 → 核对记忆库**；要重新开始，点 **清空记忆** 后切回读写模式。
+- **读写暂停**：在 **查看暂停状态** 核对在途请求，再点 **解除读写暂停**。未发送或已明确失败的记录可放弃；已提交但结果不明的记录不能直接放弃。
+- **清空与记录库锁定**：清空立即作废旧代次；若使用记录库被锁住，显示清理未完成，其他用户仍可入队。解锁后重试，核验目标用户的使用记录、交付记录和跳过记录均删净，才标记完成。
 
 ## 历史本地更正交接
 
-从极早期版本升级时，如果业务库里残存非空的旧 `corrections` 表，插件会报错 `legacy_corrections_require_handover` 并暂停启动（空表会自动清理）。此时请先停用插件并备份数据，核对表中需要保留的更正内容并手动迁入对应 Bank 后，再重载插件。
+早于 0.5.0 的部署应先升级到 0.5.0，完成其存储转换。若旧版提示存在未交接的 `corrections` 数据，先停用并备份，核对后将需保留的更正迁入对应 Bank；不要删除来源库来绕过启动校验。
 
 ## 升级插件
 
-> **0.4.0 升级前必读**：请先备份插件业务数据、控制库和插件配置。**0.4.0 会自动将控制库从格式 0–6 迁移至格式 7，升级后无法直接降级回旧版插件**（旧版插件无法读取格式 7）。
+**0.5.0 → 0.6.0 会合并主库，不能直接降级。**
 
-1. 按上文备份插件业务快照、最新控制库与配置。
-2. 在 AstrBot 插件管理中更新 Hindsight Bridge 并重载。
-3. 沿用原有连接配置与数据目录，查看运行状态；如果页面提示重新确认账号，核对机器人身份后确认即可。
+1. 停用插件或停止 AstrBot，完整另存旧业务目录、旧控制目录与插件配置，包含仍存在的 SQLite 侧文件。
+2. 在 AstrBot 插件管理中更新至 0.6.0，保持原 `service_id`、`agent_id`、平台实例、账号及旧数据路径不变。
+3. 启动时插件排他锁定旧库，核对部署身份和修订；先生成 `legacy-v0.5-backup/`，再向临时主库导入并原子切换。缺一库、来源错配、损坏或空间不足都会中止，不会按新装启动。
+4. 核对用户 Bank、待发队列、设置、清空进度和使用记录。引用回复、带链接及提及的私聊升级后默认正常保存；媒体占位只保留类型，不提取媒体内容。
+5. 确认稳定运行后，及时删除 `legacy-v0.5-backup/`，并移除不用的旧控制目录挂载，避免长期留存旧聊天明文副本。
 
-使用 QQ 官方机器人时，保持原平台实例、AppID 和用户 OpenID 不变，在 WebSocket 与 Webhook 之间切换会直接沿用已有记忆。升级后若提示恢复异常，可先通过 `/hb status` 查看原因并对照下文处理。
+迁移中断时，修复空间、权限或来源问题后重启。备份和导入中断保留原双库；已完成切换时以 `bridge.sqlite3` 为准，不重复导入备份。
+
+### 首次启用前撤回迁移
+
+仅在新版尚未对外启用时使用停写备份撤回：停止 AstrBot，将 `legacy-v0.5-backup/` 先复制到插件目录之外，再以其中 `runtime/` 和 `control/` 完整替换原两目录，并恢复 0.5.0 插件及配置。不要把新版主库留在旧版运行目录中混用。
+
+新版运行后产生的消息、设置和清空操作不在旧备份中；日常灾备使用下一节的 0.6.0 整库恢复契约。
 
 ## 升级 Hindsight 服务
 
-本节仅适用于插件配套部署。更新插件本体不会改变 Hindsight 容器；当有新版配套服务可用时（例如从 1.1.0 升至 1.2.0），面板顶部会出现 **查看升级** 横幅。
+本节仅适用于专属配套部署；更新插件不会自动升级 Hindsight 容器。普通 **重新部署** 用于修复同版本服务，不能替代跨版本升级。
 
-> 普通的 **重新部署** 只用于在同版本下修复容器或更新配置（例如修复 1.2.0 数据库扩展），不能把 1.1.0 升级为 1.2.0。
+1. 点 **查看升级 → 暂停插件读写**，并停止其他客户端及定时任务写入。
+2. 等待在途任务和知识页刷新结束，按页内步骤备份插件和 PostgreSQL。
+3. 勾选备份确认，生成命令并在原服务器、原安装目录执行；保持 `HINDSIGHT_INSTALL_ROOT` 一致。
+4. 回到页面 **核对升级结果**，检查版本、Bank 及模型配置，再解除升级暂停。
 
-1. 点击顶部 **查看升级**，先点 **暂停插件读写**（全局暂停所有用户的保存，普通聊天正常进行）。
-2. 停止其他外部客户端或定时任务对 Hindsight 的写入，等待当前在途任务与知识页刷新结束。
-3. 按页内 **查看备份步骤** 完成插件与数据库备份（命令执行时也会自动在 `<原安装目录>-backups/upgrade-1.1.0-<随机编号>/` 下另存一份服务备份）。
-4. 勾选确认后点击 **生成升级命令**，复制并在原服务器、原安装目录终端执行（如有自定义 `HINDSIGHT_INSTALL_ROOT` 请保持一致）。
-5. 执行完毕后回到页面点击 **核对升级结果**，检查版本、Bank 归属及模型配置均正常后，点击 **解除升级暂停** 即可恢复写入。
-
-如果服务端还是 1.1.0 且决定暂不升级，可点击 **暂不升级** 解除升级暂停（注意不要再在终端执行已复制的升级命令）。
+服务仍是旧版且决定取消时，点 **暂不升级**；不要再执行已复制的升级命令。
 
 ## 恢复业务数据
 
-1. 停用插件或停止 AstrBot 进程。
-2. 先保存当前运行目录中的最新控制库，确认备份快照 `manifest.json` 里的部署 ID 和控制库 ID 与目标环境一致。
-3. 确保所连接的 Hindsight 版本与快照对应；如配套数据库也需回退，先按下一节恢复数据库。
-4. 将选定快照覆盖回 `runtime.sqlite3`（若进程已停止且直接复制文件，需同时删掉目标目录残存的 `runtime.sqlite3-wal` 和 `runtime.sqlite3-shm`）。
-5. 保持最新控制目录以及原 `control_state_dir`、`agent_id`、`service_id` 和账号配置不变，启动 AstrBot。
+1. 停止 AstrBot，另存运行目录及配置，选定匹配的插件和远端数据库快照。
+2. 若需恢复 PostgreSQL，先按下一节恢复服务及对应模型配置。
+3. 用备份脚本校验清单并恢复主库和使用记录：
 
-启动后插件会自动校验身份归属、清理作废任务并核对后端状态（若此前曾有清空操作未完成，会继续清理旧库）。通过恢复检查后，在面板检查各用户状态并解除需要的读写暂停即可。
+```bash
+python /AstrBot/data/plugins/astrbot_plugin_hindsight_bridge/scripts/backup.py \
+  --data-dir /AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge \
+  --restore /AstrBot/data/backups/hindsight-YYYYMMDD
+```
+
+4. 保持原 `service_id`、`agent_id`、平台实例和账号配置，恢复 `setup.json` 后启动 AstrBot。
+5. 核对各用户状态。快照中未完成的清空会继续；快照指向的已建立 Bank 若已被远端删除，触发 `bank_missing`，不会盲建空库。先恢复原 Bank，或清空旧记忆后重新开始。
+
+脚本拒绝活跃 worker、损坏清单、摘要不符和非法格式。不得在插件运行中直接覆盖 SQLite 文件或删除 WAL/SHM。恢复整库也会恢复旧授权与队列，不能用最新控制副本阻断回滚。
 
 ## 恢复配套 Hindsight 数据库
 
-先在测试环境验证备份文件可用。停用插件后，将 `hindsight-backup.dump` 放到配套安装目录，保持 `memory-db` 运行并执行：
+先验证备份可用。停用插件并保持 `memory-db` 运行，在配套安装目录执行：
 
 ```bash
 docker compose stop memory-api
@@ -116,52 +122,29 @@ docker compose exec -T memory-db pg_restore -U hindsight -d hindsight --clean --
 docker compose up -d memory-api
 ```
 
-恢复时需保证模型配置（尤其是向量模型与维数）与该备份匹配，随后重新启用插件。
+恢复时保证向量模型、维数及其他模型配置与备份匹配，随后启用插件。
 
 ## 异常提示
 
-| 错误码 / 状态 | 含义与处理方法 |
+| 错误码 / 状态 | 处理方法 |
 | --- | --- |
-| `recovery_required:control_missing` | 找不到与业务库匹配的控制目录，检查挂载路径并恢复最新控制库后重载 |
-| `control_mismatch` / `deployment_mismatch` | 业务库与控制库来自不同部署，对照 `deployment_id` 与 `control_id` 恢复匹配副本 |
-| `control_rolled_back` | 当前控制库版本低于已知记录，请换回最新的控制库副本（保留清空与解阻记录） |
-| `account_mapping_missing` | 控制库缺少账号映射，恢复完整控制库以找回归属关系 |
-| `accepted_operation_missing` | Hindsight 中找不到已发送任务的记录，请暂停插件并让服务管理员核对数据库与操作历史 |
-| `payload_digest_conflict` | 业务库内容摘要冲突，检查 `runtime.sqlite3` 完整性与备份来源 |
-| `bank_missing` | 原记忆库已在服务端被删除；恢复原 Bank 后点 **查看暂停状态 → 核对记忆库**，或直接点 **清空记忆** 重新开始 |
-| `maintenance_active` | 记忆库处于读写暂停中；在 **查看暂停状态** 确认服务操作完成后点击 **解除读写暂停** |
-| `maintenance_pending` | 仍有任务未结束；等待执行完毕，或勾选放弃未发送/失败记录后再解除暂停 |
-| `maintenance_unknown_operation` | 提交或取消任务结果不明；核对后端任务，或用 **清空记忆** 舍弃旧库重来 |
-| `legacy_corrections_require_handover` | 存在非空的旧版 `corrections` 表，先备份并完成手工交接后再重载 |
-| 正在删除旧记忆 | 清空流程等待后端响应，恢复服务连接与正确 API Key 后会自动继续删完 |
+| `migration_legacy_database_missing` | 恢复匹配的 0.5.0 业务库和控制库，核对目录挂载 |
+| `migration_identity_mismatch` | 两库部署身份或账号映射不一致，恢复同一部署的完整副本 |
+| `migration_control_rolled_back` | 旧控制库修订倒退，恢复迁移时匹配的最新旧控制库 |
+| `migration_legacy_version` / `migration_legacy_corrupt` | 来源格式不符或损坏，先在 0.5.0 修复并验证数据 |
+| `migration_insufficient_space` / `migration_backup_incomplete` | 释放空间或恢复完整备份；保留原两库，不删除它们来重试 |
+| `main_database_invalid` / `main_identity_mismatch` | 主库格式、完整性或身份异常，从匹配的整库快照恢复 |
+| `migration_main_database_missing` | 迁移备份仍在但主库缺失；恢复主库，或按首次启用前撤回步骤还原双库 |
+| `database_path_invalid` | 主库、侧文件或锁文件是符号链接，核对文件归属与实际路径 |
+| `accepted_operation_missing` | 后端找不到已接收操作，保留主库并核对远端数据库和操作历史 |
+| `payload_digest_conflict` | 冻结正文摘要冲突，核查主库完整性和备份来源 |
+| `bank_missing` | 恢复原 Bank 并核对，或清空旧记忆后重新开始 |
+| `maintenance_active` / `maintenance_pending` | 核对在途请求，等待完成后解除暂停 |
+| `maintenance_unknown_operation` | 提交或取消结果不明，核对后端操作，或清空旧库 |
+| 正在删除旧记忆 | 恢复服务连接或记录库可写状态，插件自动继续删净 |
 
-遇到 `accepted_operation_missing` 等核对失败时，不要反复重试，请保留最新控制库并联系管理员核对数据库；如果决定放弃旧记忆，直接走 **清空记忆** 即可。
+同一 Hindsight 搬迁地址时保留 `service_id`，更新 `api_url` 并递增 `service_address_revision`；换到全新服务时使用新的 `service_id`。
 
-## 控制目录挂载与旧路径迁移
+## Reflect 与主库格式
 
-如果希望用单独的卷或备份策略管理控制数据，请直接把独立目录挂载到默认控制路径，不要通过配置项指向插件目录外：
-
-```yaml
-services:
-  astrbot:
-    volumes:
-      - ./astrbot-data:/AstrBot/data
-      - ./hindsight-control:/AstrBot/data/plugin_data/astrbot_plugin_hindsight_bridge_control
-```
-
-升级自 0.2.7 以前版本且曾经把 `control_state_dir` 配在插件目录之外时，启动会提示 `control_directory_outside_plugin`。迁移步骤：
-
-1. 备份配置、业务快照和最新控制库。
-2. 完整停止 AstrBot，确保所有 SQLite 文件句柄释放。
-3. 将原外部目录下的 `control.sqlite3`（连同仍在的 `-wal`、`-shm` 文件）复制到专属控制目录或新挂载目录，设置目录权限 `0700`、文件权限 `0600` 并匹配 AstrBot 运行用户。
-4. 在插件配置里将 `control_state_dir` 留空（若放在子目录，填容器内专属目录下的绝对路径）。
-5. 启动 AstrBot 并核对各用户 Bank、模式与清空状态，确认无误后再清理旧外部目录。
-
-搬迁同一套 Hindsight 服务器地址时，保持 `service_id` 不变，更新 `api_url` 并把 `service_address_revision` 加 1；如果是换到全新的一套 Hindsight，则需使用新的 `service_id`。
-
-## Reflect 与控制库格式
-
-0.5.0 沿用 0.4.0 的格式 7 控制库及 `reflection_requests` 表：
-- 升级后自动从旧格式迁入，保留全部账号、Bank、暂停记录与队列状态，**之后不可直接降级回旧版插件**。
-- 启动自动将历史 `prepared/dispatched/unknown` 请求归档；Reflect 超时和断网只报告诊断，不锁住后续请求、解除暂停或清空。清空仍作废旧代次并核查远端 Bank 删除，迟到结果不得进入新代次。
-- 解阻记录会长期保留在控制库中；恢复旧业务快照时必须继续保留最新控制库，备份脚本也会拒绝用丢失或回退了这些记录的控制库覆盖现有副本。
+`reflection_requests` 与其他状态同存主库。启动时将未结束的 `prepared/dispatched/unknown` 请求归档，保留原始请求 ID、错误及归档记录。Reflect 超时不锁住后续请求或清空；迟到结果不得进入新代次。日常恢复这些记录同样遵循整库快照语义。

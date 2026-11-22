@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 import json
 import secrets
 import time
@@ -74,6 +75,21 @@ class PanelScopes:
             }
             summary["error_message"] = self.error_message(summary["last_error"]) if summary["last_error"] else ""
             summary["recall"] = plugin.recall_status(scope) if queue and not scope.get("pending") else None
+            if queue and not scope.get("pending") and not scope.get("historical"):
+                summary["bank_total"] = self.bank_stats.get(scope)
+                if scope["mode"] == "active" and queue.can_recall(scope, manual=True):
+                    try:
+                        skips = queue.references.skips(scope)
+                        latest = queue.db.execute("SELECT MAX(queued.created_at) FROM outbox queued JOIN events incoming ON incoming.task_id=queued.id "
+                                                  "WHERE queued.connection_id=? AND queued.scope_id=? AND queued.bank=?",
+                                                  (queue.connection_id, scope["scope_id"], scope["bank"])).fetchone()[0] or 0
+                        consecutive = [item for item in skips if item["at"] > latest]
+                        if len(consecutive) >= 5:
+                            code = Counter(item["code"] for item in consecutive).most_common(1)[0][0]
+                            summary["skip_warning"] = {"count": len(consecutive), "code": code,
+                                                       "message": plugin.skip_reason(code)}
+                    except QueueError:
+                        pass
             account = (scope["platform_instance_id"], scope["user_id"])
             if account in accounts and (not scope.get("historical") or scope.get("availability") == "disconnected"):
                 skipped = plugin.skip_status(*account)
@@ -183,10 +199,8 @@ class PanelScopes:
         from astrbot.api.web import request
 
         payload = await self.body()
-        async with self.lock, self.plugin.using_resources():
+        async with self.route(timeout=None):
             self.ensure_no_upgrade()
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
             self.check_revision(payload)
             plugin, queue = self.plugin, self.plugin.outbox
             platform, user = payload.get("platform_instance_id"), payload.get("user_id")
@@ -257,8 +271,7 @@ class PanelScopes:
     async def reference_scope(self, scope_id):
         from astrbot.api.web import request
 
-        if not request.username:
-            raise PanelError("请使用 AstrBot 管理账号登录。")
+        self.require_login()
         plugin = self.plugin
         await plugin.prepare_sources()
         scope = self.scope(scope_id)
@@ -270,12 +283,22 @@ class PanelScopes:
             raise PanelError("请连接并确认这个用户的机器人，解除记忆库暂停后重试。")
         return queue, scope
 
+    async def reading_scope(self, scope_id):
+        await self.plugin.prepare_sources()
+        scope = self.scope(scope_id)
+        source = Scope(*json.loads(scope["identity_json"]))
+        bot = await self.bot_id(source.platform_instance_id)
+        scope = self.scope(scope_id)
+        if not scope["allowed"] or bot != source.bot_id:
+            raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改记忆读取设置。")
+        return scope, source
+
     async def references(self, scope_id):
         from astrbot.api.web import request
 
         posting = request.method == "POST"
         payload = await self.body() if posting else {}
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+        async with self.route():
             await load_encoding()
             queue, scope = await self.reference_scope(scope_id)
             config_revision = self.config_revision()
@@ -283,9 +306,11 @@ class PanelScopes:
                 if (set(payload) - {"recall_budget", "capture_assistant", "recall_on_quoted_or_link"}
                     != {"revision", "prompt", "types", "exclude_assistant", "detail_limit",
                         "history_limit", "scope_revision", "config_revision"}
-                    or type(payload["scope_revision"]) is not int or payload.pop("scope_revision") != scope["revision"]
-                    or payload.pop("config_revision") != config_revision):
+                    ):
                     raise QueueError("reference_changed")
+                self.check_card(payload, scope, reference_options(queue, scope), "reference_changed")
+                payload.pop("scope_revision")
+                payload.pop("config_revision")
                 selection = save_reference_options(queue, scope, **payload)
             else:
                 selection = reference_options(queue, scope)
@@ -294,7 +319,7 @@ class PanelScopes:
 
     async def prompt_count(self, scope_id):
         payload = await self.body()
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+        async with self.route():
             if set(payload) != {"prompt"} or not isinstance(payload["prompt"], str):
                 raise PanelError("请填写有效的记忆提示。")
             await load_encoding()
@@ -302,26 +327,35 @@ class PanelScopes:
             return {"prompt_tokens": token_count(payload["prompt"])}
 
     async def usage(self, scope_id, turn_id=None):
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
+        async with self.route():
             queue, scope = await self.reference_scope(scope_id)
             if turn_id is None:
-                return {"turns": queue.references.list(scope)}
+                return {"turns": queue.references.list(scope), "skips": queue.references.skips(scope)}
             return {"turn": queue.references.detail(scope, turn_id)}
+
+    async def skips(self, scope_id):
+        from astrbot.api.web import request
+
+        payload = await self.body() if request.method == "POST" else None
+        async with self.route():
+            queue, scope = await self.reference_scope(scope_id)
+            if payload is not None:
+                if (set(payload) != {"scope_revision", "config_revision"}
+                        or payload["scope_revision"] != scope["revision"]
+                        or payload["config_revision"] != self.config_revision()):
+                    raise QueueError("scope_not_available")
+                queue.references.clear_skips(scope)
+                self.plugin.skip_outcomes.pop((scope["platform_instance_id"], scope["user_id"]), None)
+            return {"skips": queue.references.skips(scope)}
 
     async def reading(self, scope_id):
         from astrbot.api.web import request
 
         posting = request.method == "POST"
         payload = await self.body() if posting else {}
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.route():
             plugin = self.plugin
-            await plugin.prepare_sources()
-            scope = self.scope(scope_id)
-            source = Scope(*json.loads(scope["identity_json"]))
-            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
-                raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改读取方式。")
+            scope, source = await self.reading_scope(scope_id)
             guard = ReadGuard.freeze(plugin, scope, manual=True)
             revision = self.config_revision()
             options = read_options(guard.queue, scope)
@@ -332,11 +366,9 @@ class PanelScopes:
                 if (
                     set(payload) != {"mode", "revision", "scope_revision", "config_revision"}
                     or not isinstance(payload.get("mode"), str) or payload["mode"] not in {"automatic", "tools"}
-                    or type(payload.get("revision")) is not int or payload["revision"] != options["revision"]
-                    or type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
-                    or payload.get("config_revision") != revision
                 ):
                     raise QueueError("reading_changed")
+                self.check_card(payload, scope, options, "reading_changed")
                 await plugin.prepare_sources()
                 if (
                     not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
@@ -353,15 +385,9 @@ class PanelScopes:
 
         posting = request.method == "POST"
         payload = await self.body() if posting else {}
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.route():
             plugin = self.plugin
-            await plugin.prepare_sources()
-            scope = self.scope(scope_id)
-            source = Scope(*json.loads(scope["identity_json"]))
-            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
-                raise PanelError("请连接机器人并确认用户身份；旧记忆库不能更改 Reflect 设置。")
+            scope, source = await self.reading_scope(scope_id)
             guard = ReadGuard.freeze(plugin, scope, manual=True)
             revision = self.config_revision()
             options = reflection.read_options(guard.queue, scope)
@@ -373,11 +399,9 @@ class PanelScopes:
                     set(payload) != {"enabled", "timeout", "revision", "scope_revision", "config_revision"}
                     or type(payload.get("enabled")) is not bool or type(payload.get("timeout")) is not int
                     or not 3 <= payload["timeout"] <= 30
-                    or type(payload.get("revision")) is not int or payload["revision"] != options["revision"]
-                    or type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
-                    or payload.get("config_revision") != revision
                 ):
                     raise QueueError("reflect_changed")
+                self.check_card(payload, scope, options, "reflect_changed")
                 await plugin.prepare_sources()
                 if (
                     not guard.valid(plugin, metadata=closing) or self.config_revision() != revision
@@ -396,40 +420,20 @@ class PanelScopes:
 
         reading = request.method == "GET"
         payload = dict(request.query) if reading else await self.body()
-        async with self.lock, self.plugin.using_resources(), asyncio.timeout(8):
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.route():
             plugin = self.plugin
-            await plugin.prepare_sources()
-            scope = self.scope(scope_id)
-            source = Scope(*json.loads(scope["identity_json"]))
-            if not scope["allowed"] or await self.bot_id(source.platform_instance_id) != source.bot_id:
-                raise PanelError("请连接机器人并在用户与记忆中确认身份；旧记忆库不能选择或读取知识页。")
-            scope = self.scope(scope_id)
+            scope, source = await self.reading_scope(scope_id)
             guard = ReadGuard.freeze(plugin, scope, manual=True)
             revision = self.config_revision()
             page_ids = [page["page_id"] for page in guard.selection["pages"]]
             if not reading:
-                if payload.get("config_revision") != revision:
-                    raise QueueError("background_changed")
-                identity_key = "page_ids" if "page_ids" in payload else "page_id"
+                self.check_card(payload, scope, guard.selection, "background_changed")
                 if (
-                    type(payload.get("scope_revision")) is not int
-                    or payload["scope_revision"] != scope["revision"]
-                    or type(payload.get("revision")) is not int
-                    or payload.get("revision") != guard.selection["revision"]
-                    or type(payload.get("enabled")) is not bool
-                    or set(payload) != {identity_key, "enabled", "revision", "scope_revision", "config_revision"}
+                    type(payload.get("enabled")) is not bool
+                    or set(payload) != {"page_ids", "enabled", "revision", "scope_revision", "config_revision"}
                 ):
                     raise QueueError("background_changed")
-                if identity_key == "page_id":
-                    if not isinstance(payload["page_id"], str):
-                        raise QueueError("background_settings_invalid")
-                    page_ids = [payload["page_id"]] if payload["page_id"] else []
-                    if not payload["enabled"] and payload["page_id"] == guard.selection["page_id"]:
-                        page_ids = [page["page_id"] for page in guard.selection["pages"]]
-                else:
-                    page_ids = payload["page_ids"]
+                page_ids = payload["page_ids"]
                 if (
                     not isinstance(page_ids, list) or len(page_ids) > MAX_BACKGROUND_PAGES
                     or any(not isinstance(value, str) or not value for value in page_ids)
@@ -576,10 +580,10 @@ class PanelScopes:
         action = payload.get("action")
         if reading and action != "maintenance_status":
             raise PanelError("GET 仅支持查询暂停进度。")
-        async with self.lock, self.plugin.using_resources():
-            if not request.username:
-                raise PanelError("请使用 AstrBot 管理账号登录。")
+        async with self.route(timeout=None):
             scope = self.scope(scope_id)
+            if not reading:
+                self.check_scope_revision(payload, scope)
             plugin, queue = self.plugin, self.plugin.outbox
             if action in {"forget_prepare", "forget_confirm"}:
                 self.ensure_no_upgrade()
@@ -604,18 +608,19 @@ class PanelScopes:
                 if not exists:
                     raise PanelError("原记忆库仍不存在。请从匹配的备份恢复原库，或清空旧记忆后重新开始。")
                 queue.control.set_bank_state(queue.connection_id, scope["bank"], "established")
-                queue.apply_control()
                 plugin.worker.wake.set()
                 return {"message": "原记忆库已找到。"}
             if action in {"mode", "retry"}:
                 await plugin.prepare_sources()
                 scope = self.scope(scope_id)
+                self.check_scope_revision(payload, scope)
                 if not scope["allowed"]:
                     raise PanelError("旧记忆库不能调整模式或重试保存；请在用户与记忆中确认机器人身份后使用记忆。")
                 source = Scope(*json.loads(scope["identity_json"]))
                 if await self.bot_id(source.platform_instance_id) != source.bot_id:
                     raise PanelError("无法确认机器人身份，请连接机器人后在用户与记忆中确认身份。")
                 latest = self.scope(scope_id)
+                self.check_scope_revision(payload, latest)
                 if not latest["allowed"] or latest["revision"] != scope["revision"]:
                     raise PanelError("记忆范围已变化，请刷新后重试。")
             if action == "maintenance_begin":
@@ -669,8 +674,6 @@ class PanelScopes:
                 count = queue.request_retry(scope_id)
                 message = f"已安排重新保存 {count} 条失败记录。"
             elif action == "forget_prepare":
-                if not request.username:
-                    raise PanelError("请使用 AstrBot 管理账号登录。")
                 token = secrets.token_hex(6)
                 plugin.confirmations["panel:" + scope["owner_id"]] = {
                     "token": token, "source": scope_id, "bank": scope["bank"],

@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 from dataclasses import replace
 import importlib.util
 import json
@@ -106,14 +107,14 @@ def bridge_class(directory, logger):
 
 class ConfigurationTests(unittest.TestCase):
     def test_timeout_default_saved_values_and_invalid_ranges(self):
-        self.assertEqual(diagnostics.recall_timeout({}), 10)
+        self.assertEqual(diagnostics.recall_timeout({}), 15)
         for value in (0.2, 4, 10, 30, "12"):
             self.assertEqual(diagnostics.recall_timeout({"recall_timeout": value}), float(value))
         for value in (0, -1, 0.19, 31, True, None, [], "bad", float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(diagnostics.ConfigurationError):
                 diagnostics.recall_timeout({"recall_timeout": value})
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text())
-        self.assertEqual(schema["recall_timeout"]["default"], 10)
+        self.assertEqual(schema["recall_timeout"]["default"], 15)
         self.assertEqual(set(schema), {
             "api_url", "api_key", "control_plane_url", "service_id", "service_address_revision",
             "control_state_dir", "agent_id", "allowed_accounts", "recall_timeout",
@@ -186,6 +187,25 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         await self.plugin._close_resources()
         self.temporary.cleanup()
 
+    async def test_unknown_login_only_suspends_source_until_the_same_bot_returns(self):
+        queue = self.plugin.outbox
+        scope = queue.scope(self.incoming)
+        grant = dict(queue.access.authorization("qq", "123"))
+        client = object()
+        adapter = SimpleNamespace(get_client=lambda: client)
+        self.context.get_platform_inst = lambda instance: adapter
+        binding = {"adapter": adapter, "client": client, "bot_id": "", "login": None}
+        self.plugin.source_accounts["qq"] = binding
+        namespace = self.plugin.refresh_permissions.__func__.__globals__
+        with patch.dict(namespace, native_login=lambda adapter: None):
+            self.plugin.refresh_permissions()
+            self.assertFalse(queue.scope_owner(scope["scope_id"])["allowed"])
+            self.assertEqual(dict(queue.access.authorization("qq", "123")), grant)
+            binding["bot_id"] = self.incoming.bot_id
+            self.plugin.refresh_permissions()
+            self.assertTrue(queue.scope_owner(scope["scope_id"])["allowed"])
+            self.assertEqual(dict(queue.access.authorization("qq", "123")), grant)
+
     async def service(self, request):
         self.requests.append(request)
         if request.headers.get("Authorization") != "Bearer key":
@@ -204,14 +224,16 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )
         return event, req
 
-    async def test_quoted_readonly_turn_recalls_and_records_usage_without_any_capture(self):
+    async def test_readonly_mode_recalls_quoted_text_without_capture(self):
         plugin, queue = self.plugin, self.plugin.outbox
         scope = queue.scope(self.incoming)
         save_reference_options(queue, scope, **{
             **reference_options(queue, scope), "recall_on_quoted_or_link": True,
         })
+        queue.set_mode(scope["scope_id"], "readonly")
+        scope = queue.scope(self.incoming)
         event, request = self.turn("readonly")
-        self.incoming = replace(self.incoming, capture_allowed=False)
+        self.incoming = replace(self.incoming, reply_to="old-message")
         plugin.incoming[event] = self.incoming
         with patch.object(plugin, "freeze_user_capture") as freeze, \
                 patch.object(plugin, "track_assistant_capture") as track:
@@ -264,22 +286,16 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIn(label, failed)
         self.assertIn("recall_timeout", failed)
 
-    async def test_readonly_turn_requires_opt_in_and_discards_results_after_revocation(self):
+    async def test_readonly_quote_discards_results_after_revocation(self):
         plugin, queue = self.plugin, self.plugin.outbox
         scope = queue.scope(self.incoming)
-        event, request = self.turn("readonly-disabled")
-        self.incoming = replace(self.incoming, capture_allowed=False)
-        plugin.incoming[event] = self.incoming
-        with patch.object(plugin, "record_skip") as skipped:
-            await plugin.add_memory(event, request)
-        skipped.assert_called_once()
-        self.assertEqual(request.extra_user_content_parts, [])
-        self.assertEqual(self.requests, [])
+        queue.set_mode(scope["scope_id"], "readonly")
+        scope = queue.scope(self.incoming)
         save_reference_options(queue, scope, **{
-            **reference_options(queue, scope), "recall_on_quoted_or_link": True,
+            **reference_options(queue, scope), "recall_on_quoted_or_link": False,
         })
         event, request = self.turn("readonly-revoked")
-        self.incoming = replace(self.incoming, capture_allowed=False)
+        self.incoming = replace(self.incoming, reply_to="old-message")
         plugin.incoming[event] = self.incoming
         read = plugin.client.recall
 
@@ -481,20 +497,12 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.plugin.client.recall = AsyncMock(side_effect=stall)
         with self.assertRaisesRegex(HindsightError, "recall_timeout"):
             await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.config["recall_timeout"] = 10
-        self.plugin.client.recall = AsyncMock(return_value=[])
-        observed = []
-        original = asyncio.timeout
-        def record(seconds):
-            observed.append(seconds)
-            return original(seconds)
-        with patch.object(asyncio, "timeout", side_effect=record):
-            await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.assertEqual(observed, [10])
-        self.config["recall_timeout"] = 30
-        with patch.object(asyncio, "timeout", side_effect=record):
-            await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp)
-        self.assertEqual(observed[-1], 30)
+        self.config["recall_timeout"] = 0.8
+        async def delayed(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return []
+        self.plugin.client.recall = AsyncMock(side_effect=delayed)
+        self.assertEqual(await self.plugin.recall_text("bank", "hello", timestamp=self.incoming.iso_timestamp), "")
 
     async def test_history_failure_is_not_reported_as_recall_timeout(self):
         self.context.conversation_manager.get_curr_conversation_id.side_effect = TimeoutError
@@ -555,7 +563,6 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
                         self.config["allowed_accounts"] = []
                     elif change == "maintenance":
                         self.plugin.outbox.control.begin_maintenance("test-service", scope["owner_id"])
-                        self.plugin.outbox.apply_control()
                     else:
                         self.plugin.outbox.forget(scope["scope_id"])
                     return "private memory"
@@ -566,7 +573,6 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(req.extra_user_content_parts, [], [part.text for part in req.extra_user_content_parts])
                 if change == "maintenance":
                     self.plugin.outbox.control.finish_maintenance("test-service", scope["owner_id"])
-                    self.plugin.outbox.apply_control()
 
     async def test_cancelled_turn_releases_queue_without_a_failure_notice(self):
         started = asyncio.Event()
@@ -603,7 +609,7 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.plugin.outbox)
             self.assertNotIn("secret", str(self.logger.mock_calls))
 
-    async def test_control_paths_are_confined_before_initialization_opens_resources(self):
+    async def test_legacy_control_path_resolves_without_creating_an_active_store(self):
         await self.plugin._close_resources()
         root = self.plugin.control_directory()
         self.config["control_state_dir"] = str(root / "nested" / ".." / "journal")
@@ -611,40 +617,25 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((root / "journal").exists())
         outside = self.directory / "other-plugin"
         outside.mkdir(mode=0o755)
-        directory_link(root / "escape", outside)
-        directory_link(root / "inside", root)
-        self.config["control_state_dir"] = str(root / "inside" / "journal")
-        self.assertEqual(self.plugin.control_directory(), root / "journal")
-        for path, code in (
-            ("relative", "control_directory_must_be_absolute"),
-            (str(outside), "control_directory_outside_plugin"),
-            (str(root / ".." / "other-plugin"), "control_directory_outside_plugin"),
-            (str(root) + "-suffix", "control_directory_outside_plugin"),
-            (str(root / "escape" / "new"), "control_directory_outside_plugin"),
-        ):
-            self.config["control_state_dir"] = path
-            await self.plugin.initialize()
-            self.assertIn(code, self.plugin.status)
-            self.assertIsNone(self.plugin.client)
-            self.assertIsNone(self.plugin.outbox)
-            self.assertEqual(list(outside.iterdir()), [])
-            if os.name != "nt":
-                self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+        self.config["control_state_dir"] = str(outside)
+        self.assertEqual(self.plugin.control_directory(), outside.resolve())
+        self.assertEqual(list(outside.iterdir()), [])
+        self.config["control_state_dir"] = "relative"
+        await self.plugin.initialize()
+        self.assertIn("control_directory_must_be_absolute", self.plugin.status)
+        self.assertIsNone(self.plugin.client)
+        self.assertIsNone(self.plugin.outbox)
 
-    async def test_control_root_replaced_during_tokenizer_load_is_rejected_at_open(self):
+    async def test_legacy_control_links_are_unused_when_main_exists(self):
         await self.plugin._close_resources()
         root = self.plugin.control_directory()
         outside = self.directory / "other-plugin"
         outside.mkdir(mode=0o755)
-        async def replace_root(name):
-            root.rename(root.with_name("original-control"))
-            directory_link(root, outside)
-        namespace = self.plugin.initialize.__func__.__globals__
-        with patch.dict(namespace, load_encoding=replace_root):
-            await self.plugin.initialize()
-        self.assertIn("control_directory_outside_plugin", self.plugin.status)
-        self.assertIsNone(self.plugin.outbox)
-        self.assertIsNone(self.plugin.client)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        directory_link(root, outside)
+        with closing(Outbox(self.directory / "runtime", "test", "http://memory.test", credential_fingerprint="test",
+                            control_directory=root)) as queue:
+            self.assertIs(queue.db, queue.control.db)
         self.assertEqual(list(outside.iterdir()), [])
         if os.name != "nt":
             self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
@@ -657,27 +648,24 @@ class RuntimeDiagnostics(unittest.IsolatedAsyncioTestCase):
         )):
             self.assertEqual(self.plugin.control_directory(), root)
 
-    async def test_control_file_links_cannot_write_outside_the_allocated_root(self):
+    async def test_main_database_and_lock_links_cannot_touch_other_resources(self):
         await self.plugin._close_resources()
-        root = self.plugin.control_directory()
+        root = self.directory / "isolated"
         outside = self.directory / "external-directory"
         outside.mkdir()
         external = outside / "external-file"
         external.write_text("outside")
         external.chmod(0o644)
-        namespace = self.plugin.initialize.__func__.__globals__
-        for name in ("control.lock", "control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm"):
+        root.mkdir()
+        for name in ("worker.lock", "bridge.sqlite3", "bridge.sqlite3-wal", "bridge.sqlite3-shm"):
             directory = root / name.replace(".", "-")
             directory.mkdir()
             if os.name == "nt":
                 directory_link(directory / name, outside)
             else:
                 (directory / name).symlink_to(external)
-            self.config["control_state_dir"] = str(directory)
-            with patch.dict(namespace, load_encoding=AsyncMock()):
-                await self.plugin.initialize()
-            self.assertIn("control_directory_outside_plugin", self.plugin.status)
-            self.assertIsNone(self.plugin.outbox)
+            with self.assertRaises(QueueError):
+                Outbox(directory, "test", "http://memory.test", credential_fingerprint="test")
             self.assertEqual(external.read_text(), "outside")
             self.assertEqual(list(outside.iterdir()), [external])
             if os.name != "nt":

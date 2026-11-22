@@ -30,7 +30,7 @@ def configuration_message(config):
 
 
 def recall_timeout(config):
-    value = config.get("recall_timeout", 10)
+    value = config.get("recall_timeout", 15)
     try:
         seconds = float(value)
     except (ValueError, TypeError, OverflowError):
@@ -42,14 +42,17 @@ def recall_timeout(config):
 
 def recall_description(value):
     if not value:
-        return "尚未检索"
+        return "暂无记录"
     label = {
         "success": "检索成功", "empty": "无相关结果", "error": "检索失败",
         "skipped": "本轮已跳过", "on_demand": "按需工具，未自动召回",
+        "background_only": "仅使用知识页", "unavailable": "使用记录不可用",
     }[value["outcome"]]
     if value["outcome"] == "error" and "timeout" in value.get("code", ""):
         label = "检索超时"
-    detail = f"{label}；耗时 {value['elapsed_ms'] / 1000:.2f} 秒"
+    detail = label
+    if value.get("elapsed_ms") is not None:
+        detail += f"；耗时 {value['elapsed_ms'] / 1000:.2f} 秒"
     if value.get("consecutive_failures"):
         detail += f"；连续失败 {value['consecutive_failures']} 次"
     return detail

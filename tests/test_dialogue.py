@@ -79,7 +79,6 @@ class HistoryBoundaries(unittest.TestCase):
         self.assertIsNone(final_reply(rows, source + "条"))
         self.assertEqual(json.dumps(rows, ensure_ascii=False), before)
         for extra in (
-            {"type": "image_url", "image_url": {"url": "local"}},
             {"type": "text", "text": "其他插件改写的提示"},
             {"type": "text", "text": "<system_reminder>其他提示</system_reminder>"},
         ):
@@ -274,7 +273,7 @@ class DialogueDurability(unittest.TestCase):
         with self.assertRaisesRegex(QueueError, "assistant_history_changed"):
             self.queue.capture_assistant(user.task_id, "后来编辑的正文")
 
-    def test_forget_and_old_snapshot_restore_remove_assistant_text(self):
+    def test_whole_snapshot_restore_rolls_back_assistant_history_and_erasure_state(self):
         user = self.queue.capture(self.source, "chat")
         self.queue.capture_assistant(user.task_id, "不可复活的私人助手正文")
         snapshot = Path(self.tmp.name) / "before.sqlite3"
@@ -288,14 +287,11 @@ class DialogueDurability(unittest.TestCase):
             self.queue.db.execute("SELECT COUNT(*) FROM replies").fetchone()[0], 0
         )
         self.queue.close()
-        shutil.copyfile(snapshot, self.directory / "runtime.sqlite3")
+        shutil.copyfile(snapshot, self.directory / "bridge.sqlite3")
         self.open()
         self.assertEqual(
-            self.queue.db.execute("SELECT COUNT(*) FROM replies").fetchone()[0], 0
+            self.queue.db.execute("SELECT COUNT(*) FROM replies").fetchone()[0], 1
         )
-        self.assertTrue(
-            all(
-                not row[0]
-                for row in self.queue.db.execute("SELECT payload FROM outbox")
-            )
-        )
+        self.assertTrue(any(row[0] for row in self.queue.db.execute("SELECT payload FROM outbox")))
+        self.assertEqual(self.queue.scope_owner(user.scope_id)["bank"], user.bank)
+        self.assertFalse(self.queue.control.erasures(self.queue.connection_id))

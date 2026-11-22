@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 import json
 import secrets
 import time
-import weakref
 
 from .background import ReadGuard, context_limits
 from .client import HindsightError
@@ -105,7 +104,8 @@ def save_options(queue, scope, *, revision, mode):
 
 def incoming_digest(incoming, deployment):
     return sha256(canonical([
-        incoming.scope(deployment).id, incoming.message_id, incoming.timestamp, sha256(incoming.text),
+        incoming.scope(deployment).id, incoming.message_id, incoming.timestamp,
+        incoming.text, incoming.host_text, incoming.reply_to, incoming.media_types,
     ]))
 
 
@@ -134,6 +134,14 @@ def belongs_to_event(plugin, event, context):
 
 
 @dataclass
+class RequestBinding:
+    request: object
+    toolset: object
+    event: object
+    context: object = None
+
+
+@dataclass
 class ToolTurn:
     guard: ReadGuard
     options: dict
@@ -147,13 +155,11 @@ class ToolTurn:
     tokens: int
     chars: int
     offered_names: frozenset
+    binding: RequestBinding
     calls: int = 0
     output_tokens: int = 0
     output_bytes: int = 0
-    request_ref: object = None
-    toolset_ref: object = None
-    event_ref: object = None
-    context_ref: object = None
+    expiry_handle: object = None
     selected_provider: str | None = None
     prefix: str = ""
     names: frozenset = NAMES
@@ -171,7 +177,7 @@ class MemoryTools:
         self.owned = {}
         self.manager = None
         self.closed = False
-        self.tool_turns = weakref.WeakKeyDictionary()
+        self.tool_turns = {}
         self.observed = {}
         self.outcomes = {}
         self.sequence = 0
@@ -206,7 +212,8 @@ class MemoryTools:
             self.owned[name] = tool
 
     def invalidate(self):
-        self.tool_turns.clear()
+        for turn in list(self.tool_turns.values()):
+            self.release(turn)
         self.observed.clear()
         self.outcomes.clear()
         self.plugin.reflection.outcomes.clear()
@@ -252,14 +259,12 @@ class MemoryTools:
                     and tool.description == original.description)
 
     def turn_tools_available(self, turn, request):
-        source = turn.toolset_ref()
+        source = turn.binding.toolset
         current = getattr(request, "func_tool", None)
         if self.eligible_tools(current, turn.names):
             return True
         if not self.eligible_tools(source, turn.names):
             return False
-        # Native skills_like schemas lose handler identity; the retained request copy
-        # supplies ownership, while the public light schema supplies visibility.
         tools = getattr(current, "tools", [])
         return bool(
             turn.names <= {tool.name for tool in tools if self.light_entry(tool) and getattr(tool, "active", False)}
@@ -325,13 +330,13 @@ class MemoryTools:
             return
         if not self.matches_request(turn, context):
             return
-        if turn.context_ref is not None:
+        if turn.binding.context is not None:
             return
         if not self.valid(turn, event):
             self.record(turn, "unavailable", "reading_changed")
-            self.retire(turn)
+            self.release(turn)
             return
-        turn.context_ref = weakref.ref(context)
+        turn.binding.context = context
 
     def finish(self, event, context):
         turn = self.tool_turns.get(event)
@@ -339,17 +344,16 @@ class MemoryTools:
             return True
         if not belongs_to_event(self.plugin, event, context):
             return False
-        if (turn.context_ref and turn.context_ref() is context) or (
-            turn.context_ref is None and self.matches_request(turn, context)
+        if turn.binding.context is context or (
+            turn.binding.context is None and self.matches_request(turn, context)
         ):
-            self.retire(turn)
-            self.tool_turns.pop(event, None)
+            self.release(turn)
             return True
         return False
 
     @staticmethod
     def matches_request(turn, context):
-        return matches_request(turn.request_ref(), turn.prefix, context)
+        return matches_request(turn.binding.request, turn.prefix, context)
 
     def request_prefix(self, event):
         turn = self.tool_turns.get(event)
@@ -359,8 +363,17 @@ class MemoryTools:
         turn.expires = 0
         self.remove_turn_tools(turn, frozenset(self.owned))
 
+    def release(self, turn):
+        self.retire(turn)
+        if self.tool_turns.get(turn.binding.event) is turn:
+            self.tool_turns.pop(turn.binding.event)
+        if turn.expiry_handle:
+            turn.expiry_handle.cancel()
+            turn.expiry_handle = None
+        turn.binding.context = None
+
     def remove_turn_tools(self, turn, names):
-        event, request = turn.event_ref(), turn.request_ref()
+        event, request = turn.binding.event, turn.binding.request
         if event is not None and self.tool_turns.get(event) is turn:
             if request is not None:
                 original = getattr(request, "func_tool", None)
@@ -370,7 +383,7 @@ class MemoryTools:
                         not self.own_entry(tool) and not self.light_entry(tool)
                     )]
                     request.func_tool = selected
-            source = turn.toolset_ref()
+            source = turn.binding.toolset
             if source is not None:
                 source.tools = [tool for tool in source.tools if tool.name not in names or not self.own_entry(tool)]
         turn.names = turn.names - names
@@ -388,7 +401,6 @@ class MemoryTools:
         try:
             async with asyncio.timeout(1):
                 fingerprint, supported = await self.provider_state(event.unified_msg_origin, model, selected_provider)
-            request_ref = weakref.ref(request)
             available = bool(supported and self.eligible_tools(original))
             reflect_available = bool(supported and self.eligible_tools(original, frozenset({REFLECT_NAME})))
         except TimeoutError:
@@ -416,22 +428,26 @@ class MemoryTools:
         )
         if names:
             limits = context_limits(self.plugin.config)
+            previous = self.tool_turns.get(event)
+            if previous:
+                self.release(previous)
             turn = self.tool_turns[event] = ToolTurn(
                 guard, options, incoming_digest(incoming, guard.queue.deployment_id), incoming.iso_timestamp,
                 event.unified_msg_origin, fingerprint, model, sequence, time.monotonic() + 120,
                 limits["tokens"], limits["chars"],
-                request_ref=request_ref, event_ref=weakref.ref(event),
+                binding=RequestBinding(request, None, event),
                 selected_provider=selected_provider,
                 prefix=marker or request_marker(),
                 offered_names=names, names=names, reflect_options=reflect_options,
             )
             self.filter_request(event, request, original, enable=True)
-            turn.toolset_ref = weakref.ref(request.func_tool)
+            turn.binding.toolset = request.func_tool
+            turn.expiry_handle = asyncio.get_running_loop().call_later(120, self.release, turn)
         return options
 
     def valid(self, turn, event):
         plugin = self.plugin
-        request = turn.request_ref()
+        request = turn.binding.request
         if (
             self.closed or time.monotonic() >= turn.expires or not self.active(turn.names)
             or request is None or getattr(request, "model", None) != turn.model
@@ -577,7 +593,7 @@ class MemoryTools:
             turn = None
         if (
             turn is None or getattr(actual, "context", None) is not self.plugin.context
-            or turn.context_ref is None or turn.context_ref() is not context
+            or turn.binding.context is not context
             or PREFIX + kind not in turn.offered_names
         ):
             return canonical({"error": "tool_context_unavailable"})
@@ -603,12 +619,12 @@ class MemoryTools:
                 asyncio.timeout(turn.reflect_options["timeout"] if kind == "reflect" else min(3, recall_timeout(self.plugin.config))),
                 turn.lock,
             ):
-                if self.tool_turns.get(event) is not turn or turn.context_ref is None or turn.expires == 0:
+                if self.tool_turns.get(event) is not turn or turn.binding.context is None or turn.expires == 0:
                     return unavailable
                 if PREFIX + kind not in turn.names:
                     return unavailable
                 turn.arguments = {}
-                if turn.context_ref() is not context or not self.valid(turn, event):
+                if turn.binding.context is not context or not self.valid(turn, event):
                     self.record(turn, "unavailable", "reading_changed", kind=kind)
                     return self.deliver(turn, kind, {"error": "reading_changed"})
                 if (
@@ -625,7 +641,7 @@ class MemoryTools:
                     await self.plugin.prepare_sources()
                     if not self.valid(turn, event):
                         raise QueueError("reading_changed")
-                    request = turn.request_ref()
+                    request = turn.binding.request
                     fingerprint, supported = await self.provider_state(
                         turn.umo, getattr(request, "model", None), self.selected_provider(event),
                     )
@@ -655,7 +671,6 @@ class MemoryTools:
                             code = "bank_not_created"
                         else:
                             queue.control.set_bank_state(queue.connection_id, turn.guard.scope["bank"], "missing")
-                            queue.apply_control()
                     self.record(turn, "error", code, kind=kind)
                     return self.deliver(turn, kind, {"error": code, "message": self.plugin.diagnostic(code)})
                 except Exception:

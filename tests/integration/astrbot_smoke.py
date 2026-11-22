@@ -22,7 +22,7 @@ for file in (ROOT / "data/__init__.py", ROOT / "data/plugins/__init__.py"):
 sys.path.insert(0, str(ROOT))
 
 from astrbot.core import astrbot_config, db_helper
-from astrbot.core.agent.message import bind_checkpoint_messages, dump_messages_with_checkpoints
+from astrbot.core.agent.message import AssistantMessageSegment, TextPart, bind_checkpoint_messages, dump_messages_with_checkpoints
 from astrbot.core.config.default import VERSION
 from astrbot.core.conversation_mgr import ConversationManager
 from astrbot.core.message.components import Plain
@@ -64,6 +64,8 @@ async def service(request):
         return web.json_response({})
     if path.endswith("/config"):
         return web.json_response({}, status=200 if bank in banks else 404)
+    if path.endswith("/stats"):
+        return web.json_response({"total_documents": len(payloads), "total_nodes": len(payloads)})
     if "/operations/" in path:
         oid = path.rsplit("/", 1)[1]
         return web.json_response({"operation_id": oid, "status": operations.get(oid, "not_found"), "child_operations": None})
@@ -205,7 +207,7 @@ async def main():
             assert metadata and metadata.star_cls and not manager.failed_plugin_dict
             plugin = metadata.star_cls
             candidate_sha256 = verify_installed_candidate(manager)
-            assert metadata.config["recall_timeout"] == 10
+            assert metadata.config["recall_timeout"] == 15 and metadata.config["background_timeout"] == 3
             assert plugin.outbox is None
             routes = {row[0] for row in context.registered_web_apis if NAME in row[0]}
             assert {
@@ -283,24 +285,25 @@ async def main():
                     conversation = await conversations.get_conversation(quoted_event.unified_msg_origin, cid)
                     request = ProviderRequest(prompt="quoted hello", conversation=conversation)
                     await plugin.observe_incoming(quoted_event)
-                    assert (quoted_event in plugin.incoming) is enabled
-                    if enabled:
-                        assert plugin.incoming[quoted_event].capture_allowed is False
+                    assert plugin.incoming[quoted_event].capture_allowed
                     await plugin.add_memory(quoted_event, request)
                     wire = await request.assemble_context()
-                    assert ("A remembered preference" in json.dumps(wire)) is enabled
-                    assert len(recalls) == read + int(enabled)
+                    assert "A remembered preference" in json.dumps(wire)
+                    assert len(recalls) == read + 1
                     assert "referenced content" not in json.dumps(recalls[read:])
-                    history = [{"role": "user", "content": "quoted hello"},
-                               {"role": "assistant", "content": "quoted assistant reply"}]
-                    await conversations.update_conversation(quoted_event.unified_msg_origin, cid, history=history)
-                    await plugin.remember_assistant(quoted_event, SimpleNamespace(messages=history),
+                    messages = [*bind_checkpoint_messages([wire]), AssistantMessageSegment(content=[TextPart(text="quoted assistant reply")])]
+                    await conversations.update_conversation(quoted_event.unified_msg_origin, cid,
+                                                            history=dump_messages_with_checkpoints(messages))
+                    run_context = SimpleNamespace(messages=messages, context=SimpleNamespace(context=context, event=quoted_event))
+                    await plugin.remember_assistant(quoted_event, run_context,
                                                     LLMResponse(role="assistant", completion_text="quoted assistant reply"))
-                    await asyncio.sleep(0.1)
+                    await wait_for(lambda: len(payloads) == sent + 2)
                     assert quoted_event not in plugin.pending_assistant_captures
-                    assert len(payloads) == sent
-                    assert [plugin.outbox.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == before
-                passed.append("native_lark_reply_reads_only_when_enabled_and_never_saves_user_or_assistant")
+                    retained = json.dumps(payloads[sent:])
+                    assert "quoted hello" in retained and "quoted assistant reply" in retained and "referenced content" not in retained
+                    after = [plugin.outbox.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+                    assert after[0] > before[0] and after[1] > before[1]
+                passed.append("native_lark_reply_always_reads_and_saves_new_text_while_ignoring_legacy_switch_and_quote_body")
             old_bank = plugin.outbox.list_scopes()[0]["bank"]
             snapshot = await plugin.panel.bootstrap()
             assert snapshot["scopes"][0]["summary"]["recall"]["outcome"] == "success"

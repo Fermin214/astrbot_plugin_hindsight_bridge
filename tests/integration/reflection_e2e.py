@@ -11,7 +11,7 @@ from reading_e2e import results
 
 async def verify(acceptance, page, frame, bank):
     acceptance.report["tool_schema_mode"] = acceptance.settings.get("tool_schema_mode", "full")
-    acceptance.report["upgrade_baseline"] = acceptance.settings.get("baseline_revision", "v0.4.0")
+    acceptance.report["upgrade_baseline"] = acceptance.settings["baseline_revision"]
     scope = await acceptance.scope()
     identifier = scope["scope_id"]
     assert scope["reflect"]["enabled"] is False and scope["reading"]["mode"] == "automatic"
@@ -163,7 +163,7 @@ async def verify(acceptance, page, frame, bank):
     assert not any(item.get("kind") == "reflect" for item in results(await held))
 
     async def erased(retired):
-        rows = database(ROOT / "control-volume/control.sqlite3", "SELECT phase,cleanup_step FROM erasures WHERE old_bank=?", (retired,))
+        rows = database(acceptance.runtime, "SELECT phase,cleanup_step FROM erasures WHERE old_bank=?", (retired,))
         if not rows or rows[0]["phase"] != "verified" or rows[0]["cleanup_step"] != 7:
             return False
         async with acceptance.session.get(acceptance.settings["hindsight_url"] + "/v1/default/banks/" + retired + "/config",
@@ -203,17 +203,11 @@ async def verify(acceptance, page, frame, bank):
     assert await frame.locator("#reflect-override, #reflect-override-dialog, #maintenance-reflect-override").count() == 0
     acceptance.passed("native_lost_reflect_response_allows_maintenance_resume_and_another_reflect_without_a_manual_override")
 
-    await acceptance.install("baseline-install.zip")
-    await acceptance.usable()
-    await acceptance.control("drop_reflect_response")
-    lost = results(await chat("HB-REFLECT-LEGACY-LOST"))
-    assert not any(item.get("kind") == "reflect" for item in lost)
-    assert (await acceptance.scope())["reflect"]["unknown"] == 1
     other_bank = (await acceptance.scope(BOB))["bank"]
-    journal = ROOT / "control-volume/control.sqlite3"
+    journal = acceptance.runtime
     with sqlite3.connect(journal, timeout=10) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
-        for state, source_bank in (("prepared", bank), ("dispatched", other_bank)):
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        for state, source_bank in (("prepared", bank), ("dispatched", other_bank), ("unknown", new_bank)):
             owner = connection.execute("SELECT connection_id,owner_id,generation FROM banks WHERE bank=?", (source_bank,)).fetchone()
             assert owner is not None
             connection.execute(
@@ -229,7 +223,7 @@ async def verify(acceptance, page, frame, bank):
     audit = database(journal, "SELECT * FROM reflection_requests ORDER BY request_id")
     assert [row["request_id"] for row in audit] == [row["request_id"] for row in legacy]
     assert all(row["state"] == "overridden" and row["overridden_at"] and row["overridden_by"] == "startup" for row in audit)
-    assert database(journal, "PRAGMA user_version")[0]["user_version"] == 7
+    assert database(journal, "PRAGMA user_version")[0]["user_version"] == 8
     await page.reload()
     await acceptance.dismiss_host_notice(page)
     await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
@@ -239,7 +233,7 @@ async def verify(acceptance, page, frame, bank):
     assert pending["maintenance"]["ready"], pending
     await resume()
     assert any(item.get("kind") == "reflect" for item in results(await chat("HB-REFLECT-AFTER-UPGRADE")))
-    acceptance.passed("native_040_to_050_upgrade_archives_all_format_seven_reflect_states_and_keeps_bank_and_reading_available")
+    acceptance.passed("native_restart_archives_all_retained_reflect_states_and_keeps_bank_and_reading_available")
 
     prepared = await acceptance.action(identifier, "forget_prepare")
     await acceptance.action(identifier, "forget_confirm", confirmation=prepared["confirmation"])
@@ -247,10 +241,9 @@ async def verify(acceptance, page, frame, bank):
     assert database(journal, "SELECT * FROM reflection_requests ORDER BY request_id") == audit
     await acceptance.bot.chat(BOB, "The other owner keeps its memory after the Reflect upgrade and erasure.")
     acceptance.report["reflect_upgrade_recovery"] = {
-        "control_format": 7, "baseline": "v0.4.0",
+        "main_format": 8, "baseline": acceptance.settings["baseline_version"],
         "legacy_states": sorted({row["state"] for row in legacy}),
-        "legacy_unknown": "native Reflect response dropped while v0.4.0 was installed",
-        "legacy_prepared_dispatched": "format-seven interruption fixtures inserted before candidate upgrade",
+        "legacy_states_source": "retained interruption fixtures before candidate reload; v0.5 migration verified by upgrade scope",
         "active_bank": "maintenance resumed and native Reflect completed",
         "old_bank": "all seven cleanup steps verified and native Bank returned 404",
         "archived_records_retained": len(audit),

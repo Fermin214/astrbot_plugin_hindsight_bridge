@@ -9,6 +9,10 @@ export function createState(environment) {
     modeLabels: { active: "读写记忆", readonly: "只读记忆", paused: "停用记忆" },
     data: null,
     settingsRevision: "",
+    scopeWrite: (scopeId = view.scopeId) => ({
+      scope_revision: view.data?.scopes.find((scope) => scope.scope_id === scopeId)?.revision,
+      config_revision: view.settingsRevision,
+    }),
     parameterDraft: null,
     parameterKeys: ["background_max_tokens", "recall_max_tokens",
       "recall_timeout", "background_timeout", "recall_query_tokens", "query_tokenizer",

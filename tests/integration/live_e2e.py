@@ -15,15 +15,12 @@ import re
 import shutil
 import sqlite3
 import time
-from urllib.parse import unquote, urlsplit
 
 import aiohttp
 from playwright.async_api import TimeoutError as BrowserTimeout, async_playwright
+from onebot_peer import ALICE, BOB, BOT, OUTSIDER, ROOT, OneBot, message_segments
 
-ROOT = Path("/delivery")
 NAME = "astrbot_plugin_hindsight_bridge"
-ALICE, BOB, OUTSIDER = 123001, 123002, 123003
-BOT = 990001
 SUCCESS = "Hindsight 长期记忆：插件已根据本轮对话自动检索"
 EMPTY = "Hindsight 检索完成，本轮未匹配到相关记忆。"
 TIMEOUT = "记忆检索超时，历史记忆未载入（不影响新消息保存）。"
@@ -44,18 +41,6 @@ def database(path, query, args=()):
         return [dict(row) for row in connection.execute(query, args)]
 
 
-def message_segments(value):
-    if isinstance(value, str):
-        return [{"type": "text", "data": {"text": value}}]
-    if isinstance(value, list):
-        return [part for item in value for part in message_segments(item)]
-    if isinstance(value, dict):
-        if value.get("type") == "node":
-            return message_segments(value.get("data", {}).get("content", []))
-        return [value]
-    return []
-
-
 async def until(predicate, *, timeout=120, label="condition"):
     async with asyncio.timeout(timeout):
         while True:
@@ -65,105 +50,6 @@ async def until(predicate, *, timeout=120, label="condition"):
             if value:
                 return value
             await asyncio.sleep(0.25)
-
-
-class OneBot:
-    sequence = 1000
-
-    def __init__(self, session, settings):
-        self.session, self.settings = session, settings
-        self.bot_id = settings.get("bot_id", BOT)
-        self.socket = None
-        self.reader = None
-        self.actions = []
-        self.files = []
-        self.replies = asyncio.Queue()
-        self.message_id = type(self).sequence
-
-    async def connect(self):
-        async def attempt():
-            try:
-                self.socket = await self.session.ws_connect(
-                    f'http://127.0.0.1:{self.settings["onebot_port"]}/ws',
-                    headers={"X-Self-ID": str(self.bot_id), "X-Client-Role": "Universal",
-                             "Authorization": "Bearer " + self.settings["onebot_token"]})
-                return True
-            except (aiohttp.ClientError, OSError):
-                return False
-        await until(attempt, timeout=30, label="OneBot connection")
-        self.reader = asyncio.create_task(self.read())
-        await self.socket.send_json({"time": int(time.time()), "self_id": self.bot_id, "post_type": "meta_event",
-                                     "meta_event_type": "lifecycle", "sub_type": "connect"})
-
-    async def read(self):
-        async for message in self.socket:
-            if message.type != aiohttp.WSMsgType.TEXT:
-                continue
-            body = json.loads(message.data)
-            action, params = body.get("action", ""), body.get("params", {})
-            self.actions.append(body)
-            result = {}
-            if action == "get_login_info":
-                await asyncio.sleep(getattr(self, "login_info_delay", 0))
-                result = {"user_id": self.bot_id, "nickname": "Delivery bot"}
-            elif action == "get_status":
-                result = {"online": True, "good": True}
-            elif action in {"send_msg", "send_private_msg", "send_group_msg", "send_private_forward_msg", "send_group_forward_msg"}:
-                result = {"message_id": len(self.actions) + 10000}
-                segments = message_segments(params.get("message", params.get("messages", [])))
-                for part in segments:
-                    if part.get("type") != "file":
-                        continue
-                    uri = part.get("data", {}).get("file", "")
-                    path = Path(unquote(urlsplit(uri).path) if uri.startswith("file:") else uri).resolve()
-                    if not path.is_relative_to(ROOT):
-                        raise RuntimeError("OneBot file fixture may only read the dedicated test directory")
-                    self.files.append(json.loads(path.read_text()))
-                await self.replies.put({**params, "message": segments})
-            await self.socket.send_json({"status": "ok", "retcode": 0, "data": result, "echo": body.get("echo")})
-
-    async def send(self, user, text, *, group=False, message_id=None, timestamp=None, metadata=None):
-        type(self).sequence += 1
-        self.message_id = type(self).sequence
-        while not self.replies.empty():
-            self.replies.get_nowait()
-        event = {
-            "time": int(time.time()) if timestamp is None else timestamp,
-            "self_id": self.bot_id, "post_type": "message", "message_type": "group" if group else "private",
-            "sub_type": "normal" if group else "friend", "user_id": user,
-            "message_id": message_id or self.message_id, "message": [{"type": "text", "data": {"text": text}}],
-            "raw_message": text, "font": 0, "sender": {"user_id": user, "nickname": "Synthetic user", "role": "member"},
-        }
-        if group:
-            event["group_id"] = 880001
-        if metadata:
-            assert not event.keys() & metadata.keys()
-            event.update(metadata)
-        await self.socket.send_json(event)
-        return event["message_id"]
-
-    async def chat(self, user, text, *, timestamp=None, metadata=None):
-        await self.send(user, text, timestamp=timestamp, metadata=metadata)
-        async with asyncio.timeout(100):
-            while True:
-                reply = await self.replies.get()
-                content = reply.get("message", [])
-                result = content if isinstance(content, str) else "".join(
-                    part.get("data", {}).get("text", "") for part in content if part.get("type") == "text")
-                if result:
-                    return result
-
-    async def close(self):
-        try:
-            if self.reader:
-                self.reader.cancel()
-                try:
-                    await self.reader
-                except asyncio.CancelledError:
-                    pass
-        finally:
-            if self.socket:
-                await self.socket.close()
 
 
 class Acceptance:
@@ -183,10 +69,27 @@ class Acceptance:
             "acceptance_scope": "existing-service bridge end-to-end with real models and browser",
             "not_covered": ["real QQ account and platform delivery", "execution of managed-service installation wizard"],
             "candidate_tree_sha256": json.loads((ROOT / "package-inventory.json").read_text())["tree_sha256"],
+            "baseline_version": self.settings["baseline_version"],
+            "baseline_revision": self.settings["baseline_revision"],
+            "candidate_revision": self.settings["candidate_revision"],
+            "candidate_working_tree": self.settings["candidate_working_tree"],
+            "initial_queue": [],
             "passed": [], "measurements": {}, "complete": False,
         }
-        self.runtime = ROOT / "verification/data/plugin_data" / NAME / "runtime.sqlite3"
+        self.data_directory = ROOT / "verification/data/plugin_data" / NAME
         self.history = ROOT / "verification/data/data_v4.db"
+
+    @property
+    def runtime(self):
+        main = self.data_directory / "bridge.sqlite3"
+        return main if main.is_file() else self.data_directory / "runtime.sqlite3"
+
+    @property
+    def control_database(self):
+        if self.runtime.name == "bridge.sqlite3":
+            return self.runtime
+        return Path(self.settings.get("verification_control_directory")
+                    or self.data_directory.with_name(NAME + "_control")) / "control.sqlite3"
 
     def passed(self, name):
         self.report["passed"].append(name)
@@ -195,6 +98,25 @@ class Acceptance:
 
     def save(self):
         (ROOT / "live-e2e-report.json").write_text(json.dumps(self.report, indent=2) + "\n")
+
+    def record_baseline(self):
+        self.report["initial_queue"] = database(
+            self.runtime, "SELECT id,operation_id,bank,generation,state,created_at FROM outbox ORDER BY created_at,id",
+        )
+        destination = ROOT / "baseline-state"
+        destination.mkdir(mode=0o700)
+        snapshots = {}
+        for source in (self.runtime, self.control_database, self.runtime.parent / "references.sqlite3"):
+            if not source.is_file():
+                continue
+            target = destination / source.name
+            target.touch(mode=0o600)
+            with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original, closing(sqlite3.connect(target)) as copy:
+                original.backup(copy)
+            snapshots[source.name] = hashlib.sha256(target.read_bytes()).hexdigest()
+        assert {"runtime.sqlite3", "control.sqlite3"} <= snapshots.keys()
+        self.report["baseline_snapshots"] = snapshots
+        self.save()
 
     async def http(self, method, path, *, payload=None, form=None, auth=True):
         headers = {"Authorization": "Bearer " + self.token} if auth and self.token else {}
@@ -268,13 +190,16 @@ class Acceptance:
         scope = next(row for row in (await self.bootstrap())["scopes"]
                      if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
         configuration = await self.config()
-        control_directory = Path(configuration.get("control_state_dir") or self.runtime.parent.parent / (NAME + "_control"))
-        boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
+        boundary = database(self.control_database, "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
         boundary = math.ceil(boundary)
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
     async def action(self, scope, action, **extra):
-        return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={"action": action, **extra})
+        state = await self.bootstrap()
+        row = next(item for item in state["scopes"] if item["scope_id"] == scope)
+        return await self.http("POST", self.prefix + "/scopes/" + scope + "/action", payload={
+            "action": action, "scope_revision": row["revision"], "config_revision": state["config_revision"], **extra,
+        })
 
     async def memories(self, bank):
         async with self.session.get(self.settings["hindsight_url"] + "/v1/default/banks/" + bank + "/memories/list?limit=100",
@@ -406,9 +331,12 @@ class Acceptance:
         await until(check, timeout=180)
 
     async def blocked_maintenance_resume(self, scope_id):
+        state = await self.bootstrap()
+        scope = next(row for row in state["scopes"] if row["scope_id"] == scope_id)
         async with self.session.post(
             self.dashboard + self.prefix + "/scopes/" + scope_id + "/action",
-            json={"action": "maintenance_resume"}, headers={"Authorization": "Bearer " + self.token},
+            json={"action": "maintenance_resume", "scope_revision": scope["revision"],
+                  "config_revision": state["config_revision"]}, headers={"Authorization": "Bearer " + self.token},
         ) as response:
             value = await response.json()
             assert response.status >= 400 or value.get("status") == "error"
@@ -762,6 +690,7 @@ class Acceptance:
                 await asyncio.sleep(1)
                 backlog = [row["id"] for row in self.tasks() if row["state"] not in {"done", "discarded"}]
                 assert backlog
+                self.record_baseline()
                 candidate_auth_started = time.time()
                 await self.install("candidate-upgrade.zip")
                 await self.control("start_hindsight")
@@ -776,7 +705,7 @@ class Acceptance:
                 assert all(row["state"] == "done" for row in self.tasks())
                 assert all(any(row["id"] == identity for row in self.tasks()) for identity in backlog)
                 assert (await self.http("GET", usage_route + "/" + old_turn_id))["turn"] == old_snapshot
-                self.passed("real_upgrade_from_public_v0_4_0_preserves_backlog_config_bank_and_frozen_usage_snapshot")
+                self.passed("real_upgrade_preserves_backlog_config_bank_and_frozen_usage_snapshot")
 
                 snapshot = await self.bootstrap()
                 await self.http("POST", self.prefix + "/settings/save", payload={
@@ -791,9 +720,15 @@ class Acceptance:
                     candidate_auth_started <= row["at"] <= daily_auth["at"]
                     and row["path"] == "/v1/default/banks" and not row["real_key"]
                 )]
-                assert len(initial_probes) == 1 and initial_probes[0]["status"] in {401, 403}
+                baseline_probes = [row for row in jsonl("memory-http-trace") if (
+                    row["at"] < candidate_auth_started and row["path"] == "/v1/default/banks"
+                    and not row["real_key"]
+                )]
+                assert len(baseline_probes) == 1 and baseline_probes[0]["status"] in {401, 403}
+                assert not initial_probes
                 self.report["measurements"]["candidate_initial_negative_auth_probe_count"] = len(initial_probes)
-                self.passed("real_candidate_initial_connection_checks_negative_auth_once")
+                self.report["measurements"]["baseline_negative_auth_probe_count"] = len(baseline_probes)
+                self.passed("real_upgrade_preserves_verified_auth_without_duplicate_negative_probe")
                 await self.extended_message_and_operations(alice)
                 await self.bot.chat(ALICE, "/new")
                 answer = await self.bot.chat(ALICE, "Which tea do I prefer, and what is my notebook code? Answer briefly.")
@@ -890,7 +825,8 @@ class Acceptance:
                 await self.usable()
                 await self.drained()
                 await self.bot.chat(ALICE, "/new")
-                answer = await self.bot.chat(ALICE, "What is my offline note code? Answer briefly.")
+                answer = await self.bot.chat(ALICE, "What exact code did I explicitly label as my offline note code? It is distinct from my notebook code. Answer briefly.")
+                assert "Fern-73" in self.latest_wire()
                 assert "Fern-73" in answer
                 recovered = await self.bootstrap()
                 cold_recall = next(row for row in recovered["scopes"] if row["user_id"] == str(ALICE))["summary"]["recall"]
@@ -938,67 +874,18 @@ class Acceptance:
                 await self.action(alice["scope_id"], "maintenance_resume")
                 self.passed("real_maintenance_drain_gate_and_resume")
 
-                # Snapshot pending business work, then retain the newer erasure
-                # journal while restoring that old snapshot in the same test root.
-                await self.action(alice["scope_id"], "mode", mode="active")
-                await self.control("stop_hindsight")
-                await self.bot.chat(ALICE, "The pending restore test marker is Maple-99. Reply briefly.")
-                await asyncio.sleep(1)
-                pending = [row for row in self.tasks() if row["state"] not in {"done", "discarded"}]
-                assert pending
-                control = ROOT / "verification/data/plugin_data" / (NAME + "_control") / "control.sqlite3"
-                backup = ROOT / "business-before-forget"
-                process = await asyncio.create_subprocess_exec("python", "/candidate-source/scripts/backup.py", "--data-dir", str(self.runtime.parent),
-                                                               "--control-dir", str(control.parent), "--output", str(backup),
-                                                               stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                _, _ = await process.communicate()
-                assert process.returncode == 0
+                from recovery_e2e import verify as verify_recovery
 
-                prepared = await self.action(alice["scope_id"], "forget_prepare")
-                await self.action(alice["scope_id"], "forget_confirm", confirmation=prepared["confirmation"])
-                await self.bot.close()
-                await self.control("stop_astrbot")
-                latest_control = hashlib.sha256(control.read_bytes()).hexdigest()
-                manifest = json.loads((backup / "manifest.json").read_text())
-                revision = int(database(control, "SELECT value FROM settings WHERE key='revision'")[0]["value"])
-                assert revision > manifest["last_seen_control_revision"]
-                shutil.copyfile(backup / "runtime.sqlite3", self.runtime)
-                for suffix in ("-wal", "-shm"):
-                    self.runtime.with_name(self.runtime.name + suffix).unlink(missing_ok=True)
-                assert hashlib.sha256(control.read_bytes()).hexdigest() == latest_control
-                await self.control("start_hindsight")
-                await self.backend_ready()
-                trace_boundary = len(jsonl("retain-trace"))
-                await self.control("start_astrbot")
-                await asyncio.sleep(4)
-                self.bot = OneBot(session, self.settings)
-                await self.bot.connect()
-                await self.usable()
-                async def erased():
-                    state = await self.bootstrap()
-                    scope = next(row for row in state["scopes"] if row["user_id"] == str(ALICE))
-                    return scope if scope["bank"] != bank and not scope["summary"].get("cleanup") else None
-                await until(erased, timeout=180)
-                async def missing():
-                    return (await self.memories(bank))["total"] == 0
-                await until(missing, timeout=180)
-                self.passed("real_forget_generation_rotation_and_old_bank_erasure")
-                state = await self.bootstrap()
-                alice = next(row for row in state["scopes"] if row["user_id"] == str(ALICE))
-                assert alice["mode"] == "paused"
-                retired = database(self.runtime, "SELECT state,payload FROM outbox WHERE bank=?", (bank,))
-                assert retired and all(row["state"] == "discarded" and not row["payload"] for row in retired)
-                assert not any(bank in row["path"] for row in jsonl("retain-trace")[trace_boundary:])
-                self.passed("real_business_backup_restore_keeps_latest_journal_and_does_not_resurrect_erased_work")
+                await verify_recovery(self)
 
                 assert hashlib.sha256(core_path.read_bytes()).hexdigest() == core_hash
                 await self.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + NAME, payload={"delete_config": True, "delete_data": False})
                 await self.install("candidate-install.zip")
                 blank = await self.config()
-                assert blank["recall_timeout"] == 10
+                assert blank["recall_timeout"] == 15
                 initial = await self.bootstrap()
                 assert initial["config"]["missing_fields"] == ["api_url", "api_key", "service_id"]
-                self.passed("fresh_distribution_default_10_and_no_host_config_mutation")
+                self.passed("fresh_distribution_default_15_and_no_host_config_mutation")
                 await self.fresh_authorization_lifecycle()
                 await self.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + NAME)
                 self.passed("actual_dashboard_uninstall")

@@ -53,6 +53,10 @@ class Fixture:
         self.binding = None
 
     async def request(self, request, url, method, **kwargs):
+        if url.endswith("/getFile"):
+            return 200, json.dumps({"ok": True, "result": {
+                "file_id": "synthetic", "file_unique_id": "synthetic", "file_path": "https://example.invalid/image.png",
+            }}).encode()
         if not url.endswith("/getMe"):
             raise AssertionError("unexpected Telegram I/O endpoint")
         return 200, json.dumps({"ok": True, "result": {
@@ -133,17 +137,18 @@ async def main(output):
                 ("via_bot", {"via_bot": {"id": 777, "is_bot": True, "first_name": "Inline"}}),
             ):
                 sample = await fixture.event(changes=changes)
-                assert fixture.header(sample) is None, label
+                accepted = label in {"caption", "media", "reply"}
+                assert (fixture.header(sample) is not None) is accepted, label
                 readonly = fixture.header(sample, allow_readonly=True)
-                if label == "reply":
-                    assert readonly is not None and readonly.capture_allowed is False
-                    assert readonly.text == "synthetic text" and "quoted" not in readonly.text
+                if accepted:
+                    assert readonly is not None and readonly.capture_allowed
+                    assert "quoted" not in readonly.text
                 else:
                     assert readonly is None, label
                 if label in {"media", "reply"}:
                     reasons = []
                     assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=fixture.binding,
-                                          inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                                          inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is not None
                     assert reasons == ["quoted_or_reply" if label == "reply" else "media_or_non_text"]
             metadata = await fixture.event(changes={"future_protocol_field": {"trace": "synthetic"}})
             assert fixture.header(metadata) is not None
@@ -156,7 +161,7 @@ async def main(output):
                 {"type": "text_link", "offset": 0, "length": 4, "url": "https://example.invalid"},
                 {"type": "mention", "offset": 0, "length": 4},
             ):
-                assert fixture.header(await fixture.event(changes={"entities": [entity]})) is None
+                assert (fixture.header(await fixture.event(changes={"entities": [entity]})) is not None) is (entity["type"] == "text_link")
             for text, entities in (
                 ("😀 read link", [{"type": "text_link", "offset": 3, "length": 4, "url": "https://example.invalid"}]),
                 ("@SyntheticBot remember", [{"type": "mention", "offset": 0, "length": 13}]),
@@ -164,8 +169,25 @@ async def main(output):
             ):
                 sample = await fixture.event(text, changes={"entities": entities})
                 readonly = fixture.header(sample, allow_readonly=True)
-                assert readonly is not None and readonly.text == text and readonly.capture_allowed is False
-            passed.append("readonly_replies_links_and_mentions_keep_only_sender_text_and_reject_other_payloads")
+                assert readonly is not None and readonly.capture_allowed
+                assert readonly.host_text == sample.get_message_str()
+                if entities[0]["type"] == "text_link":
+                    assert "https://example.invalid" in readonly.text
+                else:
+                    assert readonly.text == text
+            caption = await fixture.event(None, mid=43, changes={
+                "caption": "😀 看看", "photo": [{"file_id": "synthetic", "file_unique_id": "synthetic", "width": 1, "height": 1}],
+                "caption_entities": [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "123"},
+                                     {"type": "text_link", "offset": 3, "length": 2, "url": "https://example.invalid"}],
+            })
+            captured = fixture.header(caption)
+            assert captured.text == "[表情:😀] 看看 (https://example.invalid)[图片]"
+            assert captured.host_text == caption.get_message_str() and captured.capture_allowed
+            pure_photo = await fixture.event(None, mid=44, changes={"photo": [
+                {"file_id": "synthetic", "file_unique_id": "synthetic", "width": 1, "height": 1},
+            ]})
+            assert fixture.header(pure_photo) is None
+            passed.append("native_reply_link_mention_and_utf16_custom_emoji_caption_keep_text_and_skip_pure_photo")
             command = await fixture.event("/hb@SyntheticBot pause", changes={
                 "entities": [{"type": "bot_command", "offset": 0, "length": len("/hb@SyntheticBot")}],
             })
@@ -224,9 +246,8 @@ async def main(output):
                         source, scope = command.scope(queue.deployment_id), queue.scope(command)
                         change = queue.access.command(command, source, scope, "mode", ("paused",))
                         queue.access.run(change, scope, lambda: queue.set_mode(
-                            scope["scope_id"], "paused", journal_only=True,
+                            scope["scope_id"], "paused",
                         ))
-                        queue.apply_control()
                         try:
                             queue.access.command(command, source, queue.scope_owner(source.id), "mode", ("paused",))
                         except QueueError as error:

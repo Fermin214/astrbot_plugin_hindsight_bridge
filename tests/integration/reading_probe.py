@@ -1,5 +1,6 @@
 """Disposable native plugin for secondary Agent and late request-hook boundaries."""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -35,7 +36,7 @@ class ReadingProbe(Star):
         elif event.message_str == "HB-TOOLS-GUARDS":
             bridge = self.bridge()
             turn = bridge.read_tools.tool_turns[event]
-            assert turn.context_ref is None and turn.calls == 0
+            assert turn.binding.context is None and turn.calls == 0
             provider = await self.context.get_using_provider_async(event.unified_msg_origin)
             await self.context.tool_loop_agent(
                 event=event, chat_provider_id=provider.provider_config["id"],
@@ -43,7 +44,7 @@ class ReadingProbe(Star):
                 tools=ToolSet(tools=[bridge.read_tools.owned["hindsight_bridge_recall"]]),
                 agent_hooks=MAIN_AGENT_HOOKS, max_steps=3,
             )
-            assert turn.context_ref is None and turn.calls == 0
+            assert turn.binding.context is None and turn.calls == 0
             assert event in bridge.pending_assistant_captures
             self.save("secondary_main_hooks_cannot_claim_request_before_primary_agent", True)
 
@@ -55,15 +56,17 @@ class ReadingProbe(Star):
         turn = bridge.read_tools.tool_turns[event]
         if not bridge.read_tools.matches_request(turn, run_context):
             return
-        assert turn.context_ref() is run_context and turn.calls == 0
+        assert turn.binding.context is run_context and turn.calls == 0
         provider = await self.context.get_using_provider_async(event.unified_msg_origin)
-        await self.context.tool_loop_agent(
-            event=event, chat_provider_id=provider.provider_config["id"],
-            prompt="HB-TOOLS-PROBE-BACKGROUND",
-            tools=ToolSet(tools=[bridge.read_tools.owned["hindsight_bridge_recall"]]),
-            max_steps=3,
-        )
-        assert turn.context_ref() is run_context and turn.calls == 0
+        async def child():
+            return await self.context.tool_loop_agent(
+                event=event, chat_provider_id=provider.provider_config["id"],
+                prompt="HB-TOOLS-PROBE-BACKGROUND",
+                tools=ToolSet(tools=[bridge.read_tools.owned["hindsight_bridge_recall"]]),
+                max_steps=3,
+            )
+        await asyncio.gather(child(), child())
+        assert turn.binding.context is run_context and turn.calls == 0
         self.save("secondary_agent_cannot_claim_or_consume_main_ledger", True)
 
     @filter.on_agent_done(priority=-100)

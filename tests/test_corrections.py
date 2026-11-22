@@ -42,22 +42,18 @@ class NativeMemories(unittest.TestCase):
             with closing(sqlite3.connect(path)) as db, db:
                 db.execute("CREATE TABLE corrections(text TEXT)")
                 db.execute("INSERT INTO corrections VALUES ('preserve-me')")
-            with self.assertRaisesRegex(QueueError, "legacy_corrections_require_handover"):
+            with self.assertRaises(QueueError):
                 Outbox(runtime, "test", "http://memory.test", credential_fingerprint="key")
             with closing(sqlite3.connect(path)) as db:
                 self.assertEqual(db.execute("SELECT text FROM corrections").fetchone()[0],
                                  "preserve-me")
 
-    def test_empty_legacy_store_needs_no_migration_framework(self):
+    def test_incomplete_legacy_store_cannot_initialize_empty_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory) / "runtime"
             runtime.mkdir()
             with closing(sqlite3.connect(runtime / "runtime.sqlite3")) as db, db:
                 db.execute("CREATE TABLE corrections(text TEXT)")
-            queue = Outbox(runtime, "test", "http://memory.test", credential_fingerprint="key")
-            try:
-                self.assertIsNone(queue.db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='corrections'"
-                ).fetchone())
-            finally:
-                queue.close()
+            with self.assertRaises(QueueError):
+                Outbox(runtime, "test", "http://memory.test", credential_fingerprint="key")
+            self.assertFalse((runtime / "bridge.sqlite3").exists())

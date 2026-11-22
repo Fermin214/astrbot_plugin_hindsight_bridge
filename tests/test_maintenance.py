@@ -187,7 +187,7 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             await self.worker.maintenance.resume(first.scope_id)
         self.assertNotIn(first.bank, self.service.banks)
 
-    async def test_old_runtime_snapshot_cannot_replay_discarded_work_after_resume(self):
+    async def test_whole_snapshot_restore_recovers_queued_work_at_snapshot_time(self):
         first = await self.seed()
         pending = self.enqueue("pending")
         snapshot = self.root / "old.sqlite3"
@@ -199,13 +199,13 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
         await self.worker.maintenance.resume(first.scope_id)
         self.queue.close()
         with closing(sqlite3.connect(snapshot)) as old, closing(
-            sqlite3.connect(self.root / "runtime" / "runtime.sqlite3")
+            sqlite3.connect(self.root / "runtime" / "bridge.sqlite3")
         ) as destination:
             old.backup(destination)
         self.open()
         await self.step()
-        self.assertIn(self.queue.get(pending.task_id)["state"], {"cancelled", "discarded"})
-        self.assertEqual(len(self.service.submissions), 1)
+        self.assertNotIn(self.queue.get(pending.task_id)["state"], {"cancelled", "discarded"})
+        self.assertEqual(len(self.service.submissions), 2)
 
     async def test_unknown_unaccepted_request_is_not_resubmitted_during_maintenance(self):
         pending = self.enqueue()
@@ -375,17 +375,9 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             self.service.operations[key] = {"operation_id": key, "status": "pending"}
             self.service.op_banks[key] = captured.bank
         record = self.queue.forget(captured.scope_id)
-        control_path = self.queue.control.directory / "control.sqlite3"
         self.queue.close()
-        # Reopen an original version-2 control store, without erasure checkpoints.
-        with closing(sqlite3.connect(control_path)) as db, db:
-            db.execute("DROP INDEX erasure_refs_cleanup")
-            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_step")
-            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_epoch")
-            db.execute("ALTER TABLE erasure_refs DROP COLUMN checked_pass")
-            db.execute("PRAGMA user_version=2")
         self.open()
-        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 7)
+        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 8)
         operation, listing = self.client.operation, self.client.list_operations
         reads, listings = [], 0
 

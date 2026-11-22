@@ -228,10 +228,9 @@ class QQSourceTests(unittest.TestCase):
 
     def test_raw_media_reference_and_nonprivate_payloads_cannot_downgrade_to_plain(self):
         for fields in (
-            {"attachments": [{"content_type": "image/png"}]},
             {"attachments": {}}, {"attachments": False},
             {"msg_elements": [{"type": 103}]}, {"msg_elements": ""},
-            {"message_reference": {"message_id": "quoted"}}, {"message_reference": {}},
+            {"message_reference": {}},
             {"message_type": 103}, {"message_type": False}, {"message_type": None},
             {"channel_id": "channel"},
             {"group_openid": "group"},

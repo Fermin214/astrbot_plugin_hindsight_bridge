@@ -1,11 +1,9 @@
 """Ordinary Telegram Bot private messages through the native AstrBot adapter."""
 
-import math
-import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from .identity import Incoming
+from .source import bound_account, private_event, valid_time as valid_message_time
 
 
 PLAIN_ENTITIES = frozenset({
@@ -68,13 +66,7 @@ def bound_login(event, adapter, binding):
     if not binding or binding.get("invalid_login") or binding.get("adapter") is not adapter:
         return None
     login = native_login(adapter)
-    previous = binding.get("login")
-    if (
-        login is None or not isinstance(previous, TelegramLogin) or not previous.matches(login)
-        or binding.get("bot_id") != login.bot_id or binding.get("client") is not login.client
-        or getattr(event, "client", None) is not login.client
-        or event.get_platform_name() != "telegram" or event.get_platform_id() != adapter.meta().id
-    ):
+    if not bound_account(event, adapter, binding, login, login.bot_id if login else "", getattr(event, "client", None)):
         return None
     raw = getattr(event.message_obj, "raw_message", None)
     try:
@@ -96,15 +88,15 @@ def message_shape(message):
     return "unsupported_message"
 
 
-def readonly_text(message, bot_name):
+def readonly_text(message, bot_name, *, caption=False):
     if not isinstance(bot_name, str):
         return None
     try:
-        encoded = message.text.encode("utf-16-le")
+        encoded = (message.caption if caption else message.text).encode("utf-16-le")
     except UnicodeError:
         return None
     pieces, mentions, end = [], [], 0
-    for entity in message.entities or ():
+    for entity in (message.caption_entities if caption else message.entities) or ():
         if entity.type not in READONLY_ENTITIES:
             continue
         if type(entity.offset) is not int or type(entity.length) is not int:
@@ -122,7 +114,7 @@ def readonly_text(message, bot_name):
             name = text[1:]
             self_mention = name.lower() == bot_name.lower()
             mentions.append((bot_name if self_mention else name, name))
-            if self_mention:
+            if self_mention and not caption:
                 pieces.append(encoded[end:start])
                 end = stop
         else:
@@ -137,9 +129,51 @@ def readonly_text(message, bot_name):
         return None
 
 
+def text_segments(original, entities):
+    try:
+        encoded = original.encode("utf-16-le")
+        emojis, links = {}, {}
+        for entity in entities:
+            if (entity.type not in PLAIN_ENTITIES | READONLY_ENTITIES | {"custom_emoji"}
+                    or type(entity.offset) is not int or type(entity.length) is not int
+                    or entity.offset < 0 or entity.length <= 0):
+                return None
+            start, stop = entity.offset * 2, (entity.offset + entity.length) * 2
+            if stop > len(encoded):
+                return None
+            name = encoded[start:stop].decode("utf-16-le")
+            if entity.type == "custom_emoji":
+                if not isinstance(entity.custom_emoji_id, str) or not entity.custom_emoji_id:
+                    return None
+                if start in emojis:
+                    return None
+                emojis[start] = (stop, name)
+            elif entity.type == "text_link":
+                if not isinstance(entity.url, str) or not entity.url or len(entity.url) > 8000:
+                    return None
+                links.setdefault(stop, []).append(entity.url)
+        pieces, end = [], 0
+        for position in sorted(set(emojis) | set(links) | {len(encoded)}):
+            if position >= end:
+                pieces.append(("text", encoded[end:position].decode("utf-16-le")))
+                end = position
+            if position in emojis:
+                if position < end:
+                    return None
+                stop, name = emojis[position]
+                pieces.append(("emoji", name))
+                end = stop
+            for url in links.get(position, ()):
+                pieces.append(("text", " (" + url + ")"))
+        pieces.append(("text", encoded[end:].decode("utf-16-le")))
+        return pieces
+    except UnicodeError:
+        return None
+
+
 def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, allow_readonly=False):
     login = bound_login(event, adapter, binding)
-    if login is None or not event.is_private_chat() or event.get_group_id():
+    if login is None or not private_event(event):
         return None
     from telegram import Message
 
@@ -161,20 +195,17 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
         or not numeric_id(msg.message_id) or str(msg.message_id) != event.message_obj.message_id
     ):
         return None
-    date, original = msg.date, msg.text
+    from .source import finish_message
+
+    caption = not msg.text and msg.caption is not None
+    date, original = msg.date, msg.caption if caption else msg.text
+    entities = (msg.caption_entities if caption else msg.entities) or ()
     occurred = date.timestamp() if isinstance(date, datetime) and date.utcoffset() is not None else None
     received = getattr(event, "created_at", None)
-    valid_time = (
-        occurred is not None and math.isfinite(occurred) and 0 < occurred <= time.time() + 300
-        and type(received) in (int, float) and math.isfinite(received) and 0 < received <= time.time() + 300
-    )
+    valid_time = valid_message_time(occurred, received)
     if inspect is not None:
         inspect(login.bot_id, occurred if valid_time else None, received, lambda: message_shape(msg))
-    quoted = msg.reply_to_message is not None
-    linked = any(entity.type in READONLY_ENTITIES for entity in msg.entities or ())
-    readonly = quoted or linked
-    blocked_fields = NONORDINARY_FIELDS - ({"reply_to_message"} if allow_readonly else set())
-    allowed_entities = PLAIN_ENTITIES | (READONLY_ENTITIES if allow_readonly else set())
+    blocked_fields = NONORDINARY_FIELDS - MEDIA_FIELDS - {"reply_to_message", "caption", "caption_entities"}
     if (
         not valid_time or any(getattr(raw, name, None) is not None for name in (
             "edited_message", "channel_post", "edited_channel_post", "business_message", "edited_business_message",
@@ -184,7 +215,6 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
             "channel_chat_created", "delete_chat_photo", "group_chat_created", "supergroup_chat_created",
         ))
         or not isinstance(original, str) or not original.strip() or len(original) > 8000
-        or any(entity.type not in allowed_entities for entity in msg.entities or ())
     ):
         return None
     # AstrBot removes the Bot username suffix before dispatching a command.
@@ -195,43 +225,26 @@ def header(event, plain_type, wake_prefixes, adapter, binding, *, inspect=None, 
             name, target = command.split("@")
             if target == login.client.username:
                 canonical = name + (separator + arguments if separator else "")
+    projected = readonly_text(msg, event.get_self_id(), caption=caption)
+    normalized = text_segments(original, entities)
     parts = event.get_messages()
-    visible = canonical
-    if readonly and allow_readonly:
-        from astrbot.api.message_components import At, Reply
-
-        projected = readonly_text(msg, event.get_self_id())
-        if projected is None or not isinstance(parts, list) or any(type(part) not in (plain_type, At, Reply) for part in parts):
-            return None
-        if linked:
-            visible, mentions = projected
-        else:
-            mentions = []
-        if [(part.qq, part.name) for part in parts if type(part) is At] != mentions:
-            return None
-        replies = [part for part in parts if type(part) is Reply]
-        if len(replies) > 1 or replies and (not quoted or str(replies[0].id) != str(msg.reply_to_message.message_id)):
-            return None
-        parts = [part for part in parts if type(part) is plain_type]
-    if (
-        not isinstance(parts, list) or len(parts) != 1
-        or type(parts[0]) is not plain_type or parts[0].text != visible
-    ):
+    if projected is None or normalized is None or not isinstance(parts, list):
         return None
-    host_text = event.get_message_str()
-    matching = isinstance(host_text, str) and (
-        visible.strip() == host_text.strip() or (
-            getattr(event, "is_at_or_wake_command", False) is True
-            and any(
-                visible.strip().startswith(prefix)
-                and visible.strip()[len(prefix):].strip() == host_text.strip()
-                for prefix in wake_prefixes if isinstance(prefix, str) and prefix
-            )
-        )
-    )
-    if not matching:
+    visible, mentions = projected
+    if canonical != original:
+        visible = canonical
+        normalized = [("text", canonical)]
+    if [(part.qq, part.name) for part in parts if type(part).__name__ == "At"] != mentions:
         return None
-    return Incoming(
-        "telegram", event.get_platform_id(), login.bot_id, str(sender.id),
-        str(msg.message_id), occurred, canonical, received_at=received, capture_allowed=not readonly,
-    )
+    for field, kind in (("photo", "image"), ("animation", "sticker"), ("sticker", "sticker"),
+                        ("audio", "audio"), ("voice", "voice"), ("document", "file"),
+                        ("video", "video"), ("video_note", "video")):
+        if getattr(msg, field, None):
+            normalized.append((kind, None))
+    if any(getattr(msg, field, None) for field in MEDIA_FIELDS - {
+        "photo", "animation", "sticker", "audio", "voice", "document", "video", "video_note",
+    }):
+        return None
+    reply_to = str(msg.reply_to_message.message_id) if msg.reply_to_message else ""
+    return finish_message(event, plain_type, wake_prefixes, "telegram", login.bot_id, str(sender.id),
+                          occurred, normalized, [visible] if visible else [], reply_to=reply_to)

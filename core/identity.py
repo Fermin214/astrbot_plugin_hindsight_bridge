@@ -70,6 +70,13 @@ class Incoming:
     text: str
     received_at: float = field(default_factory=lambda: time.time(), compare=False)
     capture_allowed: bool = True
+    host_text: str | None = None
+    reply_to: str = ""
+    media_types: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if self.host_text is None:
+            object.__setattr__(self, "host_text", self.text)
 
     @property
     def iso_timestamp(self) -> str:

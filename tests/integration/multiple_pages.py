@@ -102,7 +102,7 @@ async def verify(acceptance, page, frame, bank, short):
     selection = scope["background"]
     assert selection["pages"] == [{"page_id": short, "mental_model_id": selection["mental_model_id"]}]
     assert selection["revision"] == 1 and selection["enabled"]
-    acceptance.passed("native_028_single_page_upgrade_preserves_bank_selection_and_revision")
+    acceptance.passed("native_baseline_single_page_upgrade_preserves_bank_selection_and_revision")
 
     async def selected(ids):
         scope = await acceptance.scope()
@@ -172,7 +172,7 @@ async def verify(acceptance, page, frame, bank, short):
     finally:
         await acceptance.control("delay_background", seconds=0)
     await save_parameters(acceptance, frame, recall_timeout=10, background_timeout=1)
-    acceptance.passed("all_page_reads_share_the_existing_quarter_deadline_and_leave_recall_available")
+    acceptance.passed("all_page_reads_share_the_configured_deadline_and_leave_recall_available")
 
     await acceptance.http("POST", "/api/v1/plugins/" + NAME + "/reload", payload={})
     await acceptance.usable()

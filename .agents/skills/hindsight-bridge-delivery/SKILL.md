@@ -9,9 +9,12 @@ description: Hindsight Bridge 的改动范围映射、回归验证、打包与�
 
 1. 基于 main 建立开发分支，按可独立验证的批次提交。
 2. 运行受影响的验收范围；发布候选运行 `python tests/run.py`、`node tests/test_memory_view.mjs` 和 `node --check views/memory/*.js` 对应的逐文件语法检查。
+   单主库改动另跑真实 `--scope upgrade`：固定 0.5.0 数据、三恢复点、缺库/错配/空间不足、历史锁库与跨卡并发；日常恢复用整库快照，不混拼旧业务与新控制。迁移备份含旧聊天，文档须写明稳定后删除。
 3. 同步 metadata.yaml 与 CHANGELOG.md 的版本。运行 `python tools/check-package.py --release-base main`。
 4. 使用 `python tools/build-test-package.py --distribution --revision <提交> --output <仓库外目录>` 检查导出的文件清单和包内链接。证据记录提交、包树摘要、模型、平台版本及配置。
 5. Push 并创建 PR，由 CI 完成完整回归；代码审查遵循共享 codex-review Skill。修复有效反馈并针对性验证。
 6. 归档脱敏证据，删除验收容器、卷、临时镜像标签与输出目录。仅回收本次创建的资源；异常遗留浏览器用 `python tools/run-live-e2e.py --sweep-browsers` 清理。
+
+按 CONTRIBUTING.md 的行为映射维护核心单测、DOM/Chromium、真实闭环三层证据，不为行数删掉可靠性保护；记录基线与候选运行时/测试行数及同环境回归耗时。`.local/` 不进入分发包或 Git。
 
 PR 提供用户入口变化、升级注意事项和实际验证结果。合并由用户操作。

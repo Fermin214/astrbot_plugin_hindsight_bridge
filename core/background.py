@@ -41,7 +41,7 @@ def page_references(pages):
 def context_limits(config):
     """Shared ceilings keep their old defaults; page limits are independent."""
     page_tokens = config.get("background_max_tokens", 400)
-    value = config.get("background_timeout", 1)
+    value = config.get("background_timeout", 3)
     try:
         seconds = float(value)
     except (ValueError, TypeError, OverflowError):
@@ -98,17 +98,14 @@ def reference(queue, scope):
     try:
         stored = json.loads(value)
         if (
-            not isinstance(stored, dict) or type(stored.get("format")) is not int or stored["format"] not in {1, 2}
+            not isinstance(stored, dict) or type(stored.get("format")) is not int or stored["format"] != 2
             or type(stored.get("revision")) is not int or stored["revision"] < 1
             or type(stored.get("enabled")) is not bool
             or any(not isinstance(stored.get(k), str) for k in ("page_id", "mental_model_id"))
             or ("invalidated" in stored and type(stored["invalidated"]) is not bool)
         ):
             raise ValueError
-        pages = page_references(stored.get("pages")) if stored["format"] == 2 else page_references(
-            [{"page_id": stored["page_id"], "mental_model_id": stored["mental_model_id"]}]
-            if stored["page_id"] or stored["mental_model_id"] else []
-        )
+        pages = page_references(stored.get("pages"))
         first = pages[0] if pages else {"page_id": "", "mental_model_id": ""}
         if any(stored[key] != first[key] for key in first) or (stored["enabled"] and not pages):
             raise ValueError

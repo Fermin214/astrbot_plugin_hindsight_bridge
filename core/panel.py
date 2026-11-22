@@ -1,7 +1,7 @@
 """AstrBot plugin-view connection, account and maintenance management."""
 
 import asyncio
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -40,7 +40,10 @@ class PanelSnapshot:
 
 class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
     def __init__(self, plugin):
+        from .bank_stats import BankStats
+
         self.plugin = plugin
+        self.bank_stats = BankStats(plugin)
         self.lock = asyncio.Lock()
         self.closed = False
         self.requests = set()
@@ -74,6 +77,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             ("scopes/<scope_id>/references/count", "POST", self.prompt_count),
             ("scopes/<scope_id>/usage", "GET", self.usage),
             ("scopes/<scope_id>/usage/<turn_id>", "GET", self.usage),
+            ("scopes/<scope_id>/skips", ["GET", "POST"], self.skips),
             ("scopes/<scope_id>/reflect", ["GET", "POST"], self.reflect),
         ]
         if hasattr(plugin.context, "register_web_api"):
@@ -90,6 +94,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             task = asyncio.current_task()
             try:
                 self.ensure_open()
+                self.require_login()
                 self.requests.add(task)
                 value = await handler(**kwargs)
                 if isinstance(value, dict):
@@ -107,6 +112,32 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
             finally:
                 self.requests.discard(task)
         return invoke
+
+    @staticmethod
+    def require_login():
+        from astrbot.api.web import request
+
+        if not request.username:
+            raise PanelError("请使用 AstrBot 管理账号登录。")
+
+    @asynccontextmanager
+    async def route(self, *, resources=True, timeout=8):
+        async with self.lock, self.plugin.using_resources() if resources else nullcontext(), asyncio.timeout(timeout):
+            self.ensure_open()
+            self.require_login()
+            yield
+
+    def check_card(self, payload, scope, selection, code):
+        self.check_scope_revision(payload, scope, code)
+        if type(payload.get("revision")) is not int or payload["revision"] != selection["revision"]:
+            raise QueueError(code)
+
+    def check_scope_revision(self, payload, scope, code="scope_not_available"):
+        if (
+            type(payload.get("scope_revision")) is not int or payload["scope_revision"] != scope["revision"]
+            or payload.get("config_revision") != self.config_revision()
+        ):
+            raise QueueError(code)
 
     def ensure_open(self):
         if self.closed:
@@ -127,7 +158,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
         messages = {
             "reference_turn_missing": "这轮使用记录已清除，请重新打开使用记录。",
             "reference_changed": "记忆参考设置已变化，请重新载入后保存。",
-            "reference_settings_invalid": "记忆参考设置损坏，请检查插件控制库。",
+            "reference_settings_invalid": "记忆参考设置损坏，请检查插件主库。",
             "reference_prompt_too_long": f"记忆提示超过 {PROMPT_TOKEN_LIMIT} token，请缩短后保存。",
             "reference_history_unavailable": "无法读取或保存使用记录，请检查插件数据目录权限与剩余空间。",
             "remote_failed": "记忆整理失败。请检查模型配置和服务日志，修复后点击「重试保存」。",
@@ -172,7 +203,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
 
     def has_identity_data(self):
         return any((self.directory() / name).is_file() for name in (
-            "runtime.sqlite3", "outbox.sqlite3",
+            "bridge.sqlite3", "runtime.sqlite3", "outbox.sqlite3",
         )) or (self.plugin.control_directory() / "control.sqlite3").is_file()
 
     def state(self, *, create=False):
@@ -452,6 +483,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
 
     async def close(self):
         self.closed = True
+        await self.bank_stats.close()
         tasks = self.requests | {self.model_task}
         tasks = {task for task in tasks if task is not None and task is not asyncio.current_task()}
         for task in tasks:

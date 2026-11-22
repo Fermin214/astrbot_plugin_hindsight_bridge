@@ -1,14 +1,11 @@
 """Native OneBot v11 private messages and recipient identity."""
 
 import asyncio
-import math
 import time
 from collections.abc import Mapping
+from itertools import groupby
 
-from .identity import Incoming
-
-
-HOST_CLOCK_TOLERANCE = 300.0
+from .source import private_event, valid_time as valid_message_time
 
 
 def native_types():
@@ -74,15 +71,13 @@ def message_shape(segments):
         segment["type"] for segment in segments
         if isinstance(segment, Mapping) and isinstance(segment.get("type"), str)
     }
-    if "reply" in types:
-        return "quoted_or_reply"
-    if types - {"text"}:
+    if types - {"text", "face", "reply", "at"}:
         return "media_or_non_text"
     return "unsupported_message"
 
 
 def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=None, allow_readonly=False):
-    if not event.is_private_chat() or event.get_group_id():
+    if not private_event(event):
         return None
     if adapter is not None and bound_client(event, adapter) is None:
         return None
@@ -108,9 +103,7 @@ def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=N
     received = getattr(event, "created_at", None)
     segments = raw.get("message")
     valid_time = (
-        type(timestamp) is int and 0 < timestamp <= time.time() + 300
-        and type(received) in (int, float) and math.isfinite(received)
-        and 0 < received <= time.time() + HOST_CLOCK_TOLERANCE
+        type(timestamp) is int and valid_message_time(timestamp, received)
     )
     if inspect is not None:
         inspect(fields[1], timestamp if valid_time else None, received, lambda: message_shape(segments))
@@ -119,50 +112,51 @@ def header(event, plain_type, wake_prefixes, adapter, binding=None, *, inspect=N
     components = event.get_messages()
     if not isinstance(segments, list) or not segments or not components:
         return None
-    texts = []
-    quoted = False
+    from .source import finish_message
+
+    normalized, reply_to = [], ""
     for segment in segments:
         if not isinstance(segment, Mapping):
             return None
         data = segment.get("data")
-        if allow_readonly and segment.get("type") == "reply":
+        kind = segment.get("type")
+        if not isinstance(data, Mapping):
+            return None
+        if kind == "reply":
             if not isinstance(data, Mapping) or set(data) != {"id"} or type(data["id"]) not in (str, int):
                 return None
-            if (set(segment) != {"type", "data"} or quoted or len(str(data["id"])) > 20
+            if (set(segment) != {"type", "data"} or reply_to or len(str(data["id"])) > 20
                     or not str(data["id"]).isascii() or not str(data["id"]).isdecimal() or int(data["id"]) <= 0):
                 return None
-            quoted = True
+            reply_to = str(data["id"])
             continue
-        if segment.get("type") != "text":
+        if kind == "text":
+            if not isinstance(data.get("text"), str):
+                return None
+            normalized.append(("text", data["text"]))
+        elif kind == "face":
+            if type(data.get("id")) not in (str, int):
+                return None
+            normalized.append(("emoji", data.get("name") or data.get("text")))
+        elif kind in {"mface", "image", "record", "file", "video"}:
+            if not data:
+                return None
+            normalized.append((kind, None))
+        elif kind == "at":
+            target = data.get("qq")
+            if type(target) not in (str, int) or not str(target):
+                return None
+            normalized.append(("text", "@" + str(target)))
+        else:
             return None
-        if not isinstance(data, Mapping) or not isinstance(data.get("text"), str):
+    host_parts = [text for kind, group in groupby(segments, key=lambda part: part["type"])
+                  if kind == "text" and (text := "".join(part["data"]["text"] for part in group).strip())]
+    visible = "".join(host_parts)
+    at_segments = [str(part["data"]["qq"]) for part in segments if part["type"] == "at"]
+    at_components = [part for part in components if type(part).__name__ == "At"]
+    if at_segments:
+        if [str(part.qq) for part in at_components] != at_segments:
             return None
-        texts.append(data["text"])
-    if quoted:
-        from astrbot.api.message_components import Reply
-
-        if (any(type(value) not in (plain_type, Reply) for value in components)
-                or sum(type(value) is Reply for value in components) > 1):
-            return None
-        components = [value for value in components if type(value) is plain_type]
-    if not components or not all(isinstance(value, plain_type) and isinstance(value.text, str) for value in components):
-        return None
-    original = "".join(texts)
-    host_text = event.get_message_str().strip()
-    matching_text = original.strip() == host_text or (
-        getattr(event, "is_at_or_wake_command", False) is True
-        and any(
-            original.strip().startswith(prefix)
-            and original.strip()[len(prefix):].strip() == host_text
-            for prefix in wake_prefixes if isinstance(prefix, str) and prefix
-        )
-    )
-    if (
-        original.strip() != "".join(value.text for value in components)
-        or not matching_text
-        or not original.strip()
-        or len(original) > 8000
-    ):
-        return None
-    return Incoming("aiocqhttp", *fields, mid, timestamp, original, received_at=received,
-                    capture_allowed=not quoted)
+        visible = event.get_message_str()
+    return finish_message(event, plain_type, wake_prefixes, "aiocqhttp", fields[1], fields[2],
+                          timestamp, normalized, host_parts, visible_text=visible, reply_to=reply_to)

@@ -108,15 +108,24 @@ async def main(output):
         quoted = await fixture.event(changes={"parent_id": "om_parent"},
                                      reply=Reply(id="om_parent", chain=[Plain("referenced content")]))
         assert [type(part) for part in quoted.get_messages()] == [Reply, Plain]
-        assert header(quoted) is None
         readonly = native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True)
-        assert readonly and readonly.capture_allowed is False and readonly.text == "  synthetic text  "
+        assert readonly and readonly.capture_allowed and readonly.text == "  synthetic text  "
+        assert readonly.reply_to == "om_parent" and "referenced content" not in readonly.text
         quoted.get_messages()[0].id = "om_foreign"
-        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True) is None
+        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding).reply_to == "om_parent"
         quoted.get_messages()[0].id = "om_parent"
         quoted.get_messages().insert(1, Reply(id="om_parent"))
-        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True) is None
-        passed.append(mode + "_native_reply_component_reads_only_sender_text_and_checks_parent_identity")
+        assert native_header(quoted, Plain, ["/"], adapter=fixture.host, binding=binding).text == "  synthetic text  "
+        passed.append(mode + "_native_reply_saves_new_text_using_raw_parent_id_and_ignores_host_quote_body")
+        post_content = {"title": "看图", "content": [[{"tag": "text", "text": "文字 😀"},
+                                                     {"tag": "img", "image_key": "img_fixture"}],
+                                                    [{"tag": "a", "text": "链接", "href": "https://example.invalid"}]]}
+        with patch.object(fixture.host, "_download_message_resource", AsyncMock(return_value=b"synthetic-image")):
+            post = await fixture.event(changes={"message_type": "post", "content": json.dumps(post_content)}, mid="om_post")
+        captured = header(post)
+        assert captured and captured.text == "看图\n文字 😀[图片]\n链接(https://example.invalid)"
+        assert captured.host_text == post.get_message_str() and captured.capture_allowed
+        passed.append(mode + "_native_rich_post_keeps_title_text_image_placeholder_link_and_host_history_anchor")
 
         for field, value in (
             ("chat_type", "group"), ("chat_type", "unknown"),
@@ -134,10 +143,11 @@ async def main(output):
         ):
             sample = await fixture.event()
             setattr(sample.message_obj.raw_message, field, value)
-            assert header(sample) is None, (mode, field, type(value))
+            accepted = field in {"parent_id", "root_id", "thread_id"}
+            assert (header(sample) is not None) is accepted, (mode, field, type(value))
             readonly = native_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding, allow_readonly=True)
-            if field in {"parent_id", "root_id"}:
-                assert readonly is not None and readonly.capture_allowed is False
+            if accepted:
+                assert readonly is not None and readonly.capture_allowed
                 assert readonly.text == "  synthetic text  "
             else:
                 assert readonly is None, (mode, field)
@@ -147,8 +157,9 @@ async def main(output):
             }.get(field)
             if expected:
                 reasons = []
-                assert inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding,
-                                      inspect=lambda bot, occurred, received, shape: reasons.append(shape())) is None
+                result = inspect_header(sample, Plain, ["/"], adapter=fixture.host, binding=binding,
+                                        inspect=lambda bot, occurred, received, shape: reasons.append(shape()))
+                assert (result is not None) is accepted
                 assert reasons == [expected]
         passed.append(mode + "_media_references_edits_unknown_chat_invalid_ids_and_times_rejected")
         sample = await fixture.event()

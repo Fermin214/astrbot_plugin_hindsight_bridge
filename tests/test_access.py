@@ -97,14 +97,11 @@ class AuthorizationTests(unittest.TestCase):
         self.assertFalse(self.queue.accepts(replace(self.incoming, timestamp=200)))
         self.assertTrue(self.queue.accepts(replace(self.incoming, timestamp=201, received_at=201.5)))
 
-    def test_legacy_identity_frozen_requests_and_operation_ids_survive_upgrade(self):
+    def test_identity_frozen_requests_and_operation_ids_survive_restart(self):
         self.authorize()
         before = self.queue.capture(self.incoming, "conversation")
         frozen = dict(self.queue.get(before.task_id))
         original_scope = dict(self.queue.scope(self.incoming))
-        with self.queue.control.transaction():
-            self.queue.control.db.execute("DELETE FROM authorizations")
-            self.queue.control.db.execute("DELETE FROM settings WHERE key='authorization_migration:service'")
         self.queue.close()
         self.open()
         with self.assertRaisesRegex(QueueError, "permissions_not_synced"):
@@ -139,7 +136,7 @@ class AuthorizationTests(unittest.TestCase):
         self.queue.sync_permissions([("onebot", "2001")])
         self.assertFalse(self.queue.accepts(self.incoming))
 
-    def test_retry_intent_and_receipt_recover_after_business_commit_failure(self):
+    def test_retry_and_receipt_commit_together_and_survive_restart(self):
         scope = self.authorize()
         capture = self.queue.capture(self.incoming, "conversation")
         self.queue.update(capture.task_id, "failed", error="remote_failed")
@@ -148,9 +145,9 @@ class AuthorizationTests(unittest.TestCase):
             self.incoming, self.incoming.scope(self.queue.deployment_id), scope, "retry",
         )
         self.queue.access.run(
-            command, scope, lambda: self.queue.request_retry(scope["scope_id"], journal_only=True),
+            command, scope, lambda: self.queue.request_retry(scope["scope_id"]),
         )
-        self.assertFalse(self.queue.get(capture.task_id)["retry_requested"])
+        self.assertTrue(self.queue.get(capture.task_id)["retry_requested"])
         self.queue.close()
         self.open()
         self.queue.sync_permissions([("onebot", "2001")])
@@ -160,39 +157,33 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(task["payload"], frozen["payload"])
         self.assertEqual(self.queue.access.receipt(command)["result"], "applied")
 
-    def test_latest_control_dominates_restored_business_snapshot(self):
+    def test_entire_snapshot_restores_authorization_at_snapshot_time(self):
         self.authorize()
         self.queue.capture(self.incoming, "conversation")
-        with self.queue.db:
-            self.queue.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         backup = self.root / "snapshot.sqlite3"
         import sqlite3
         with closing(sqlite3.connect(backup)) as target:
             self.queue.db.backup(target)
         self.queue.sync_permissions([])
         self.queue.close()
-        shutil.copyfile(backup, self.root / "runtime/runtime.sqlite3")
+        shutil.copyfile(backup, self.root / "runtime/bridge.sqlite3")
         self.open()
         self.queue.sync_permissions([("onebot", "2001")])
-        self.assertFalse(self.queue.scope(self.incoming)["allowed"])
-        self.assertFalse(self.queue.accepts(self.incoming))
+        self.assertTrue(self.queue.scope(self.incoming)["allowed"])
+        self.assertTrue(self.queue.accepts(self.incoming))
 
-    def test_latest_retry_recovers_over_snapshot_taken_before_remote_failure(self):
+    def test_retry_recovers_the_same_failed_operation_after_restart(self):
         scope = self.authorize()
         capture = self.queue.capture(self.incoming, "conversation")
         frozen = dict(self.queue.get(capture.task_id))
-        backup = self.root / "before-failure.sqlite3"
-        with closing(sqlite3.connect(backup)) as target:
-            self.queue.db.backup(target)
         self.queue.update(capture.task_id, "tracking", accepted=1)
         self.queue.update(capture.task_id, "failed", error="remote_failed")
         self.queue.request_retry(scope["scope_id"])
         self.queue.close()
-        shutil.copyfile(backup, self.root / "runtime/runtime.sqlite3")
         self.open()
         self.queue.sync_permissions([("onebot", "2001")])
         restored = self.queue.get(capture.task_id)
-        self.assertEqual(restored["state"], "unknown")
+        self.assertEqual(restored["state"], "failed")
         self.assertTrue(restored["retry_requested"])
 
         async def retry(bank, operation_id, *, before_send):
@@ -223,7 +214,6 @@ class AuthorizationTests(unittest.TestCase):
         self.queue.access.run(
             command, scope, lambda: self.queue.control.set_mode("service", scope["owner_id"], "paused"),
         )
-        self.queue.apply_control()
         with self.assertRaisesRegex(QueueError, "command_already_applied"):
             self.queue.access.command(command_event, source, self.queue.scope(self.incoming), "mode", ("paused",))
         self.queue.close()
@@ -264,9 +254,8 @@ class AuthorizationTests(unittest.TestCase):
                 replace(self.incoming, message_id=f"new-{index}", timestamp=timestamp), source, scope, "mode", ("active",),
             )
             self.queue.access.run(command, scope, lambda: self.queue.set_mode(
-                scope["scope_id"], "active", journal_only=True,
+                scope["scope_id"], "active",
             ))
-            self.queue.apply_control()
             self.assertEqual(self.queue.scope(self.incoming)["mode"], "active")
 
     def test_resume_and_forget_keep_message_boundaries_without_command_clock_high_water(self):
@@ -280,9 +269,8 @@ class AuthorizationTests(unittest.TestCase):
             )
             with patch.object(time, "time", return_value=stamp + 0.5):
                 self.queue.access.run(command, scope, lambda: self.queue.set_mode(
-                    scope["scope_id"], mode, journal_only=True,
+                    scope["scope_id"], mode,
                 ))
-            self.queue.apply_control()
         self.assertEqual(self.queue.scope(self.incoming)["accept_from"], 106)
         for stamp in (103, 104, 105):
             with self.assertRaisesRegex(QueueError, "message_before_accept_from"):
@@ -298,7 +286,7 @@ class AuthorizationTests(unittest.TestCase):
     def test_legacy_disabled_scope_needs_explicit_new_authorization(self):
         old = self.queue.scope(self.incoming)
         with self.queue.db:
-            self.queue.db.execute("UPDATE scopes SET allowed=0")
+            self.queue.db.execute("UPDATE authorizations SET enabled=0")
         with patch.object(time, "time", return_value=200.25):
             self.queue.sync_permissions([("onebot", "2001")])
             self.assertFalse(self.queue.accepts(replace(self.incoming, timestamp=150)))

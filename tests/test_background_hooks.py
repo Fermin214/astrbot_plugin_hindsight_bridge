@@ -136,7 +136,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(method="POST", query={}, username="admin")
         panel = self.panel(request)
         panel.body = AsyncMock(return_value={
-            "page_id": "kp-1", "enabled": True, "revision": 0,
+            "page_ids": ["kp-1"], "enabled": True, "revision": 0,
             "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
         })
         saved = await panel.background(self.scope()["scope_id"])
@@ -204,7 +204,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         maintenance = Maintenance(queue, self.plugin.client)
         maintenance.begin(latest["scope_id"], management=queue.management(latest["scope_id"]))
         panel.body = AsyncMock(return_value={
-            "page_id": "kp-1", "enabled": False, "revision": 1,
+            "page_ids": ["kp-1"], "enabled": False, "revision": 1,
             "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
         })
         reads = len(self.requests)
@@ -237,7 +237,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                     self.select(enabled=False, revision=1)
                 elif change == "maintenance":
                     queue.control.begin_maintenance(queue.connection_id, scope["owner_id"])
-                    queue.apply_control()
                 elif change == "forget":
                     queue.forget(scope["scope_id"])
                 elif change == "revoke":
@@ -345,7 +344,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["pages"][0]["page_id"], "kp-1")
         request.method = "POST"
         panel.body = AsyncMock(return_value={
-            "page_id": "kp-1", "enabled": True, "revision": response["selection"]["revision"],
+            "page_ids": ["kp-1"], "enabled": True, "revision": response["selection"]["revision"],
             "scope_revision": response["scope_revision"], "config_revision": response["config_revision"],
         })
         saved = await panel.background(self.scope()["scope_id"])
@@ -356,7 +355,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
     async def test_admin_rejects_model_supplied_bank_and_stale_tabs_before_page_io(self):
         panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
         payload = {
-            "page_id": "kp-1", "enabled": True, "revision": 0,
+            "page_ids": ["kp-1"], "enabled": True, "revision": 0,
             "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
         }
         for update in ({"bank": "other-bank"}, {"scope_revision": -1}, {"config_revision": "old"}):
@@ -369,10 +368,9 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.select()
         scope = self.scope()
         self.plugin.outbox.control.begin_maintenance(self.plugin.outbox.connection_id, scope["owner_id"])
-        self.plugin.outbox.apply_control()
         panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
         panel.body = AsyncMock(return_value={
-            "page_id": "kp-1", "enabled": False, "revision": 1,
+            "page_ids": ["kp-1"], "enabled": False, "revision": 1,
             "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
         })
         response = await panel.background(scope["scope_id"])
@@ -416,7 +414,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
             with self.subTest(change=change):
                 panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
                 panel.body = AsyncMock(return_value={
-                    "page_id": "kp-1", "enabled": True, "revision": 0,
+                    "page_ids": ["kp-1"], "enabled": True, "revision": 0,
                     "scope_revision": self.scope()["revision"], "config_revision": panel.config_revision(),
                 })
                 if change == "mapping":
@@ -438,7 +436,7 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                     panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
                     scope = self.scope()
                     panel.body = AsyncMock(return_value={
-                        "page_id": "kp-1", "enabled": True, "revision": 0,
+                        "page_ids": ["kp-1"], "enabled": True, "revision": 0,
                         "scope_revision": scope["revision"], "config_revision": panel.config_revision(),
                     })
 
@@ -447,7 +445,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                             self.plugin.outbox.control.begin_maintenance(
                                 self.plugin.outbox.connection_id, scope["owner_id"],
                             )
-                            self.plugin.outbox.apply_control()
                         elif change == "revoke":
                             self.config["allowed_accounts"] = []
                         elif change == "forget":

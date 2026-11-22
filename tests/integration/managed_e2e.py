@@ -253,7 +253,7 @@ class Managed(Acceptance):
                     await frame.locator("#tab-memories").click()
                     await frame.locator("#scope-picker").select_option(json.dumps([carol["platform_instance_id"], carol["user_id"]], separators=(",", ":")))
                     stale_revision = (await self.bootstrap())["config_revision"]
-                    control_path = Path(configuration.get("control_state_dir") or str(directory.parent / (NAME + "_control"))) / "control.sqlite3"
+                    control_path = self.runtime
                     with sqlite3.connect(control_path) as control:
                         control.execute("CREATE TRIGGER e2e_pause_failure BEFORE UPDATE OF discard_pending ON maintenance "
                                         "BEGIN SELECT RAISE(ABORT,'injected pause write failure'); END")
@@ -304,9 +304,7 @@ class Managed(Acceptance):
                     configuration = await self.config()
                     subprocess.run([sys.executable, str(ROOT / "verification/data/plugins" / NAME / "scripts/backup.py"),
                                     "--data-dir", str(directory),
-                                    "--control-dir", configuration.get("control_state_dir") or str(directory.parent / (NAME + "_control")),
                                     "--output", str(ROOT / "upgrade-plugin-backup"),
-                                    "--latest-control", str(ROOT / "upgrade-control-latest.sqlite3"),
                                     "--backend-version", "1.1.0"], check=True, stdout=subprocess.DEVNULL)
                     await frame.locator("#upgrade-backup-confirmed").check()
                     await frame.locator("#upgrade-prepare").click()

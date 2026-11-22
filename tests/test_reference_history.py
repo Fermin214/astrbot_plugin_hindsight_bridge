@@ -44,11 +44,10 @@ class ReferenceIsolation(unittest.TestCase):
         self.assertEqual((saved["recall_budget"], saved["capture_assistant"], saved["exclude_assistant"]),
                          ("high", False, True))
         self.assertEqual(reference_options(self.queue, self.alice), saved)
-        self.assertTrue(saved["recall_on_quoted_or_link"])
-        self.assertFalse(options["recall_on_quoted_or_link"])
+        self.assertNotIn("recall_on_quoted_or_link", saved)
+        self.assertNotIn("recall_on_quoted_or_link", options)
         self.assertEqual(reference_options(self.queue, self.bob), options)
-        for invalid in ({"recall_budget": "medium"}, {"recall_budget": []}, {"capture_assistant": 0},
-                        {"recall_on_quoted_or_link": 1}):
+        for invalid in ({"recall_budget": "medium"}, {"recall_budget": []}, {"capture_assistant": 0}):
             with self.assertRaisesRegex(QueueError, "reference_settings_invalid"):
                 save_reference_options(self.queue, self.alice, **{**saved, **invalid})
         key, value = self.queue.control.db.execute(
@@ -61,7 +60,7 @@ class ReferenceIsolation(unittest.TestCase):
         restored = reference_options(self.queue, self.alice)
         self.assertEqual((restored["recall_budget"], restored["capture_assistant"], restored["exclude_assistant"]),
                          ("mid", True, True))
-        self.assertFalse(restored["recall_on_quoted_or_link"])
+        self.assertNotIn("recall_on_quoted_or_link", restored)
 
     def test_revoked_binding_cannot_read_or_append_to_either_users_turns(self):
         alice_id = self.queue.references.start(self.alice, "chat", "one", self.payload)
@@ -104,7 +103,7 @@ class ReferenceIsolation(unittest.TestCase):
         for case, value in cases.items():
             with self.subTest(case=case):
                 self.queue.close()
-                with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
+                with closing(sqlite3.connect(self.directory / "bridge.sqlite3")) as control, control:
                     control.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
                 shutil.copyfile(snapshot, self.directory / "references.sqlite3")
                 self.queue = self.open_queue()
@@ -127,7 +126,7 @@ class ReferenceIsolation(unittest.TestCase):
         self.queue.references.close()
         shutil.copyfile(self.queue.references.path, snapshot)
         save_reference_options(self.queue, self.alice, **{**options, "history_limit": 0})
-        self.queue.apply_control()
+        self.queue.references.reconcile()
         key, value = self.queue.control.db.execute(
             "SELECT key,value FROM settings WHERE key GLOB 'reference:*'"
         ).fetchone()
@@ -140,7 +139,7 @@ class ReferenceIsolation(unittest.TestCase):
         for damaged, retained in cases:
             with self.subTest(damaged=damaged):
                 self.queue.close()
-                with closing(sqlite3.connect(self.directory.with_name("runtime-control") / "control.sqlite3")) as control, control:
+                with closing(sqlite3.connect(self.directory / "bridge.sqlite3")) as control, control:
                     control.execute("UPDATE settings SET value=? WHERE key=?", (
                         json.dumps({**json.loads(value), **damaged}), key,
                     ))
@@ -154,11 +153,11 @@ class ReferenceIsolation(unittest.TestCase):
                 with closing(sqlite3.connect(self.queue.references.path)) as database:
                     self.assertEqual({row[0] for row in database.execute("SELECT id FROM turns")}, retained)
                     self.assertEqual({row[0] for row in database.execute("SELECT turn_id FROM deliveries")}, retained)
-        self.queue.forget(self.alice["scope_id"], journal_only=True)
+        self.queue.forget(self.alice["scope_id"])
         self.queue.references.append(self.alice, old_id, {"text": "late"})
         with self.assertRaisesRegex(QueueError, "scope_not_available"):
             self.queue.references.list(self.alice)
-        self.queue.apply_control()
+        self.queue.references.reconcile()
         self.assertEqual(self.queue.references.list(self.scope("alice")), [])
         with closing(sqlite3.connect(self.queue.references.path)) as database:
             self.assertEqual(database.execute("SELECT turn_id FROM deliveries").fetchall(), [(bob_id,)])

@@ -1,6 +1,5 @@
 """The real-service harness rejects unrelated resources and unsafe artifact paths."""
 
-import ast
 import asyncio
 import importlib.util
 import json
@@ -19,9 +18,18 @@ from urllib.request import Request
 spec = importlib.util.spec_from_file_location("live_harness", Path(__file__).parents[1] / "tools/run-live-e2e.py")
 harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
+PEER_SPEC = importlib.util.spec_from_file_location("onebot_peer", Path(__file__).parent / "integration/onebot_peer.py")
+peer = importlib.util.module_from_spec(PEER_SPEC)
+PEER_SPEC.loader.exec_module(peer)
 
 
 class LiveHarnessTests(unittest.TestCase):
+    def test_baseline_resolves_public_version_and_rejects_mismatched_version(self):
+        commit = harness.baseline_commit("v0.5.0", "0.5.0")
+        self.assertEqual(len(commit), 40)
+        with self.assertRaisesRegex(ValueError, "基线提交与指定版本不符"):
+            harness.baseline_commit("v0.5.0", "0.4.0")
+
     def test_zero_exit_requires_a_completed_report_for_the_selected_package(self):
         digest = "a" * 64
         complete = {"complete": True, "passed": ["final_delivery"], "candidate_tree_sha256": digest}
@@ -124,13 +132,8 @@ class LiveHarnessTests(unittest.TestCase):
             }}, b"{}"))
 
     def test_onebot_message_identity_remains_unique_after_socket_reconnect(self):
-        path = Path(__file__).parent / "integration/live_e2e.py"
-        tree = ast.parse(path.read_text())
-        peer = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OneBot")
-        namespace = {"asyncio": asyncio, "time": time, "BOT": 990001}
-        exec(compile(ast.Module(body=[peer], type_ignores=[]), str(path), "exec"), namespace)
         async def send():
-            before, after = namespace["OneBot"](None, {}), namespace["OneBot"](None, {})
+            before, after = peer.OneBot(None, {}), peer.OneBot(None, {})
             before.socket = after.socket = AsyncMock()
             first = await before.send(123001, "before restart")
             second = await after.send(123001, "after restart")
@@ -178,23 +181,13 @@ class LiveHarnessTests(unittest.TestCase):
             self.assertEqual((path / "existing.txt").read_text(), "preserve")
 
     def test_onebot_peer_preserves_plain_forwarded_and_file_message_segments(self):
-        path = Path(__file__).parent / "integration/live_e2e.py"
-        tree = ast.parse(path.read_text())
-        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "message_segments")
-        namespace = {}
-        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
-        segments = namespace["message_segments"]
+        segments = peer.message_segments
         file = {"type": "file", "data": {"file": "file:///delivery/export.json"}}
         self.assertEqual(segments("reply"), [{"type": "text", "data": {"text": "reply"}}])
         self.assertEqual(segments([{"type": "node", "data": {"content": ["reply", file]}}]),
                          [{"type": "text", "data": {"text": "reply"}}, file])
 
     def test_onebot_peer_handles_nested_forward_nodes_without_fabricating_text(self):
-        path = Path(__file__).parent / "integration/live_e2e.py"
-        tree = ast.parse(path.read_text())
-        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "message_segments")
-        namespace = {}
-        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
-        self.assertEqual(namespace["message_segments"]({"type": "node", "data": {"content": [
+        self.assertEqual(peer.message_segments({"type": "node", "data": {"content": [
             {"type": "node", "data": {"content": "nested"}}, None,
         ]}}), [{"type": "text", "data": {"text": "nested"}}])

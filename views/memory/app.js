@@ -298,6 +298,8 @@ export function createApp(view) {
     void view.refreshBootstrap().catch((error) => view.notify(view.errorMessage(error), true, "reference-feedback"));
   });
   view.$("usage-open").addEventListener("click", () => void view.openUsage());
+  view.$("skip-warning-open").addEventListener("click", () => void view.openUsage("skips"));
+  view.$("usage-clear-skips").addEventListener("click", () => void view.clearSkips());
   view.$("usage-turn").addEventListener("change", () => void view.loadUsageTurn());
   view.$("usage-dialog").addEventListener("close", () => { if (!view.$("usage-dialog").open) view.resetUsage(); });
   view.$("usage-copy-json").addEventListener("click", () => {
@@ -306,7 +308,7 @@ export function createApp(view) {
   });
   view.$("usage-copy-text").addEventListener("click", () => void view.copyValue("usage-text", "原文已复制。", "usage-feedback", view.usageText)
     .catch((error) => view.notify(view.errorMessage(error), true, "usage-feedback")));
-  const usageTabs = ["content", "text", "json"];
+  const usageTabs = ["content", "text", "json", "skips"];
   usageTabs.forEach((name, index) => {
     const tab = view.$(`usage-tab-${name}`);
     tab.addEventListener("click", () => view.activateUsageTab(name));
@@ -329,7 +331,7 @@ export function createApp(view) {
     () => view.copyValue("control-plane-url", "已复制")));
   view.$("scope-bank").addEventListener("focus", () => view.$("scope-bank").select());
   view.$("retry").addEventListener("click", () => void view.perform(view.$("retry"), "memory", async () => {
-    const response = await view.bridge.apiPost(view.endpoint("action"), { action: "retry" });
+    const response = await view.bridge.apiPost(view.endpoint("action"), { action: "retry", ...view.scopeWrite() });
     await view.refreshBootstrap();
     view.notify(response.message || "已安排重试。");
   }));
@@ -357,7 +359,10 @@ export function createApp(view) {
       view.$("forget-agree").disabled = true;
       view.$("cancel-forget").disabled = true;
       try {
-        const response = await view.bridge.apiPost(view.endpoint("action", pending.id), { action: "forget_confirm", confirmation: pending.confirmation });
+        const response = await view.bridge.apiPost(view.endpoint("action", pending.id), {
+          action: "forget_confirm", confirmation: pending.confirmation,
+          scope_revision: pending.scope_revision, config_revision: pending.config_revision,
+        });
         view.forgetState = null;
         view.$("forget-dialog").close();
         await view.refreshBootstrap();

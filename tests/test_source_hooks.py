@@ -112,7 +112,7 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         old_event = self.event()
         old_event.message_obj.raw_message["message"].append({"type": "reply", "data": {}})
         self.plugin.record_skip(old_event, queue)
-        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "quoted_or_reply")
+        self.assertEqual(self.plugin.skip_status("qq", "2001")["code"], "unsupported_message")
 
         self.bot.get_login_info.return_value = {"user_id": 1002}
         await self.plugin.prepare_sources()
@@ -180,7 +180,8 @@ class SourceHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(panel.managed_connection())
         self.assertIn("已暂停", await self.plugin.mode(self.event("/hb on", mid="on-paused"), "active"))
         self.assertTrue(queue.summary(scope["scope_id"])["maintenance"])
-        panel.body = AsyncMock(return_value={"action": "maintenance_resume"})
+        panel.body = AsyncMock(return_value={"action": "maintenance_resume", "scope_revision": queue.scope_owner(scope["scope_id"])["revision"],
+                                            "config_revision": panel.config_revision()})
         with patch.dict(sys.modules, {"astrbot.api.web": SimpleNamespace(
             request=SimpleNamespace(method="POST", username="admin"),
         )}):
