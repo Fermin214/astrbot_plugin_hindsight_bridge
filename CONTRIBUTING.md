@@ -7,12 +7,12 @@
 | 模块 / 路径 | 职责 | 对应测试入口 |
 | --- | --- | --- |
 | `core/*_source.py` / `core/materials.py` | 平台来源校验、用户原文冻结、持久化 history 关联 | `python tools/run-feedback-e2e.py --scope assistant-capture --output /tmp/bridge-capture` |
-| `core/outbox.py` / `core/control.py` | 队列、去重、控制库事务、遗忘与快照恢复 | `python tools/run-feedback-e2e.py --scope recovery --output /tmp/bridge-recovery` |
+| `core/outbox.py` / `core/control.py` / `core/storage.py` | 单主库、队列去重、原子清空、迁移与快照恢复 | `tests/test_storage.py`、`tests/test_backup.py`、真实 `upgrade` / `recovery` 验收 |
 | `core/panel*.py` / `views/memory/*` | 管理面板前端（ES Modules）与后台管理 API | `node --test tests/test_memory_view.mjs` |
 | `core/installer.py` / `core/managed_connections.py` | 配套 Docker 安装命令、接入状态机与模型探测 | `python tools/run-managed-e2e.py --scenario connection --output /tmp/bridge-connection` |
 
 核心概念速查：
-- **`scope_id` / `source_id`**：同一个平台来源标识，业务库用 `scope_id`，控制库映射用 `source_id`。
+- **`scope_id` / `source_id`**：同一个平台来源标识，队列字段及 `scopes` 视图使用 `scope_id`，`accounts` 映射使用 `source_id`。
 - **`principal_id` / `owner_id`**：逻辑用户及归属标识，队列按 `owner_id` 串行投递。
 - **Bank 与代次（generation）**：用户在 Hindsight 的独立记忆库及版本；每次「清空记忆」推进代次并作废旧 Bank 与未完成队列。
 - **`background` / `reading` / `reflection`**：知识页选择、按需读取方式和 Reflect 设置。
@@ -35,11 +35,26 @@
 | 助手正文、知识页、工具或参考记录 | 让子 Agent 抢先完成，对照主请求实际交付内容、持久回复与使用记录；筛选与限额组合测试时加入足以占满预算的排除条目；验证选页全失效时的逐一清理 |
 | 命令与消息分类 | 使用宿主识别的完整命令输入（含前缀与尾随参数）验证，并确认只读状态查询不会篡改原诊断状态 |
 | 表单草稿、轮询与保存 | 在页面修改但未保存时触发后台轮询和切页，确认草稿保留；切换服务后确认旧草稿清零；保存并重载后核对持久化结果 |
-| 备份、恢复或跨系统文件操作 | 用旧业务库配对最新控制库恢复，测试同一目标并发替换与（如涉及）Windows 文件占用与超时分支 |
+| 备份、恢复或跨系统文件操作 | 验证单主库在线快照、停机全量恢复、旧 Bank 缺失保护、迁移中断与（如涉及）Windows 文件占用和超时分支 |
 
 整理 PR 时对照检查标题、版本号与变更记录，写明受影响的用户入口、界面变化和升级注意事项。
 
 ## 自动化测试与 CI
+
+### 存储行为映射
+
+存储结构变化时，按行为维护断言；不保留已经废弃的双库重放或独立控制目录私有字段。
+
+| 保护的行为 | 测试入口 |
+| --- | --- |
+| 原始操作 ID、冻结正文、投递顺序和身份归属在重启、重试后保持不变 | `tests/test_reliability.py`、`tests/test_access.py` |
+| 命令回执、清空代次、旧队列作废与维护暂停共同提交，失败共同回滚 | `tests/test_storage.py`、`tests/test_controls.py`、`tests/test_service_upgrade.py` |
+| 0.5.0 双库身份合法性校验、完整受限备份、导入与切换中断恢复 | `tests/test_storage.py`，使用固定 0.5.0 提交的完整模块构造旧数据 |
+| 使用记录绑定、卡片设置与操作 ID 跨迁移保持不变 | `tests/test_storage.py`、`tests/test_reference_history.py` |
+| 整库恢复回到快照时刻，远端旧 Bank 缺失时拒绝重建和重发 | `tests/test_backup.py`、`tests/test_controls.py` |
+| 使用记录锁库不拖停其他用户，清空仅在本地及远端核验完成后标记删净 | `tests/test_maintenance.py`、`tests/test_reference_history.py` |
+| 未完成 Reflect 请求在启动时归档，原始请求 ID 与错误记录不丢失 | `tests/test_reflection.py` |
+| 主库、侧文件与进程锁不能通过文件链接碰触其他资源 | `tests/test_runtime_diagnostics.py` |
 
 本地与 CI 按变更文件自动选择检查范围（纯文档变更仅运行基础语法、元数据、打包与文档链接检查）：
 

@@ -69,7 +69,6 @@ class ParameterSettings(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.max_tasks, 1)
         self.assertEqual(queue.max_bytes, 2 * 1024 * 1024)
         queue.control.finish_maintenance(queue.connection_id, scope["owner_id"])
-        queue.apply_control()
         self.turn("capacity")
         with self.assertRaisesRegex(QueueError, "queue_capacity_reached"):
             queue.capture(self.incoming, "conversation")

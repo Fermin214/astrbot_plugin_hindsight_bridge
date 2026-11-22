@@ -297,8 +297,7 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
                 with patch.object(self.panel, "store_state", side_effect=fail):
                     with self.assertRaises(OSError):
                         await self.action("begin")
-                self.assertLessEqual(int(self.queue.setting("control_revision")),
-                                     int(self.queue.control.setting("revision")))
+                self.assertIs(self.queue.db, self.queue.control.db)
                 self.reopen_queue()
                 self.assertFalse(self.queue.recovering)
                 self.assertTrue(all(self.queue.summary(row["scope_id"])["maintenance"] is None for row in self.rows))
@@ -307,13 +306,11 @@ class ServiceUpgrade(unittest.IsolatedAsyncioTestCase):
                 await self.action("cancel")
                 self.assertTrue(all(self.queue.summary(row["scope_id"])["maintenance"] is None for row in self.rows))
 
-    async def test_begin_committed_control_replays_after_runtime_write_failure(self):
-        with patch.object(self.queue, "apply_control", side_effect=OSError("runtime write interrupted")):
-            with self.assertRaises(OSError):
-                await self.action("begin")
+    async def test_begin_commits_pause_state_atomically_and_survives_restart(self):
+        await self.action("begin")
         self.assertTrue(all(self.queue.control.maintenance(self.queue.connection_id, row["bank"]) for row in self.rows))
         self.reopen_queue()
-        self.assertTrue(self.queue.recovering)
+        self.assertFalse(self.queue.recovering)
         await self.maintenance.startup()
         self.assertTrue(all(self.queue.summary(row["scope_id"])["maintenance"] for row in self.rows))
         await self.action("cancel")

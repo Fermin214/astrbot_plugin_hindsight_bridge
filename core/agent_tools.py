@@ -656,7 +656,6 @@ class MemoryTools:
                             code = "bank_not_created"
                         else:
                             queue.control.set_bank_state(queue.connection_id, turn.guard.scope["bank"], "missing")
-                            queue.apply_control()
                     self.record(turn, "error", code, kind=kind)
                     return self.deliver(turn, kind, {"error": code, "message": self.plugin.diagnostic(code)})
                 except Exception:

@@ -245,7 +245,6 @@ class References(unittest.TestCase):
         manual = ReadGuard.freeze(self.plugin, self.scope, manual=True)
         self.assertTrue(manual.valid(self.plugin))
         self.queue.control.begin_maintenance(self.queue.connection_id, self.scope["owner_id"])
-        self.queue.apply_control()
         self.assertFalse(manual.valid(self.plugin))
         self.scope = self.queue.scope(self.incoming)
         self.assertFalse(ReadGuard.freeze(self.plugin, self.scope, manual=True).valid(self.plugin))
@@ -289,7 +288,7 @@ class References(unittest.TestCase):
         with self.assertRaisesRegex(QueueError, "background_settings_invalid"):
             reference(self.queue, self.scope)
 
-    def test_legacy_reference_reads_without_rewrite_and_order_change_invalidates_read(self):
+    def test_single_runtime_format_and_order_change_invalidates_read(self):
         self.select()
         key = reference_key(self.queue.connection_id, self.scope["owner_id"])
         stored = json.loads(self.queue.control.setting(key))
@@ -297,10 +296,12 @@ class References(unittest.TestCase):
         del stored["pages"]
         legacy = json.dumps(stored)
         self.queue.control.db.execute("UPDATE settings SET value=? WHERE key=?", (legacy, key))
-        self.assertEqual(reference(self.queue, self.scope)["pages"], [
-            {"page_id": "kp-1", "mental_model_id": "mm-1"},
-        ])
+        with self.assertRaises(QueueError):
+            reference(self.queue, self.scope)
         self.assertEqual(self.queue.control.setting(key), legacy)
+        stored.update(format=2, pages=[{"page_id": "kp-1", "mental_model_id": "mm-1"}])
+        with self.queue.db:
+            self.queue.db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(stored), key))
         selected = save_reference(self.queue, self.scope, revision=1, enabled=True, pages=[
             {"page_id": "kp-1", "mental_model_id": "mm-1"},
             {"page_id": "kp-2", "mental_model_id": "mm-2"},

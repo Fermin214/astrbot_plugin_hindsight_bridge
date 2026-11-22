@@ -635,7 +635,6 @@ class PanelScopes:
                 if not exists:
                     raise PanelError("原记忆库仍不存在。请从匹配的备份恢复原库，或清空旧记忆后重新开始。")
                 queue.control.set_bank_state(queue.connection_id, scope["bank"], "established")
-                queue.apply_control()
                 plugin.worker.wake.set()
                 return {"message": "原记忆库已找到。"}
             if action in {"mode", "retry"}:

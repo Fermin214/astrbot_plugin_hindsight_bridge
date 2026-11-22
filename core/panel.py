@@ -176,7 +176,7 @@ class MemoryPanel(PanelSetup, PanelUpgrade, PanelScopes):
 
     def has_identity_data(self):
         return any((self.directory() / name).is_file() for name in (
-            "runtime.sqlite3", "outbox.sqlite3",
+            "bridge.sqlite3", "runtime.sqlite3", "outbox.sqlite3",
         )) or (self.plugin.control_directory() / "control.sqlite3").is_file()
 
     def state(self, *, create=False):

@@ -1,4 +1,4 @@
-"""Authorization epochs and replay receipts in the latest control journal."""
+"""Authorization epochs and atomic command receipts in the main database."""
 
 import math
 import json
@@ -32,7 +32,7 @@ class Access:
             (self.connection, platform, user),
         ).fetchone()
 
-    def sync(self, selected, *, legacy_sources=()):
+    def sync(self, selected):
         """Selection can revoke immediately; activation always needs confirmation."""
         control = self.control
         with control.transaction():
@@ -46,26 +46,14 @@ class Access:
                         "AND platform_instance_id=? AND user_id=?",
                         (time.time(), self.connection, row["platform_instance_id"], row["user_id"]),
                     )
+                    control.authorization_changed(self.connection, row["source_id"])
                     control.bump()
             for platform, user in selected:
                 if self.authorization(platform, user):
                     continue
-                old = control.db.execute(
-                    "SELECT a.source_id,o.accept_from FROM accounts a JOIN owners o "
-                    "USING(connection_id,owner_id) WHERE a.connection_id=? "
-                    "AND a.platform_instance_id=? AND a.user_id=?",
-                    (self.connection, platform, user),
-                ).fetchall() if legacy_sources else []
-                # An ambiguous historical pair needs explicit identity confirmation.
-                source, lower = (
-                    (old[0]["source_id"], old[0]["accept_from"])
-                    if len(old) == 1 and old[0]["source_id"] in legacy_sources
-                    else ("", 0)
-                )
                 control.db.execute(
-                    "INSERT INTO authorizations(connection_id,platform_instance_id,user_id,"
-                    "source_id,enabled,accept_from) VALUES (?,?,?,?,?,?)",
-                    (self.connection, platform, user, source, int(bool(source)), lower),
+                    "INSERT INTO authorizations(connection_id,platform_instance_id,user_id) VALUES (?,?,?)",
+                    (self.connection, platform, user),
                 )
                 control.bump()
 
@@ -86,12 +74,8 @@ class Access:
                 "accept_from=? WHERE connection_id=? AND platform_instance_id=? AND user_id=?",
                 (source.id, lower, self.connection, source.platform_instance_id, source.user_id),
             )
-            if account:
-                control.db.execute(
-                    "UPDATE owners SET revision=revision+1 "
-                    "WHERE connection_id=? AND owner_id=?",
-                    (self.connection, account["owner_id"]),
-                )
+            for source_id in {row["source_id"], source.id}:
+                control.authorization_changed(self.connection, source_id)
             control.bump()
         return self.authorization(source.platform_instance_id, source.user_id)
 
@@ -118,6 +102,7 @@ class Access:
                     "AND platform_instance_id=? AND user_id=?",
                     (time.time(), self.connection, platform, row["user_id"]),
                 )
+                control.authorization_changed(self.connection, row["source_id"])
                 control.bump()
                 changed = True
         return changed

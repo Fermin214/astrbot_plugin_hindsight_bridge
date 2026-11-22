@@ -237,7 +237,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                     self.select(enabled=False, revision=1)
                 elif change == "maintenance":
                     queue.control.begin_maintenance(queue.connection_id, scope["owner_id"])
-                    queue.apply_control()
                 elif change == "forget":
                     queue.forget(scope["scope_id"])
                 elif change == "revoke":
@@ -369,7 +368,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
         self.select()
         scope = self.scope()
         self.plugin.outbox.control.begin_maintenance(self.plugin.outbox.connection_id, scope["owner_id"])
-        self.plugin.outbox.apply_control()
         panel = self.panel(SimpleNamespace(method="POST", query={}, username="admin"))
         panel.body = AsyncMock(return_value={
             "page_id": "kp-1", "enabled": False, "revision": 1,
@@ -447,7 +445,6 @@ class BackgroundHooks(unittest.IsolatedAsyncioTestCase):
                             self.plugin.outbox.control.begin_maintenance(
                                 self.plugin.outbox.connection_id, scope["owner_id"],
                             )
-                            self.plugin.outbox.apply_control()
                         elif change == "revoke":
                             self.config["allowed_accounts"] = []
                         elif change == "forget":

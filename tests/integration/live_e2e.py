@@ -197,8 +197,20 @@ class Acceptance:
             "initial_queue": [],
             "passed": [], "measurements": {}, "complete": False,
         }
-        self.runtime = ROOT / "verification/data/plugin_data" / NAME / "runtime.sqlite3"
+        self.data_directory = ROOT / "verification/data/plugin_data" / NAME
         self.history = ROOT / "verification/data/data_v4.db"
+
+    @property
+    def runtime(self):
+        main = self.data_directory / "bridge.sqlite3"
+        return main if main.is_file() else self.data_directory / "runtime.sqlite3"
+
+    @property
+    def control_database(self):
+        if self.runtime.name == "bridge.sqlite3":
+            return self.runtime
+        return Path(self.settings.get("verification_control_directory")
+                    or self.data_directory.with_name(NAME + "_control")) / "control.sqlite3"
 
     def passed(self, name):
         self.report["passed"].append(name)
@@ -214,9 +226,8 @@ class Acceptance:
         )
         destination = ROOT / "baseline-state"
         destination.mkdir(mode=0o700)
-        control = Path(self.settings.get("verification_control_directory") or self.runtime.parent.with_name(NAME + "_control")) / "control.sqlite3"
         snapshots = {}
-        for source in (self.runtime, control, self.runtime.parent / "references.sqlite3"):
+        for source in (self.runtime, self.control_database, self.runtime.parent / "references.sqlite3"):
             if not source.is_file():
                 continue
             target = destination / source.name
@@ -300,9 +311,7 @@ class Acceptance:
         scope = next(row for row in (await self.bootstrap())["scopes"]
                      if row["user_id"] == str(user) and not row["pending"] and not row["historical"])
         configuration = await self.config()
-        control_directory = Path(self.settings.get("verification_control_directory") or configuration.get("control_state_dir")
-                                 or self.runtime.parent.parent / (NAME + "_control"))
-        boundary = database(control_directory / "control.sqlite3", "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
+        boundary = database(self.control_database, "SELECT accept_from FROM authorizations WHERE connection_id=? AND source_id=?", (configuration["service_id"], scope["scope_id"]))[0]["accept_from"]
         boundary = math.ceil(boundary)
         await until(lambda: int(time.time()) >= boundary, timeout=3, label="native platform authorization boundary")
 
@@ -978,67 +987,18 @@ class Acceptance:
                 await self.action(alice["scope_id"], "maintenance_resume")
                 self.passed("real_maintenance_drain_gate_and_resume")
 
-                # Snapshot pending business work, then retain the newer erasure
-                # journal while restoring that old snapshot in the same test root.
-                await self.action(alice["scope_id"], "mode", mode="active")
-                await self.control("stop_hindsight")
-                await self.bot.chat(ALICE, "The pending restore test marker is Maple-99. Reply briefly.")
-                await asyncio.sleep(1)
-                pending = [row for row in self.tasks() if row["state"] not in {"done", "discarded"}]
-                assert pending
-                control = ROOT / "verification/data/plugin_data" / (NAME + "_control") / "control.sqlite3"
-                backup = ROOT / "business-before-forget"
-                process = await asyncio.create_subprocess_exec("python", "/candidate-source/scripts/backup.py", "--data-dir", str(self.runtime.parent),
-                                                               "--control-dir", str(control.parent), "--output", str(backup),
-                                                               stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                _, _ = await process.communicate()
-                assert process.returncode == 0
+                from recovery_e2e import verify as verify_recovery
 
-                prepared = await self.action(alice["scope_id"], "forget_prepare")
-                await self.action(alice["scope_id"], "forget_confirm", confirmation=prepared["confirmation"])
-                await self.bot.close()
-                await self.control("stop_astrbot")
-                latest_control = hashlib.sha256(control.read_bytes()).hexdigest()
-                manifest = json.loads((backup / "manifest.json").read_text())
-                revision = int(database(control, "SELECT value FROM settings WHERE key='revision'")[0]["value"])
-                assert revision > manifest["last_seen_control_revision"]
-                shutil.copyfile(backup / "runtime.sqlite3", self.runtime)
-                for suffix in ("-wal", "-shm"):
-                    self.runtime.with_name(self.runtime.name + suffix).unlink(missing_ok=True)
-                assert hashlib.sha256(control.read_bytes()).hexdigest() == latest_control
-                await self.control("start_hindsight")
-                await self.backend_ready()
-                trace_boundary = len(jsonl("retain-trace"))
-                await self.control("start_astrbot")
-                await asyncio.sleep(4)
-                self.bot = OneBot(session, self.settings)
-                await self.bot.connect()
-                await self.usable()
-                async def erased():
-                    state = await self.bootstrap()
-                    scope = next(row for row in state["scopes"] if row["user_id"] == str(ALICE))
-                    return scope if scope["bank"] != bank and not scope["summary"].get("cleanup") else None
-                await until(erased, timeout=180)
-                async def missing():
-                    return (await self.memories(bank))["total"] == 0
-                await until(missing, timeout=180)
-                self.passed("real_forget_generation_rotation_and_old_bank_erasure")
-                state = await self.bootstrap()
-                alice = next(row for row in state["scopes"] if row["user_id"] == str(ALICE))
-                assert alice["mode"] == "paused"
-                retired = database(self.runtime, "SELECT state,payload FROM outbox WHERE bank=?", (bank,))
-                assert retired and all(row["state"] == "discarded" and not row["payload"] for row in retired)
-                assert not any(bank in row["path"] for row in jsonl("retain-trace")[trace_boundary:])
-                self.passed("real_business_backup_restore_keeps_latest_journal_and_does_not_resurrect_erased_work")
+                await verify_recovery(self)
 
                 assert hashlib.sha256(core_path.read_bytes()).hexdigest() == core_hash
                 await self.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + NAME, payload={"delete_config": True, "delete_data": False})
                 await self.install("candidate-install.zip")
                 blank = await self.config()
-                assert blank["recall_timeout"] == 10
+                assert blank["recall_timeout"] == 15
                 initial = await self.bootstrap()
                 assert initial["config"]["missing_fields"] == ["api_url", "api_key", "service_id"]
-                self.passed("fresh_distribution_default_10_and_no_host_config_mutation")
+                self.passed("fresh_distribution_default_15_and_no_host_config_mutation")
                 await self.fresh_authorization_lifecycle()
                 await self.http("DELETE", "/api/v1/plugins/by-id?plugin_id=" + NAME)
                 self.passed("actual_dashboard_uninstall")

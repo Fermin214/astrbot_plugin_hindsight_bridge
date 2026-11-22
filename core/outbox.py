@@ -16,8 +16,8 @@ from .identity import Incoming, Scope, canonical, sha256
 from .locking import exclusive_lock
 from .materials import Message, request_digest, retain_payload
 from .reference import ReferenceHistory
+from .storage import open_main
 
-SCHEMA_VERSION = 6
 ACTIVE_STATES = ("ready", "submitting", "unknown", "deferred", "tracking", "cancel_requested")
 STATES = (
     *ACTIVE_STATES,
@@ -73,7 +73,6 @@ class Outbox:
         max_tasks: int = 10000,
         max_bytes: int = 64 * 1024 * 1024,
         control_directory: Path | None = None,
-        control_root: Path | None = None,
         agent_id: str = "default",
         warning=None,
     ):
@@ -83,6 +82,7 @@ class Outbox:
         self.connection_id, self.zone = service_id.strip(), zone
         self.agent_id = agent_id.strip()
         self.permission_pairs = None
+        self.suspended_sources = set()
         self.access = None
         self.recovering = False
         self.in_flight = set()
@@ -98,20 +98,10 @@ class Outbox:
         ):
             raise QueueError("invalid_queue_configuration")
         self.directory.mkdir(parents=True, exist_ok=True)
-        control_directory = Path(
-            control_directory
-            or self.directory.with_name(self.directory.name + "-control")
-        ).resolve()
-        if control_root is not None:
-            root = Path(control_root)
-            if root.resolve() != root or not control_directory.is_relative_to(root):
-                raise QueueError("control_directory_outside_plugin")
-        runtime_directory = self.directory.resolve()
-        if control_directory.is_relative_to(
-            runtime_directory
-        ) or runtime_directory.is_relative_to(control_directory):
-            raise QueueError("control_directory_must_be_separate")
+        control_directory = Path(control_directory or self.directory.with_name(self.directory.name + "-control"))
         try:
+            if (self.directory / "worker.lock").is_symlink():
+                raise QueueError("database_path_invalid")
             self.lock = (self.directory / "worker.lock").open("a+b")
             exclusive_lock(self.lock)
             legacy = self.directory / "outbox.sqlite3"
@@ -119,38 +109,11 @@ class Outbox:
                 with closing(sqlite3.connect(legacy.as_uri() + "?mode=ro", uri=True)) as old:
                     if old.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]:
                         raise QueueError("legacy_queue_requires_migration")
-            self.db = sqlite3.connect(self.directory / "runtime.sqlite3", timeout=2)
-            self.db.row_factory = sqlite3.Row
-            self.db.execute("PRAGMA foreign_keys=ON")
-            self.db.execute("PRAGMA journal_mode=WAL")
-            self.db.execute("PRAGMA synchronous=FULL")
-            version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, SCHEMA_VERSION):
-                raise QueueError("unsupported_database_version")
-            self._schema()
-            deployment = self.setting("deployment_id")
-            self.control = Control(control_directory, deployment, required=version >= 2, root=control_root)
+            self.db = open_main(self.directory, control_directory, self.create_schema)
+            self.control = Control(self.db)
             self.access = Access(self.control, self.connection_id)
-            control_id = self.control.setting("control_id")
-            if self.setting("control_id") not in ("", control_id):
-                raise QueueError("recovery_required:control_mismatch")
-            previous_revision = int(self.setting("control_revision") or 0)
-            if previous_revision > int(self.control.setting("revision")):
-                raise QueueError("recovery_required:control_rolled_back")
-            self.recovering = version >= 2 and previous_revision != int(
-                self.control.setting("revision")
-            )
             with self.db:
-                self.db.execute(
-                    "INSERT OR IGNORE INTO settings VALUES ('deployment_id',?)",
-                    (self.control.setting("deployment_id"),),
-                )
-                self.db.execute(
-                    "INSERT OR IGNORE INTO settings VALUES ('accept_from',?)",
-                    (str(int(time.time())),),
-                )
                 self._connection(url, credential_fingerprint, address_revision)
-                # An interrupted submit may have reached the server. Never assign a new ID.
                 self.db.execute(
                     "UPDATE outbox SET state='unknown' WHERE connection_id=? "
                     "AND state='submitting'",
@@ -160,29 +123,29 @@ class Outbox:
                     "UPDATE outbox SET released=1 WHERE connection_id=?",
                     (self.connection_id,),
                 )
+                if self.db.execute(
+                    "UPDATE reflection_requests SET state='overridden',overridden_at=?,overridden_by='startup' "
+                    "WHERE state IN ('prepared','dispatched','unknown')", (time.time(),),
+                ).rowcount:
+                    self.control.bump()
             self.deployment_id = self.setting("deployment_id")
-            self._migrate_ownership(version)
-            self.apply_control()
-            with self.db:
-                self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                self.db.execute(
-                    "INSERT OR REPLACE INTO settings VALUES ('control_id',?)",
-                    (control_id,),
-                )
             if os.name != "nt":
                 os.chmod(self.directory, 0o700)
-                os.chmod(self.directory / "runtime.sqlite3", 0o600)
+                os.chmod(self.directory / "bridge.sqlite3", 0o600)
         except BaseException:
             self.close()
             raise
 
+    def create_schema(self, database):
+        previous = self.db
+        self.db = database
+        try:
+            Control(database).create_schema()
+            self._schema()
+        finally:
+            self.db = previous
+
     def _schema(self):
-        if self.db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corrections'"
-        ).fetchone():
-            if self.db.execute("SELECT 1 FROM corrections LIMIT 1").fetchone():
-                raise QueueError("legacy_corrections_require_handover")
-            self.db.execute("DROP TABLE corrections")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -192,15 +155,13 @@ class Outbox:
                 credential_fingerprint TEXT NOT NULL, credential_revision INTEGER NOT NULL,
                 paused_error TEXT NOT NULL DEFAULT ''
             );
-            CREATE TABLE IF NOT EXISTS scopes (
-                connection_id TEXT NOT NULL REFERENCES connections(id),
-                scope_id TEXT NOT NULL, identity_json TEXT NOT NULL,
-                platform_instance_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                bank TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
-                allowed INTEGER NOT NULL DEFAULT 1, mode TEXT NOT NULL DEFAULT 'active',
-                accept_from INTEGER NOT NULL,
-                PRIMARY KEY(connection_id,scope_id)
-            );
+            CREATE VIEW IF NOT EXISTS scopes AS
+                SELECT accounts.connection_id,accounts.source_id scope_id,accounts.identity_json,
+                    accounts.platform_instance_id,accounts.user_id,owners.bank,owners.generation,
+                    COALESCE(authorizations.enabled=1 AND authorizations.source_id=accounts.source_id,0) allowed,
+                    owners.mode,owners.accept_from,owners.owner_id,owners.principal_id,owners.revision
+                FROM accounts JOIN owners USING(connection_id,owner_id)
+                LEFT JOIN authorizations USING(connection_id,platform_instance_id,user_id);
             CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 connection_id TEXT NOT NULL, scope_id TEXT NOT NULL,
@@ -210,10 +171,11 @@ class Outbox:
                 payload_bytes INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'ready',
                 accepted INTEGER NOT NULL DEFAULT 0, released INTEGER NOT NULL DEFAULT 0,
                 retry_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_intent INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0,
                 last_error TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
                 updated_at REAL NOT NULL, completed_at REAL,
-                FOREIGN KEY(connection_id,scope_id) REFERENCES scopes(connection_id,scope_id),
+                FOREIGN KEY(connection_id,scope_id) REFERENCES accounts(connection_id,source_id),
                 UNIQUE(connection_id,scope_id,generation,document_id)
             );
             CREATE TABLE IF NOT EXISTS events (
@@ -253,153 +215,7 @@ class Outbox:
             CREATE INDEX IF NOT EXISTS window_scope ON
                 window(connection_id,scope_id,generation,conversation_id,occurred_at);
         """)
-        for table, column, declaration in (
-            ("history_prompts", "media_types", "TEXT NOT NULL DEFAULT '[]'"),
-            ("scopes", "owner_id", "TEXT NOT NULL DEFAULT ''"),
-            ("scopes", "principal_id", "TEXT NOT NULL DEFAULT ''"),
-            ("scopes", "revision", "INTEGER NOT NULL DEFAULT 0"),
-            ("outbox", "cancel_intent", "INTEGER NOT NULL DEFAULT 0"),
-        ):
-            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
-            if column not in columns:
-                self.db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
-                )
         self.db.commit()
-
-    def _migrate_ownership(self, version):
-        for row in self.db.execute("SELECT * FROM scopes").fetchall():
-            source = Scope(*json.loads(row["identity_json"]))
-            if (
-                source.deployment_id != self.deployment_id
-                or source.id != row["scope_id"]
-            ):
-                raise QueueError("recovery_required:source_identity_mismatch")
-            if version >= 2 and not self.control.account(
-                row["connection_id"], source.id
-            ):
-                raise QueueError("recovery_required:account_mapping_missing")
-            self.control.ensure_account(
-                row["connection_id"],
-                source,
-                row["accept_from"],
-                agent_id=self.agent_id,
-                legacy=row,
-            )
-            for task in self.db.execute(
-                "SELECT * FROM outbox WHERE connection_id=? AND scope_id=? AND accepted=1",
-                (row["connection_id"], row["scope_id"]),
-            ).fetchall():
-                account = self.control.account(row["connection_id"], source.id)
-                self.control.record_request(task, account["owner_id"], accepted=True)
-
-    def apply_control(self):
-        """Replay the authoritative owner generation before opening message I/O."""
-        self.references.reconcile()
-        with self.db:
-            for row in self.db.execute("SELECT * FROM scopes").fetchall():
-                account = self.control.account(row["connection_id"], row["scope_id"])
-                if not account:
-                    raise QueueError("recovery_required:account_mapping_missing")
-                changed = (
-                    row["revision"] != account["revision"]
-                    or row["owner_id"] != account["owner_id"]
-                    or row["bank"] != account["bank"]
-                )
-                self.db.execute(
-                    "UPDATE scopes SET owner_id=?,principal_id=?,bank=?,generation=?,"
-                    "mode=?,accept_from=?,revision=? WHERE connection_id=? AND scope_id=?",
-                    (
-                        account["owner_id"],
-                        account["principal_id"],
-                        account["bank"],
-                        account["generation"],
-                        account["mode"],
-                        account["accept_from"],
-                        account["revision"],
-                        row["connection_id"],
-                        row["scope_id"],
-                    ),
-                )
-                stale = self.db.execute(
-                    "SELECT * FROM outbox WHERE connection_id=? AND scope_id=? "
-                    "AND (bank<>? OR generation<>?)",
-                    (
-                        row["connection_id"],
-                        row["scope_id"],
-                        account["bank"],
-                        account["generation"],
-                    ),
-                ).fetchall()
-                for task in stale:
-                    erasure = self.control.db.execute(
-                        "SELECT forget_id FROM erasures WHERE connection_id=? AND old_bank=?",
-                        (task["connection_id"], task["bank"]),
-                    ).fetchone()
-                    if not erasure:
-                        raise QueueError("recovery_required:unrecorded_retired_bank")
-                    refs = [
-                        ("operation", task["operation_id"]),
-                        ("document", task["document_id"]),
-                    ]
-                    refs.extend(
-                        ("operation", oid) for oid in self.operations(task["id"])
-                    )
-                    with self.control.transaction():
-                        self.control.add_refs(erasure["forget_id"], refs)
-                    self.db.execute(
-                        "UPDATE outbox SET state='discarded',payload='',payload_bytes=0,"
-                        "retry_requested=0,last_error='' WHERE id=?",
-                        (task["id"],),
-                    )
-                self.db.execute(
-                    "DELETE FROM window WHERE connection_id=? AND scope_id=? "
-                    "AND (generation<>? OR ?)",
-                    (
-                        row["connection_id"],
-                        row["scope_id"],
-                        account["generation"],
-                        changed,
-                    ),
-                )
-            for task in self.db.execute(
-                "SELECT o.*,s.owner_id FROM outbox o JOIN scopes s USING(connection_id,scope_id) "
-                "WHERE o.state<>'discarded'"
-            ).fetchall():
-                record = self.control.request(task["operation_id"])
-                if record:
-                    if record["digest"] != task["payload_sha256"]:
-                        raise QueueError("recovery_required:request_digest_mismatch")
-                    self.db.execute(
-                        "UPDATE outbox SET accepted=MAX(accepted,?),cancel_intent=?,state="
-                        "CASE WHEN ? THEN 'cancel_requested' "
-                        "WHEN ? AND state='deferred' THEN 'unknown' "
-                        "WHEN ? AND state IN ('ready','submitting') THEN 'unknown' ELSE state END "
-                        "WHERE id=?",
-                        (
-                            record["accepted"],
-                            record["cancel_intent"],
-                            record["cancel_intent"],
-                            record["accepted"],
-                            record["dispatched"] or record["accepted"],
-                            task["id"],
-                        ),
-                    )
-                    intent = self.control.db.execute(
-                        "SELECT pending FROM retry_intents WHERE operation_id=?", (task["operation_id"],),
-                    ).fetchone()
-                    if intent:
-                        self.db.execute(
-                            "UPDATE outbox SET retry_requested=?,next_at=CASE WHEN ? THEN 0 ELSE next_at END WHERE id=?",
-                            (int(bool(intent["pending"] and task["state"] not in {
-                                "done", "discarded", "cancelled",
-                            } and not record["cancel_intent"])),
-                             intent["pending"], task["id"]),
-                        )
-            self.db.execute(
-                "INSERT OR REPLACE INTO settings VALUES ('control_revision',?)",
-                (self.control.setting("revision"),),
-            )
 
     def _connection(self, url, fingerprint, revision):
         row = self.db.execute(
@@ -451,45 +267,17 @@ class Outbox:
             )
 
     def list_scopes(self):
-        return self.db.execute(
+        return [self.project_scope(row) for row in self.db.execute(
             "SELECT * FROM scopes WHERE connection_id=? ORDER BY platform_instance_id,user_id",
             (self.connection_id,),
-        ).fetchall()
+        ).fetchall()]
+
+    def project_scope(self, row):
+        return {**dict(row), "allowed": 0} if row and row["scope_id"] in self.suspended_sources else row
 
     def sync_permissions(self, accounts):
         accounts = frozenset(accounts)
-        migration = "authorization_migration:" + self.connection_id
-        legacy = not self.control.setting(migration)
-        legacy_sources = {
-            row["scope_id"] for row in self.list_scopes() if row["allowed"]
-        } if legacy else set()
-        self.access.sync(accounts, legacy_sources=legacy_sources)
-        if legacy:
-            with self.control.transaction():
-                self.control.db.execute(
-                    "INSERT INTO settings VALUES (?,?)", (migration, "1"),
-                )
-        with self.db:
-            for row in self.db.execute(
-                "SELECT scope_id,user_id,platform_instance_id,identity_json,allowed FROM scopes "
-                "WHERE connection_id=?",
-                (self.connection_id,),
-            ).fetchall():
-                allowed = (
-                    row["platform_instance_id"],
-                    row["user_id"],
-                ) in accounts and self.access.permitted(
-                    Scope(*json.loads(row["identity_json"]))
-                )
-                self.db.execute(
-                    "UPDATE scopes SET allowed=? WHERE connection_id=? AND scope_id=?",
-                    (int(allowed), self.connection_id, row["scope_id"]),
-                )
-                if row["allowed"] and not allowed:
-                    self.db.execute(
-                        "DELETE FROM window WHERE connection_id=? AND scope_id=?",
-                        (self.connection_id, row["scope_id"]),
-                    )
+        self.access.sync(accounts)
         self.permission_pairs = accounts
         self.references.reconcile()
 
@@ -499,15 +287,10 @@ class Outbox:
             identity.platform_instance_id, identity.user_id
         ) not in self.permission_pairs:
             raise QueueError("authorization_changed")
-        self.access.activate(identity, expected_revision, now=now)
-        self.scope(incoming)
-        self.apply_control()
-        self.sync_permissions(self.permission_pairs)
         with self.db:
-            self.db.execute(
-                "DELETE FROM window WHERE connection_id=? AND scope_id=?",
-                (self.connection_id, identity.id),
-            )
+            self.access.activate(identity, expected_revision, now=now)
+            self.scope(incoming)
+        self.sync_permissions(self.permission_pairs)
         return self.scope_owner(identity.id)
 
     def accepts(self, incoming):
@@ -527,46 +310,10 @@ class Outbox:
         )
         if account["agent_id"] != self.agent_id:
             raise QueueError("agent_mapping_change_requires_migration")
-        permitted = (
-            self.permission_pairs is not None
-            and (identity.platform_instance_id, identity.user_id) in self.permission_pairs
-            and self.access.permitted(identity)
-        )
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO scopes(connection_id,scope_id,identity_json,"
-                "platform_instance_id,user_id,bank,generation,mode,accept_from,allowed,"
-                "owner_id,principal_id,revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    self.connection_id,
-                    identity.id,
-                    identity.identity,
-                    identity.platform_instance_id,
-                    identity.user_id,
-                    account["bank"],
-                    account["generation"],
-                    account["mode"],
-                    account["accept_from"],
-                    int(permitted),
-                    account["owner_id"],
-                    account["principal_id"],
-                    account["revision"],
-                ),
-            )
-            self.db.execute(
-                "INSERT OR REPLACE INTO settings VALUES ('control_revision',?)",
-                (self.control.setting("revision"),),
-            )
-        return self.db.execute(
-            "SELECT * FROM scopes WHERE connection_id=? AND scope_id=?",
-            (self.connection_id, identity.id),
-        ).fetchone()
+        return self.scope_owner(identity.id)
 
     def current(self, task, *, writing=True) -> bool:
-        row = self.db.execute(
-            "SELECT * FROM scopes WHERE connection_id=? AND scope_id=?",
-            (self.connection_id, task["scope_id"]),
-        ).fetchone()
+        row = self.scope_owner(task["scope_id"])
         owner = self.control.owner(self.connection_id, row["owner_id"]) if row else None
         return bool(
             task["connection_id"] == self.connection_id
@@ -908,6 +655,12 @@ class Outbox:
                 " AND s.owner_id NOT IN (" + ",".join("?" for _ in exclude_owners) + ")"
             )
             args.extend(exclude_owners)
+        if self.suspended_sources:
+            exclusion += (
+                " AND (o.scope_id NOT IN (" + ",".join("?" for _ in self.suspended_sources)
+                + ") OR o.state IN ('unknown','tracking','cancel_requested') OR o.cancel_intent=1)"
+            )
+            args.extend(sorted(self.suspended_sources))
         if self.recovering:
             return None
         return self.db.execute(
@@ -977,9 +730,6 @@ class Outbox:
         row = self.get(task_id)
         if row is None or (row["state"] == "discarded" and state != "discarded"):
             return
-        if accepted:
-            owner = self.scope_owner(row["scope_id"])
-            self.control.record_request(row, owner["owner_id"], accepted=True)
         if row["cancel_intent"] and state not in {
             "cancelled",
             "discarded",
@@ -988,15 +738,17 @@ class Outbox:
             state = "cancel_requested"
             retry_requested = 0
         clear = state in {"done", "discarded", "cancelled"}
-        if retry_requested == 0 or clear:
-            with self.control.transaction():
-                self.control.db.execute(
+        with self.db:
+            if accepted:
+                owner = self.scope_owner(row["scope_id"])
+                self.control.record_request(row, owner["owner_id"], accepted=True)
+            if retry_requested == 0 or clear:
+                self.db.execute(
                     "UPDATE retry_intents SET pending=0 WHERE operation_id=?", (row["operation_id"],),
                 )
-        with self.db:
             self.db.execute(
                 "UPDATE outbox SET state=?,next_at=?,last_error=?,updated_at=?,"
-                "attempts=COALESCE(?,attempts),accepted=COALESCE(?,accepted),"
+                "attempts=COALESCE(?,attempts),accepted=MAX(accepted,COALESCE(?,accepted)),"
                 "retry_requested=COALESCE(?,retry_requested),"
                 "payload=CASE WHEN ? THEN '' ELSE payload END,"
                 "payload_bytes=CASE WHEN ? THEN 0 ELSE payload_bytes END,"
@@ -1036,7 +788,7 @@ class Outbox:
             )
         }
 
-    def request_retry(self, scope_id: str, *, journal_only=False) -> int:
+    def request_retry(self, scope_id: str) -> int:
         scope = self.scope_owner(scope_id)
         if not scope or not self.can_recall(scope, manual=True) or scope["mode"] != "active":
             raise QueueError("scope_not_active")
@@ -1062,9 +814,6 @@ class Outbox:
                 (time.time(), time.time(), self.connection_id, scope["owner_id"]),
             )
             self.control.bump()
-        if journal_only:
-            return len(tasks)
-        with self.db:
             cursor = self.db.execute(
                 "UPDATE outbox SET retry_requested=1,next_at=0,attempts=0 "
                 "WHERE connection_id=? AND scope_id IN "
@@ -1134,10 +883,10 @@ class Outbox:
         }
 
     def scope_owner(self, scope_id):
-        return self.db.execute(
+        return self.project_scope(self.db.execute(
             "SELECT * FROM scopes WHERE connection_id=? AND scope_id=?",
             (self.connection_id, scope_id),
-        ).fetchone()
+        ).fetchone())
 
     def management(self, scope_id):
         row = self.scope_owner(scope_id)
@@ -1175,7 +924,7 @@ class Outbox:
             and (manual or latest["mode"] in {"active", "readonly"})
         )
 
-    def set_mode(self, scope_id, mode, *, now=None, journal_only=False):
+    def set_mode(self, scope_id, mode, *, now=None):
         row = self.scope_owner(scope_id)
         if not row or not row["allowed"] or self.recovering:
             raise QueueError("scope_not_available")
@@ -1185,18 +934,17 @@ class Outbox:
             if self.control.bank_state(self.connection_id, row["bank"]) == "missing":
                 raise QueueError("bank_missing")
         self.control.set_mode(self.connection_id, row["owner_id"], mode, now=now)
-        if journal_only:
-            return None
-        self.apply_control()
         return self.scope_owner(scope_id)
 
     def before_submit(self, row):
-        if not self.current(row):
-            raise QueueError("scope_changed")
-        scope = self.scope_owner(row["scope_id"])
-        self.control.record_request(row, scope["owner_id"], dispatched=True)
+        with self.db:
+            if not self.current(row):
+                raise QueueError("scope_changed")
+            scope = self.scope_owner(row["scope_id"])
+            self.control.record_request(row, scope["owner_id"], dispatched=True)
+            self.update(row["id"], "submitting")
 
-    def request_cancel(self, scope_id, task_id, *, journal_only=False):
+    def request_cancel(self, scope_id, task_id):
         scope, task = self.scope_owner(scope_id), self.get(task_id)
         target_scope = self.scope_owner(task["scope_id"]) if task else None
         if (
@@ -1211,53 +959,31 @@ class Outbox:
             or task["state"] == "discarded"
         ):
             raise QueueError("task_outside_memory_scope")
-        self.control.record_request(task, scope["owner_id"], cancel=True)
-        if journal_only:
-            return "cancel_requested"
         with self.db:
+            self.control.record_request(task, scope["owner_id"], cancel=True)
             self.db.execute(
                 "UPDATE outbox SET cancel_intent=1,retry_requested=0,released=1,next_at=0 "
                 "WHERE id=?",
                 (task_id,),
             )
-        record = self.control.request(task["operation_id"])
-        if (
-            not task["accepted"]
-            and task["state"] == "ready"
-            and not record["dispatched"]
-        ):
-            self.update(task_id, "cancelled", delay=60, error="cancelled_before_submit")
-        else:
-            self.update(task_id, "cancel_requested")
+            record = self.control.request(task["operation_id"])
+            if not task["accepted"] and task["state"] == "ready" and not record["dispatched"]:
+                self.update(task_id, "cancelled", delay=60, error="cancelled_before_submit")
+            else:
+                self.update(task_id, "cancel_requested")
         return self.get(task_id)["state"]
 
-    def forget(self, scope_id, *, now=None, management=None, journal_only=False):
+    def forget(self, scope_id, *, now=None, management=None):
         row = self.scope_owner(scope_id)
         if not row or self.recovering or (
             not row["allowed"] and not self.managed(row, management)
         ):
             raise QueueError("scope_not_available")
-        tasks = self.db.execute(
-            "SELECT * FROM outbox WHERE connection_id=? AND bank=?",
-            (self.connection_id, row["bank"]),
-        ).fetchall()
-        refs = []
-        for task in tasks:
-            refs.extend(
-                [("operation", task["operation_id"]), ("document", task["document_id"])]
-            )
-            refs.extend(("operation", oid) for oid in self.operations(task["id"]))
         erasure = self.control.forget(
-            self.connection_id, row["owner_id"], refs, now=now
+            self.connection_id, row["owner_id"], now=now
         )
-        if journal_only:
-            return erasure
-        # A failed second commit leaves the control journal authoritative at restart.
-        try:
-            self.apply_control()
-        except BaseException:
-            self.recovering = True
-            raise
+        if not self.db.in_transaction:
+            self.references.reconcile()
         return erasure
 
     def close(self):

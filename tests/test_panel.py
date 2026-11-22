@@ -1192,7 +1192,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         scope, queue, _ = self.management_resources()
         scope["allowed"] = False
         queue.control.set_bank_state = Mock()
-        queue.apply_control = Mock()
         self.plugin.client = SimpleNamespace(ensure_auth=AsyncMock(), bank_exists=AsyncMock(return_value=False))
         with self.assertRaisesRegex(module.PanelError, "原记忆库仍不存在"):
             await self.action("bank_check")
@@ -1201,13 +1200,11 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         await self.action("bank_check")
         queue.control.set_bank_state.assert_called_once_with("connection-1", "bank-1", "established")
         queue.set_mode.assert_not_called()
-        queue.apply_control.assert_called_once_with()
 
     async def test_bank_check_rejects_bank_rotation_during_remote_read(self):
         scope, queue, _ = self.management_resources()
         queue.scope_owner.side_effect = lambda identifier: dict(scope)
         queue.control.set_bank_state = Mock()
-        queue.apply_control = Mock()
         async def rotate(bank):
             scope["bank"] = "new-bank"
             queue.control.owner.return_value["bank"] = "new-bank"
@@ -1216,7 +1213,6 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(module.PanelError, "记忆范围已变化"):
             await self.action("bank_check")
         queue.control.set_bank_state.assert_not_called()
-        queue.apply_control.assert_not_called()
 
     async def test_get_actions_are_read_only_and_content_actions_are_removed(self):
         _, _, maintenance = self.management_resources()

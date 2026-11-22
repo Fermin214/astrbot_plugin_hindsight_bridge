@@ -188,7 +188,6 @@ class PanelUpgrade:
                         if inspected[row["bank"]]["existed"]:
                             queue.control.set_bank_state(queue.connection_id, row["bank"], "established")
                         queue.control.finish_maintenance(queue.connection_id, row["owner_id"])
-                queue.apply_control()
                 state.pop("upgrade_pauses", None)
                 plugin.worker.wake.set()
                 return len(targets)
@@ -243,13 +242,12 @@ class PanelUpgrade:
                                 "started_at": record["started_at"],
                             })
                     self.store_state(state)
-                queue.apply_control()
                 plugin.worker.wake.set()
                 self.version_cache = None
                 return {"message": "已为本插件的所有记忆库暂停保存和查询。待保存或失败记录不会丢弃；处理完成后再生成升级命令。",
                         "config_revision": self.config_revision()}
             if action != "prepare" or payload.get("backup_confirmed") is not True:
-                raise PanelError("请先备份插件业务数据和最新控制数据，并确认停止其他客户端及官方面板写入。")
+                raise PanelError("请先备份插件主库和记忆服务数据库，并确认停止其他客户端及官方面板写入。")
             banks = await inspect_banks()
             recheck()
             result = self.installation_command(state,

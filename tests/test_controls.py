@@ -275,26 +275,27 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(task.bank, self.service.banks)
         self.assertEqual(len(self.service.submissions), 1)
 
-    async def test_control_commit_survives_crash_before_runtime_commit(self):
+    async def test_clear_failure_rolls_back_owner_queue_and_erasure(self):
         task = self.enqueue()
         with (
             patch.object(
-                self.queue,
-                "apply_control",
+                self.queue.control,
+                "bump",
                 side_effect=sqlite3.OperationalError("injected"),
             ),
             self.assertRaises(sqlite3.OperationalError),
         ):
             self.queue.forget(task.scope_id)
-        self.assertFalse(self.queue.current(self.queue.get(task.task_id)))
+        self.assertTrue(self.queue.current(self.queue.get(task.task_id)))
+        self.assertFalse(self.queue.control.erasures("test-service"))
         self.queue.close()
         self.open()
-        self.assertTrue(self.queue.recovering)
+        self.assertFalse(self.queue.recovering)
         self.worker = Worker(self.queue, self.client, self.logger)
         await self.worker.step()
         self.assertFalse(self.queue.recovering)
-        self.assertEqual(self.queue.get(task.task_id)["state"], "discarded")
-        self.assertEqual(self.service.submissions, [])
+        self.assertTrue(self.queue.get(task.task_id)["accepted"])
+        self.assertEqual(len(self.service.submissions), 1)
 
     async def test_delete_response_loss_continues_idempotently(self):
         task = self.enqueue()
@@ -308,48 +309,52 @@ class Controls(unittest.IsolatedAsyncioTestCase):
             self.queue.control.erasures("test-service")[0]["phase"], "verified"
         )
 
-    async def test_old_business_backup_replays_new_control_and_rejects_old_events(self):
+    async def test_whole_snapshot_of_deleted_bank_pauses_without_recreating_it(self):
         task = self.enqueue()
+        await self.worker.step()
+        self.immediately()
+        await self.worker.step()
+        pending = self.enqueue(self.incoming(mid="pending-before-snapshot"))
         backup = Path(self.tmp.name) / "monday.sqlite3"
         with database(backup) as destination:
             self.queue.db.backup(destination)
-        record = self.queue.forget(task.scope_id, now=time.time() + 3)
+        self.queue.forget(task.scope_id, now=time.time() + 3)
         self.assertTrue(await self.worker.maintenance.check(force=True))
         deployment = self.queue.deployment_id
         self.queue.close()
-        # SQLite backup restores business data while leaving the control store untouched.
         with (
             database(backup) as source,
-            database(self.directory / "runtime.sqlite3") as target,
+            database(self.directory / "bridge.sqlite3") as target,
         ):
             source.backup(target)
         self.open()
-        self.assertTrue(self.queue.recovering)
+        self.assertFalse(self.queue.recovering)
         self.worker = Worker(self.queue, self.client, self.logger)
         await self.worker.step()
         scope = self.queue.scope_owner(task.scope_id)
-        self.assertEqual(scope["bank"], record["new_bank"])
-        self.assertEqual(scope["mode"], "paused")
+        self.assertEqual(scope["bank"], task.bank)
+        self.assertEqual(scope["mode"], "active")
         self.assertEqual(self.queue.deployment_id, deployment)
-        self.assertEqual(self.queue.get(task.task_id)["payload"], "")
-        self.queue.set_mode(task.scope_id, "active", now=time.time() + 4)
-        with self.assertRaisesRegex(QueueError, "message_before_accept_from"):
-            self.enqueue(self.incoming(mid="late-unseen-old-event"))
-        self.assertEqual(self.service.submissions, [])
+        self.assertEqual(self.queue.control.bank_state("test-service", task.bank), "missing")
+        self.assertEqual(self.queue.get(pending.task_id)["last_error"], "bank_missing")
+        self.assertFalse(self.queue.can_recall(scope))
+        self.assertEqual(len(self.service.submissions), 1)
+        self.assertNotIn(task.bank, self.service.banks)
 
     async def test_accepted_ledger_prevents_replay_after_restoring_unsubmitted_snapshot(
         self,
     ):
         task = self.enqueue()
+        await self.worker.step()
+        self.queue.update(task.task_id, "tracking", accepted=1)
         backup = Path(self.tmp.name) / "ready.sqlite3"
         with database(backup) as destination:
             self.queue.db.backup(destination)
-        await self.worker.step()
         self.queue.close()
         self.service.operations.clear()
         with (
             database(backup) as source,
-            database(self.directory / "runtime.sqlite3") as target,
+            database(self.directory / "bridge.sqlite3") as target,
         ):
             source.backup(target)
         self.open()
@@ -358,22 +363,13 @@ class Controls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.queue.get(task.task_id)["state"], "reconcile_required")
         self.assertEqual(len(self.service.submissions), 1)
 
-    async def test_missing_or_rolled_back_control_cannot_initialize_new_identity(self):
+    async def test_invalid_main_database_cannot_initialize_new_identity(self):
         task = self.enqueue()
-        control_path = self.queue.control.directory
-        older_control = Path(self.tmp.name) / "old-control.sqlite3"
-        with database(older_control) as dest:
-            self.queue.control.db.backup(dest)
         self.queue.forget(task.scope_id)
         self.queue.close()
-        with self.assertRaisesRegex(QueueError, "control_missing"):
-            self.open(control_directory=Path(self.tmp.name) / "missing")
-        with (
-            database(older_control) as source,
-            database(control_path / "control.sqlite3") as target,
-        ):
-            source.backup(target)
-        with self.assertRaisesRegex(QueueError, "control_rolled_back"):
+        with database(self.directory / "bridge.sqlite3") as target:
+            target.execute("DELETE FROM settings WHERE key='storage_format'")
+        with self.assertRaises(QueueError):
             self.open()
 
     async def test_principal_binding_survives_restart_and_keeps_source_permissions(
@@ -433,7 +429,7 @@ class PermissionMigration(unittest.TestCase):
         with self.assertRaises(QueueError):
             pairs([{"platform_instance_id": "", "user_id": "X"}])
 
-    def test_p1_schema_migration_preserves_bank_and_new_principal(self):
+    def test_unsupported_legacy_schema_preserves_data_and_refuses_empty_identity(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root) / "runtime"
             directory.mkdir()
@@ -460,23 +456,8 @@ class PermissionMigration(unittest.TestCase):
                     "INSERT INTO scopes VALUES (?,?,?,?,?,?,0,1,'active',1)",
                     ("s", source.id, source.identity, "A", "X", source.bank()),
                 )
-            queue = Outbox(
-                directory, "s", "http://memory.test", credential_fingerprint="key"
-            )
-            try:
-                self.assertEqual(queue.deployment_id, "fixed-deployment")
-                self.assertEqual(queue.scope_owner(source.id)["bank"], source.bank())
-                principal = queue.scope_owner(source.id)["principal_id"]
-                self.assertTrue(principal)
-            finally:
-                queue.close()
-            queue = Outbox(
-                directory, "s", "http://memory.test", credential_fingerprint="key"
-            )
-            try:
-                self.assertEqual(
-                    queue.scope_owner(source.id)["principal_id"], principal
-                )
-                self.assertEqual(queue.scope_owner(source.id)["bank"], source.bank())
-            finally:
-                queue.close()
+            with self.assertRaises(QueueError):
+                Outbox(directory, "s", "http://memory.test", credential_fingerprint="key")
+            with database(directory / "runtime.sqlite3") as original:
+                self.assertEqual(original.execute("SELECT bank FROM scopes").fetchone()[0], source.bank())
+            self.assertFalse((directory / "bridge.sqlite3").exists())

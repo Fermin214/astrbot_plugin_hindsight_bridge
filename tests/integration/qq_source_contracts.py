@@ -239,9 +239,8 @@ async def control_contracts(fixture, directory):
             scope = queue.scope(applied)
             command = queue.access.command(applied, source, scope, "mode", ("active",))
             queue.access.run(command, scope, lambda: queue.set_mode(
-                scope["scope_id"], "active", journal_only=True,
+                scope["scope_id"], "active",
             ))
-            queue.apply_control()
         delayed = await incoming(7, "/hb on", "first-seen-late-on")
         with patch.object(time, "time", return_value=baseline + 8):
             queue.set_mode(source.id, "paused")
@@ -251,8 +250,7 @@ async def control_contracts(fixture, directory):
             rejected_command(queue, conflict, "command_identity_conflict", mode="readonly")
             scope = queue.scope(delayed)
             delayed_command = queue.access.command(delayed, source, scope, "mode", ("active",))
-            queue.access.run(delayed_command, scope, lambda: queue.set_mode(scope["scope_id"], "active", journal_only=True))
-            queue.apply_control()
+            queue.access.run(delayed_command, scope, lambda: queue.set_mode(scope["scope_id"], "active"))
             assert queue.scope_owner(source.id)["mode"] == "active"
             assert queue.control.db.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 2
         with patch.object(time, "time", return_value=baseline + 10):

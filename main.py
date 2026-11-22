@@ -228,7 +228,6 @@ class HindsightBridge(Star):
                 max_tasks=int(self.config.get("queue_max_tasks", 10000)),
                 max_bytes=int(self.config.get("queue_max_mib", 64)) * 1024 * 1024,
                 control_directory=control_directory,
-                control_root=self.control_root(),
                 agent_id=str(self.config.get("agent_id", "default")),
                 warning=self.warning,
             )
@@ -257,7 +256,6 @@ class HindsightBridge(Star):
             await self._close_resources()
 
     def control_root(self):
-        # Derive the allocation before resolving links, so a redirected root is rejected.
         return (
             (Path(get_astrbot_data_path()) / "plugin_data").resolve()
             / "astrbot_plugin_hindsight_bridge_control"
@@ -270,12 +268,9 @@ class HindsightBridge(Star):
         if not directory.is_absolute():
             raise QueueError("control_directory_must_be_absolute")
         try:
-            resolved = directory.resolve()
-            if root.resolve() != root or not resolved.is_relative_to(root):
-                raise QueueError("control_directory_outside_plugin")
+            return directory.resolve()
         except (OSError, RuntimeError):
             raise QueueError("control_directory_invalid") from None
-        return resolved
 
     def refresh_permissions(self):
         if self.outbox is not None:
@@ -320,11 +315,9 @@ class HindsightBridge(Star):
                 if evidence is not None:
                     source = json.loads(row["identity_json"])
                     if source[3] != evidence["bot_id"]:
-                        self.outbox.db.execute(
-                            "UPDATE scopes SET allowed=0 WHERE connection_id=? AND scope_id=?",
-                            (self.outbox.connection_id, row["scope_id"]),
-                        )
-            self.outbox.db.commit()
+                        self.outbox.suspended_sources.add(row["scope_id"])
+                    else:
+                        self.outbox.suspended_sources.discard(row["scope_id"])
 
     async def prepare_sources(self, platform=None):
         getter = getattr(self.context, "get_platform_inst", None)
@@ -737,7 +730,6 @@ class HindsightBridge(Star):
                     raise HindsightError("recall_timeout")
                 if any(item["code"] == "bank_missing" for item in outcomes):
                     guard.queue.control.set_bank_state(guard.queue.connection_id, guard.scope["bank"], "missing")
-                    guard.queue.apply_control()
                     raise HindsightError("bank_missing")
                 return block, recall_code, facts_used, {
                     "code": next((item["code"] for item in outcomes if item["code"]), ""),
@@ -1142,7 +1134,7 @@ class HindsightBridge(Star):
             raise QueueError("authorization_changed")
         try:
             result = self.outbox.access.run(command, scope, operation)
-            self.outbox.apply_control()
+            self.outbox.references.reconcile()
             return result
         except (OSError, sqlite3.DatabaseError):
             self.outbox.recovering = True
@@ -1320,7 +1312,7 @@ class HindsightBridge(Star):
                         return "记忆范围已变化，请重新开启。"
                 self.apply_command(
                     event, scope, command,
-                    lambda: self.outbox.set_mode(scope["scope_id"], mode, journal_only=True),
+                    lambda: self.outbox.set_mode(scope["scope_id"], mode),
                 )
                 self.worker.wake.set()
             except QueueError as exc:
@@ -1430,7 +1422,7 @@ class HindsightBridge(Star):
                 command = self.prepare_command(event, scope, "forget", (sha256(confirmation),))
                 self.apply_command(
                     event, scope, command,
-                    lambda: self.outbox.forget(scope["scope_id"], journal_only=True),
+                    lambda: self.outbox.forget(scope["scope_id"]),
                 )
                 self.worker.wake.set()
                 yield event.plain_result(

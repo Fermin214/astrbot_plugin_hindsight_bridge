@@ -19,7 +19,6 @@ import test_reading as reading_tests
 import test_runtime_diagnostics as runtime
 from plugins.astrbot_plugin_hindsight_bridge.core.agent_tools import NAMES, REFLECT_NAME, save_options
 from plugins.astrbot_plugin_hindsight_bridge.core.client import HindsightClient, HindsightError
-from plugins.astrbot_plugin_hindsight_bridge.core.control import Control
 from plugins.astrbot_plugin_hindsight_bridge.core.identity import canonical, sha256
 from plugins.astrbot_plugin_hindsight_bridge.core.maintenance import Maintenance
 from plugins.astrbot_plugin_hindsight_bridge.core.outbox import Outbox
@@ -34,22 +33,17 @@ RESPONSE = {"text": "Native synthesis from the cited fact.", "based_on": {
 
 
 class ReflectMigration(unittest.TestCase):
-    def test_v6_unknown_is_archived_on_startup_without_changing_storage_format(self):
+    def test_startup_archives_unfinished_requests_without_changing_ids(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with closing(Control(root, "fixture")):
-                pass
             original = ("request", "connection", "owner", "bank", 3, "unknown", 123.5, "disconnect")
-            with closing(sqlite3.connect(root / "control.sqlite3")) as db, db:
-                db.execute("DROP TABLE reflection_requests")
-                db.execute("CREATE TABLE reflection_requests(request_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, "
-                           "owner_id TEXT NOT NULL, bank TEXT NOT NULL, generation INTEGER NOT NULL, "
-                           "state TEXT NOT NULL CHECK(state IN ('prepared','dispatched','unknown')), "
-                           "created_at REAL NOT NULL, error_code TEXT NOT NULL DEFAULT '', UNIQUE(connection_id,bank))")
-                db.execute("INSERT INTO reflection_requests VALUES (?,?,?,?,?,?,?,?)", original)
-                db.execute("PRAGMA user_version=6")
-            with closing(Control(root, "fixture", required=True)) as control:
-                self.assertEqual(control.db.execute("PRAGMA user_version").fetchone()[0], 7)
+            def open_queue():
+                return Outbox(root, "fixture", "http://memory.test", credential_fingerprint="test")
+            with closing(open_queue()) as queue, queue.db:
+                queue.db.execute("INSERT INTO reflection_requests VALUES (?,?,?,?,?,?,?,?,NULL,'')", original)
+            with closing(open_queue()) as queue:
+                control = queue.control
+                self.assertEqual(control.db.execute("PRAGMA user_version").fetchone()[0], 8)
                 audit = control.db.execute("SELECT * FROM reflection_requests").fetchone()
                 self.assertEqual(tuple(audit)[:8], (*original[:5], "overridden", *original[6:]))
                 self.assertIsInstance(audit["overridden_at"], float)
@@ -58,7 +52,8 @@ class ReflectMigration(unittest.TestCase):
                     for state in ("prepared", "dispatched", "unknown"):
                         control.db.execute("INSERT INTO reflection_requests(request_id,connection_id,owner_id,bank,generation,state,created_at) "
                                            "VALUES (?,?,?,?,?,?,?)", (state, "connection", "owner", state, 3, state, 124))
-            with closing(Control(root, "fixture", required=True)) as control:
+            with closing(open_queue()) as queue:
+                control = queue.control
                 self.assertEqual(tuple(control.db.execute("SELECT * FROM reflection_requests WHERE request_id='request'").fetchone()), tuple(audit))
                 self.assertEqual(control.db.execute("SELECT COUNT(*) FROM reflection_requests WHERE state='overridden'").fetchone()[0], 4)
 

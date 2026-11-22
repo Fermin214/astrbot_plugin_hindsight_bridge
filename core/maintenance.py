@@ -27,28 +27,20 @@ class Maintenance:
         scope, queue = self._scope(scope_id, management), self.outbox
         if queue.recovering:
             raise QueueError("scope_not_available")
-        record = queue.control.begin_maintenance(
-            queue.connection_id, scope["owner_id"], discard_pending=discard_pending
-        )
-        queue.apply_control()
-        # Remove history anchors at the boundary so a late assistant callback
-        # cannot attach an earlier turn after maintenance ends.
         with queue.db:
-            queue.db.execute(
-                "DELETE FROM window WHERE connection_id=? AND scope_id IN "
-                "(SELECT scope_id FROM scopes WHERE connection_id=? AND bank=?)",
-                (queue.connection_id, queue.connection_id, scope["bank"]),
+            record = queue.control.begin_maintenance(
+                queue.connection_id, scope["owner_id"], discard_pending=discard_pending
             )
-        if record["discard_pending"]:
-            rows = queue.db.execute(
-                "SELECT * FROM outbox WHERE connection_id=? AND bank=? "
-                "AND state NOT IN ('done','discarded')",
-                (queue.connection_id, scope["bank"]),
-            ).fetchall()
-            for row in rows:
-                if queue.can_discard(row):
-                    queue.control.record_request(row, scope["owner_id"], cancel=True)
-                    queue.update(row["id"], "discarded", retry_requested=0)
+            if record["discard_pending"]:
+                rows = queue.db.execute(
+                    "SELECT * FROM outbox WHERE connection_id=? AND bank=? "
+                    "AND state NOT IN ('done','discarded')",
+                    (queue.connection_id, scope["bank"]),
+                ).fetchall()
+                for row in rows:
+                    if queue.can_discard(row):
+                        queue.control.record_request(row, scope["owner_id"], cancel=True)
+                        queue.update(row["id"], "discarded", retry_requested=0)
         return queue.control.maintenance(queue.connection_id, scope["bank"])
 
     async def status(self, scope_id, *, management=None):
@@ -138,12 +130,10 @@ class Maintenance:
             raise QueueError("scope_not_available")
         if not exists and not uncreated:
             queue.control.set_bank_state(queue.connection_id, scope["bank"], "missing")
-            queue.apply_control()
             raise QueueError("bank_missing")
         if exists:
             queue.control.set_bank_state(queue.connection_id, scope["bank"], "established")
         queue.control.finish_maintenance(queue.connection_id, scope["owner_id"])
-        queue.apply_control()
         return {"phase": "inactive", "ready": False}
 
     async def cancel_active(self, bank, operation):
@@ -330,8 +320,7 @@ class Maintenance:
                     or item["last_error"] != "reference_history_unavailable"
                 ):
                     return False
-        # Apply the newest control records before allowing either recall or queue submission.
-        self.outbox.apply_control()
+        self.outbox.references.reconcile()
         if self.outbox.recovering:
             rows = self.outbox.db.execute(
                 "SELECT * FROM outbox WHERE connection_id=? AND accepted=1 AND "

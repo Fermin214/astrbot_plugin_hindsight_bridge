@@ -173,17 +173,15 @@ async def main():
                     header, header.scope(queue.deployment_id), scope, "mode", ("active",),
                 )
                 queue.access.run(command, scope, lambda: queue.set_mode(
-                    scope["scope_id"], "active", journal_only=True,
+                    scope["scope_id"], "active",
                 ))
-                queue.apply_control()
                 next_scope = queue.scope(header)
                 next_command = queue.access.command(
                     old_command, old_command.scope(queue.deployment_id), next_scope, "mode", ("paused",),
                 )
                 queue.access.run(next_command, next_scope, lambda: queue.set_mode(
-                    next_scope["scope_id"], "paused", journal_only=True,
+                    next_scope["scope_id"], "paused",
                 ))
-                queue.apply_control()
                 assert queue.scope(header)["mode"] == "paused"
         finally:
             queue.close()

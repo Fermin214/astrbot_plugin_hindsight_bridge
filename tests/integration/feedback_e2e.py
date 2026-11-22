@@ -142,7 +142,7 @@ class Feedback(Acceptance):
         route = self.prefix + "/scopes/" + scope["scope_id"] + "/background"
         value = await self.http("GET", route)
         await self.http("POST", route, payload={
-            "page_id": page_id, "enabled": True, "revision": value["selection"]["revision"],
+            "page_ids": [page_id], "enabled": True, "revision": value["selection"]["revision"],
             "scope_revision": value["scope_revision"], "config_revision": value["config_revision"],
         })
 
@@ -345,6 +345,14 @@ class Feedback(Acceptance):
                 bank, identifier = scope["bank"], scope["scope_id"]
                 short = await self.page(bank, "Short background")
                 await self.select(short)
+                if self.settings.get("upgrade_only"):
+                    from upgrade_e2e import verify
+
+                    await verify(self, page, bank, short)
+                    assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash
+                    self.report.update(complete=True, acceptance_scope="v0.5.0 native migration interruptions, full snapshots and locked-history erasure")
+                    self.save()
+                    return
                 if upgrading:
                     self.record_baseline()
                     await self.install("candidate-upgrade.zip")
@@ -437,8 +445,8 @@ class Feedback(Acceptance):
                     await self.restart(move_business)
                     after_alias = await self.scope()
                     assert after_alias["bank"] == before_alias["bank"]
-                    assert after_alias["background"]["page_id"] == before_alias["background"]["page_id"]
-                    self.passed("native_business_directory_alias_preserves_default_control_allocation_and_bank")
+                    assert after_alias["background"]["page_ids"] == before_alias["background"]["page_ids"]
+                    self.passed("native_single_main_directory_alias_preserves_identity_and_bank")
 
                 async def chat_status(expected, used):
                     before = (await self.scope())["background"].get("status", {}).get("checked_at", 0)
@@ -485,100 +493,13 @@ class Feedback(Acceptance):
                     assert not (await self.scope())["background"].get("invalidated")
                     self.passed("identity_reconfirmation_invalidates_reference_and_explicit_reselection_clears_notice")
 
-                snapshot = ROOT / "pre-forget.sqlite3"
-                control = ROOT / "control-volume/control.sqlite3"
-                latest_control = ROOT / "recovery-backup/control.sqlite3"
+                from recovery_e2e import verify as verify_recovery
 
-                async def backup(name):
-                    output = ROOT / "recovery-backup" / name
-                    process = await asyncio.create_subprocess_exec(
-                        sys.executable, "/candidate-source/scripts/backup.py",
-                        "--data-dir", str(self.runtime.parent), "--control-dir", str(control.parent),
-                        "--output", str(output), "--latest-control", str(latest_control),
-                        "--backend-version", self.settings["hindsight_version"],
-                    )
-                    assert await process.wait() == 0
-                    return output / "runtime.sqlite3"
-
-                if self.settings.get("recovery_only"):
-                    await self.action(identifier, "mode", mode="active")
-                    await asyncio.sleep(1.1)
-                    await backup("before-delivery")
-                    before_revision = database(latest_control, "SELECT value FROM settings WHERE key='revision'")
-                    before_requests = {row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests")}
-                    await self.bot.chat(ALICE, "A synthetic completed delivery between backups.")
-
-                    async def delivered():
-                        return {
-                            row["operation_id"] for row in database(
-                                control, "SELECT operation_id FROM requests WHERE bank=? AND dispatched=1 AND accepted=1", (bank,),
-                            )
-                        } - before_requests
-
-                    delivered_requests = await until(delivered, timeout=60, label="accepted delivery after the first backup")
-                    await backup("after-delivery")
-                    assert database(latest_control, "SELECT value FROM settings WHERE key='revision'") == before_revision
-                    assert delivered_requests <= {
-                        row["operation_id"] for row in database(latest_control, "SELECT operation_id FROM requests WHERE accepted=1")
-                    }
-                    self.passed("consecutive_backups_include_native_delivery_without_control_revision_change")
-                    await self.control("stop_hindsight")
-                    try:
-                        await self.bot.chat(ALICE, "A synthetic pending delivery in the old business snapshot.")
-                        snapshot = await backup("before-forget")
-                        old_pending = database(snapshot,
-                            "SELECT operation_id FROM outbox WHERE bank=? AND state NOT IN ('done','discarded')",
-                            (bank,),
-                        )
-                        assert old_pending, "backup must include undelivered work"
-                    finally:
-                        await self.control("start_hindsight")
-                        await self.backend_ready()
-                else:
-                    with sqlite3.connect(self.runtime) as source, sqlite3.connect(snapshot) as destination:
-                        source.backup(destination)
-                prepared = await self.action(identifier, "forget_prepare")
-                await self.action(identifier, "forget_confirm", confirmation=prepared["confirmation"])
-                async def erased():
-                    value = await self.scope()
-                    return value if value["bank"] != bank and not value["summary"].get("cleanup") else None
-                latest = await until(erased, timeout=90)
-                assert latest["background"]["invalidated"] and not latest["background"]["page_id"]
-                if self.settings.get("recovery_only"):
-                    await backup("after-forget")
-                trace_boundary = len(jsonl("retain-trace"))
-
-                def restore_business():
-                    self.runtime.unlink()
-                    self.runtime.with_name("runtime.sqlite3-wal").unlink(missing_ok=True)
-                    self.runtime.with_name("runtime.sqlite3-shm").unlink(missing_ok=True)
-                    shutil.copyfile(snapshot, self.runtime)
-                    if self.settings.get("recovery_only"):
-                        control.with_name("control.sqlite3-wal").unlink(missing_ok=True)
-                        control.with_name("control.sqlite3-shm").unlink(missing_ok=True)
-                        shutil.copyfile(latest_control, control)
-                await self.restart(restore_business)
-                restored = await self.scope()
-                assert restored["bank"] == latest["bank"] and restored["generation"] == latest["generation"]
-                assert restored["background"]["invalidated"] and not restored["background"]["page_id"]
-                assert not (await self.memories(bank))["total"]
-                for absent_bank in (bank, restored["bank"]):
-                    async with self.session.get(
-                        self.settings["hindsight_url"] + "/v1/default/banks/" + absent_bank + "/config",
-                        headers={"Authorization": "Bearer " + self.settings["memory_key"]},
-                    ) as response:
-                        assert response.status == 404, (absent_bank, response.status)
-                self.report["measurements"]["bank_config_after_restore"] = {"retired": 404, "new": 404}
-                assert all(row["state"] == "discarded" for row in database(self.runtime, "SELECT state FROM outbox WHERE bank=?", (bank,)))
-                if self.settings.get("recovery_only"):
-                    dispatched = {row["body"]["operation_id"] for row in jsonl("retain-trace")[trace_boundary:]}
-                    assert not dispatched.intersection(row["operation_id"] for row in old_pending)
-                    self.passed("restoring_old_business_and_new_control_does_not_resend_pending_delivery")
+                await verify_recovery(self)
                 await page.reload()
                 await self.dismiss_host_notice(page)
                 await frame.locator("#startup").wait_for(state="hidden", timeout=30000)
                 await frame.locator("#background-status").filter(has_text="选择已失效").wait_for(timeout=15000)
-                self.passed("forget_then_old_business_restore_preserves_latest_migrated_journal_and_cannot_revive_bank_or_page")
                 if not self.settings.get("recovery_only"):
                     await self.layout(page, frame)
                 assert hashlib.sha256(core.read_bytes()).hexdigest() == core_hash

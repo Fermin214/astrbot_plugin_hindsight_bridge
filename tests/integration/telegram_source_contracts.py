@@ -246,9 +246,8 @@ async def main(output):
                         source, scope = command.scope(queue.deployment_id), queue.scope(command)
                         change = queue.access.command(command, source, scope, "mode", ("paused",))
                         queue.access.run(change, scope, lambda: queue.set_mode(
-                            scope["scope_id"], "paused", journal_only=True,
+                            scope["scope_id"], "paused",
                         ))
-                        queue.apply_control()
                         try:
                             queue.access.command(command, source, queue.scope_owner(source.id), "mode", ("paused",))
                         except QueueError as error:

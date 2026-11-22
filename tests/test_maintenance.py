@@ -375,17 +375,9 @@ class BankMaintenance(unittest.IsolatedAsyncioTestCase):
             self.service.operations[key] = {"operation_id": key, "status": "pending"}
             self.service.op_banks[key] = captured.bank
         record = self.queue.forget(captured.scope_id)
-        control_path = self.queue.control.directory / "control.sqlite3"
         self.queue.close()
-        # Reopen an original version-2 control store, without erasure checkpoints.
-        with closing(sqlite3.connect(control_path)) as db, db:
-            db.execute("DROP INDEX erasure_refs_cleanup")
-            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_step")
-            db.execute("ALTER TABLE erasures DROP COLUMN cleanup_epoch")
-            db.execute("ALTER TABLE erasure_refs DROP COLUMN checked_pass")
-            db.execute("PRAGMA user_version=2")
         self.open()
-        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 7)
+        self.assertEqual(self.queue.control.db.execute("PRAGMA user_version").fetchone()[0], 8)
         operation, listing = self.client.operation, self.client.list_operations
         reads, listings = [], 0
 

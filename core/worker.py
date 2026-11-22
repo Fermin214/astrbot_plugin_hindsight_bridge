@@ -141,7 +141,6 @@ class Worker:
                 if not self.outbox.current(row) or self.outbox.connection_error():
                     self.outbox.update(task_id, "unknown", delay=self.poll_interval)
                     return
-                self.outbox.update(task_id, "submitting")
                 self.outbox.before_submit(row)
                 await self.client.submit(row["bank"], payload)
                 if not self.outbox.current(row, writing=False):
@@ -204,7 +203,6 @@ class Worker:
                 self.outbox.control.set_bank_state(
                     row["connection_id"], row["bank"], "missing"
                 )
-                self.outbox.apply_control()
             if exc.authentication:
                 self.outbox.pause_connection(exc.code)
             state = current["state"]

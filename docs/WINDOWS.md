@@ -70,9 +70,9 @@ npx.cmd -y '@vectorize-io/hindsight-control-plane@1.2.0' --hostname 127.0.0.1 --
 
 ## 备份与恢复
 
-Bridge 和 Hindsight 需分别备份。恢复旧业务快照时保留最新的控制库副本，使已有的清空记录和账号权限继续生效。
+Bridge 和 Hindsight 需分别备份。0.6.0 的单主库 `bridge.sqlite3` 同时保存队列、身份、授权、设置与清空进度；使用记录仍在独立 `references.sqlite3`。恢复整库即回到快照时刻，不再保留另一份最新控制库。
 
-在 AstrBot 所用的 Python 环境中执行备份（将 `$astrbotData` 与 `$backupRoot` 换成实际路径；使用自定义控制目录时同步修改 `--control-dir`）：
+在 AstrBot 所用的 Python 环境中执行在线备份，将 `$astrbotData` 与 `$backupRoot` 换成实际路径：
 
 ```powershell
 $astrbotData = 'C:\AstrBot\Data'
@@ -80,13 +80,23 @@ $backupRoot = 'D:\AstrBot Backups'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 python "$astrbotData\plugins\astrbot_plugin_hindsight_bridge\scripts\backup.py" `
   --data-dir "$astrbotData\plugin_data\astrbot_plugin_hindsight_bridge" `
-  --control-dir "$astrbotData\plugin_data\astrbot_plugin_hindsight_bridge_control" `
   --output "$backupRoot\bridge-$stamp" `
-  --latest-control "$backupRoot\bridge-control-latest\control.sqlite3" `
   --backend-version 1.2.0
 ```
 
 同时另存 AstrBot 插件配置和 `setup.json`。恢复插件见 [恢复业务数据](DATA-MAINTENANCE.md#恢复业务数据)。
+
+停止 AstrBot 后，用脚本校验并恢复所选快照：
+
+```powershell
+python "$astrbotData\plugins\astrbot_plugin_hindsight_bridge\scripts\backup.py" `
+  --data-dir "$astrbotData\plugin_data\astrbot_plugin_hindsight_bridge" `
+  --restore "$backupRoot\bridge-$stamp"
+```
+
+不要使用清空记忆或撤权前的旧快照覆盖运行库。旧快照指向的已建立 Bank 若已在远端删除，插件会暂停该用户读写，等待恢复原 Bank 或清空后重新开始。
+
+从 0.5.0 升级前，停机另存旧业务及控制目录。首次启动会生成 `legacy-v0.5-backup/` 再迁移至主库；不能直接降级，首次启用前撤回须完整还原该备份。稳定运行后及时删除迁移备份，避免长期残留旧聊天内容。
 
 ### pg0 本机停机备份
 
@@ -100,6 +110,6 @@ python "$astrbotData\plugins\astrbot_plugin_hindsight_bridge\scripts\backup.py" 
 ## 从 Linux 迁移 AstrBot 到 Windows
 
 1. 若原 Linux 部署使用了配套服务且正处于升级暂停中，先在原环境核对升级结果并解除暂停（或选择 **暂不升级**），除非确保 Windows 上仍能连到原服务的管理接口。
-2. 停止 AstrBot，把插件配置、业务库 `runtime.sqlite3` 与最新控制库 `control.sqlite3` 一起迁到 Windows，保持平台实例 ID 与用户账号配置不变（如设置过 `control_state_dir`，更新为 Windows 下的专属子目录路径）。
+2. 停止 AstrBot，把插件配置、`bridge.sqlite3`、`references.sqlite3` 和 `setup.json` 一起迁到 Windows，保持平台实例 ID 与用户账号配置不变。建议先用在线备份脚本生成快照；直接复制时须停机并完整带上尚存的 SQLite 侧文件。0.5.0 部署可先在 Linux 升级并核验迁移，再按单主库迁移。
 3. 如果继续连接原来的 Hindsight，保留配置中的 `service_id` 和密钥；若 API 地址有变化，在配置文件中更新 `api_url` 并把整数 `service_address_revision` 加 1。
 4. 启动 AstrBot 后，在 **插件设置 → Hindsight 服务连接** 选择 **连接已有服务** 测试并保存地址，核对现有用户和记忆库是否正常。

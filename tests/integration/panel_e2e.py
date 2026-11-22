@@ -70,7 +70,7 @@ async def verify_panel(acceptance, page, context, frame, scope):
     await frame.locator("#backup-guide").click()
     assert await frame.locator("#backup-dialog").is_visible()
     backup_command = await frame.locator("#backup-command").input_value()
-    assert "scripts/backup.py" in backup_command and "--latest-control" in backup_command
+    assert "scripts/backup.py" in backup_command and "--data-dir" in backup_command and "--latest-control" not in backup_command
     assert (await frame.locator("#backup-doc-url").input_value()).endswith("/docs/DATA-MAINTENANCE.md")
     await context.grant_permissions(["clipboard-read", "clipboard-write"], origin=acceptance.dashboard)
     await frame.locator('[data-copy="backup-command"]').click()

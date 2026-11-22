@@ -31,10 +31,10 @@
     "hint": "同一服务搬迁地址时递增此值，步骤见备份与恢复指南。新安装保持默认。"
   },
   "control_state_dir": {
-    "description": "身份与删除记录存放目录",
+    "description": "0.5.0 旧控制目录",
     "type": "string",
     "default": "",
-    "hint": "留空使用 data/plugin_data/astrbot_plugin_hindsight_bridge_control；自定义绝对路径只能位于此专属目录内，符号链接不能指向外部。旧外部目录须按备份与恢复指南停机迁移。恢复业务备份时保留最新控制数据。"
+    "hint": "仅用于从 0.5.0 迁移时定位 control.sqlite3；留空使用旧默认目录。迁移后所有状态保存于 bridge.sqlite3，不再运行独立控制库。"
   },
   "agent_id": {
     "description": "记忆归属识别码（Agent ID）",
